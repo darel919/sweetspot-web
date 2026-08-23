@@ -3,6 +3,12 @@
   "name": "sweetspot",
   "main": "worker/index.ts",
   "compatibility_date": "2026-08-01",
+  "routes": [
+    {
+      "pattern": "sweetspot.darelisme.my.id",
+      "custom_domain": true
+    }
+  ],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
