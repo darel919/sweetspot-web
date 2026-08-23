@@ -1,7 +1,8 @@
 # SweetSpot wire protocol v1
 
-Single source of truth for every message exchanged between the browser
-dashboard (`client`) and the Android TV (`device`) through the relay.
+Transport-agnostic message contract between the browser dashboard (`client`)
+and the Android TV (`device`). Transport details live in
+[TRANSPORT.md](./TRANSPORT.md) (HTTP mailbox on Cloudflare).
 
 ## Envelope
 
@@ -19,65 +20,29 @@ dashboard (`client`) and the Android TV (`device`) through the relay.
 Rules:
 
 - Unknown optional fields must be ignored.
-- Unknown `type` values get a `session.error` reply with `code: "unknown_type"`.
-- Wrong `v` gets `session.error` with `code: "version_mismatch"`.
-- Payloads above `MAX_PAYLOAD_BYTES` (16 KiB) are rejected with
-  `session.error` / `"payload_too_large"` and the connection is closed.
-- `ping`/`pong` carry no payload.
+- Unknown `type` values are rejected by the mailbox with `unknown_type`.
+- Payloads above `MAX_PAYLOAD_BYTES` (16 KiB) are rejected.
+- `ping`/`pong` carry no payload. Either side may ping; the receiver must pong.
 
-## Session / transport
+## Message types
 
-| Type | Direction | Payload |
-| --- | --- | --- |
-| `session.hello` | both, first message after open | `{ role: "device" \| "client", room: string }` |
-| `session.welcome` | relay -> peer | `{ room, peers: { deviceOnline: boolean, clients: number } }` |
-| `session.peerJoined` | relay -> peers | `{ role }` |
-| `session.peerLeft` | relay -> peers | `{ role }` |
-| `session.error` | relay -> peer | `{ code: string, message?: string }` |
-| `ping` / `pong` | both | none |
+Session-scoped types from the earlier WebSocket relay (`session.hello`,
+`session.welcome`, `session.peerJoined/Left`, `session.error`) are no longer
+routed; presence is derived from polling activity.
 
-Room naming: `pair:<normalized pair code>`. Codes normalize to uppercase with
-dashes stripped so `7k4m-p2wx` and `7K4MP2WX` join one room. The relay never
-validates codes against a registry; it only enforces format and isolation.
+Device-targeted (client -> device): `state.get`, `engine.enable`,
+`engine.bypass`, `engine.setBands`, `engine.applyPreset`, `profile.list`,
+`profile.save`, `profile.load`, `profile.delete`, `calibration.get`,
+`calibration.apply`, `calibration.reset`, `measurement.prepare`,
+`measurement.playSweep`, `measurement.abort`.
 
-## Device state
-
-| Type | Direction | Payload |
-| --- | --- | --- |
-| `state.get` | client -> device | `{}` |
-| `state.snapshot` | device -> clients | see below |
-| `state.changed` | device -> clients | partial snapshot fields |
-
-Snapshot shape (canonical, no Android objects):
-
-```jsonc
-{
-  "device": { "id": "tv_...", "name": "Living Room TV", "appVersion": "0.2.0" },
-  "engine": { "enabled": true, "hasControl": true, "activePreset": 1, "presetName": "Flat" },
-  "userEq": { "bandsDb": [], "frequenciesHz": [], "minDb": -15, "maxDb": 15 },
-  "calibration": { "active": false, "bandsDb": [], "frequenciesHz": [] },
-  "profiles": [],
-  "capabilities": { "channels": 2, "calibrationBandCount": 64, "userBandCount": 24, "supportsSweep": true }
-}
-```
-
-## Engine / profiles / calibration (routed client -> device)
-
-`engine.enable`, `engine.bypass`, `engine.setBands`, `engine.applyPreset`,
-`profile.list`, `profile.save`, `profile.load`, `profile.delete`,
-`calibration.get`, `calibration.apply`, `calibration.reset`.
-
-Device answers each with a `replyTo`-tagged response or `session.error`.
-These types are declared now so the envelope validation accepts them; the
-Android side implements them in later milestones.
-
-## Measurement (later phases)
-
-`measurement.prepare`, `measurement.ready`, `measurement.playSweep`,
-`measurement.started`, `measurement.finished`, `measurement.abort`,
+Device-published (device -> clients): `state.snapshot`, `state.changed`,
+`measurement.ready`, `measurement.started`, `measurement.finished`,
 `measurement.error`.
 
-## Diagnostics (dev builds only)
+Diagnostics (dev builds only): `diagnostics.deviceInfo`, `diagnostics.probe`.
 
-`diagnostics.deviceInfo`, `diagnostics.probe`. Never expose shell-like or
-arbitrary command surfaces through these.
+## State snapshot
+
+Canonical shape in `protocol.ts` (`StateSnapshot`). The TV answers
+`state.get` with a `state.snapshot` carrying `replyTo`.
