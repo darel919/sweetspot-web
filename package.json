@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "nuxt dev",
     "generate": "nuxt generate",
-    "deploy": "nuxt generate && wrangler deploy"
+    "deploy": "nuxt generate && bunx wrangler deploy"
   },
   "type": "module"
 }
