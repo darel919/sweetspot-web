@@ -2,14 +2,13 @@ import { onScopeDispose, readonly, ref, shallowRef } from 'vue'
 import {
   PROTOCOL_VERSION,
   type Envelope,
-  type HelloPayload,
   type Role,
 } from '#shared/types/protocol'
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected'
 
-const HEARTBEAT_INTERVAL_MS = 20_000
-const MAX_MISSED_PONGS = 2
+const CLIENT_POLL_MS = 1200
+const DEVICE_TTL_MS = 15_000
 
 let messageCounter = 0
 
@@ -17,30 +16,33 @@ function nextMessageId(): string {
   return `msg_${Date.now().toString(36)}_${(messageCounter++).toString(36)}`
 }
 
+function roomUrl(code: string, action: string): string {
+  return `/api/room/${encodeURIComponent(code)}/${action}`
+}
+
 /**
- * Direct same-origin WebSocket to the TV (the page itself is served by the TV).
- * role "client" joins the room advertised in the QR code; the TV owns the room.
+ * Polling client for the phone/laptop dashboard.
+ * Posts commands and polls device-published messages from the room mailbox.
+ * No persistent connection: plain fetch works everywhere, including iOS Safari.
  */
 export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   const status = ref<ConnectionState>('disconnected')
+  const deviceOnline = ref(false)
   const lastMessage = shallowRef<Envelope | null>(null)
-  const debugLog = shallowRef<Array<{ at: number; direction: 'in' | 'out' | 'sys'; text: string }>>([])
+  const debugLog = shallowRef<Array<{ at: number; direction: 'in' | 'out'; text: string }>>([])
 
-  let ws: WebSocket | null = null
-  let reconnectAttempt = 0
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  let missedPongs = 0
   let disposed = false
+  let pollTimer: ReturnType<typeof setTimeout> | null = null
+  let since = 0
 
   const handlers = new Set<(env: Envelope) => void>()
 
-  function log(direction: 'in' | 'out' | 'sys', text: string) {
+  function log(direction: 'in' | 'out', text: string) {
     debugLog.value = [...debugLog.value.slice(-99), { at: Date.now(), direction, text }]
   }
 
-  function send(type: string, payload: unknown = {}, replyTo?: string): string {
-    const env: Envelope = {
+  function makeEnvelope(type: string, payload: unknown, replyTo?: string): Envelope {
+    return {
       v: PROTOCOL_VERSION,
       id: nextMessageId(),
       type,
@@ -48,7 +50,25 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       payload,
       ...(replyTo ? { replyTo } : {}),
     }
-    ws?.send(JSON.stringify(env))
+  }
+
+  async function post(env: Envelope): Promise<boolean> {
+    try {
+      const res = await fetch(roomUrl(pairCode(), role === 'client' ? 'client' : 'device'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(env),
+      })
+      return res.ok
+    } catch {
+      return false
+    }
+  }
+
+  function send(type: string, payload: unknown = {}, replyTo?: string): string {
+    const env = makeEnvelope(type, payload, replyTo)
+    log('out', JSON.stringify(env))
+    void post(env)
     return env.id
   }
 
@@ -68,87 +88,49 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     return () => handlers.delete(handler)
   }
 
-  function clearTimers() {
-    if (heartbeatTimer) clearInterval(heartbeatTimer)
-    if (reconnectTimer) clearTimeout(reconnectTimer)
-    heartbeatTimer = null
-    reconnectTimer = null
-  }
-
-  function scheduleReconnect() {
+  async function pollOnce() {
     if (disposed) return
-    status.value = 'connecting'
-    const delay = Math.min(1000 * 2 ** reconnectAttempt, 15_000) * (0.5 + Math.random() * 0.5)
-    reconnectTimer = setTimeout(connect, delay)
-    reconnectAttempt++
-  }
-
-  function startHeartbeat() {
-    missedPongs = 0
-    heartbeatTimer = setInterval(() => {
-      missedPongs++
-      if (missedPongs > MAX_MISSED_PONGS) {
-        ws?.close()
-        return
+    let res: Response | null = null
+    try {
+      res = await fetch(roomUrl(pairCode(), `state?since=${since}`))
+    } catch {
+      /* network hiccup; keep trying */
+    }
+    if (!disposed && res && res.ok) {
+      status.value = 'connected'
+      const data = (await res.json()) as { deviceOnline: boolean; messages: Envelope[] }
+      const wasOnline = deviceOnline.value
+      deviceOnline.value = data.deviceOnline
+      for (const env of data.messages) {
+        since = Math.max(since, Date.now() - 1)
+        lastMessage.value = env
+        log('in', JSON.stringify(env))
+        if (env.type === 'pong') continue
+        for (const handler of handlers) handler(env)
       }
-      send('ping')
-    }, HEARTBEAT_INTERVAL_MS)
+      if (!wasOnline && deviceOnline.value) {
+        // Fresh presence: request a snapshot so late-joining UIs fill in.
+        void send('state.get')
+      }
+    } else if (!disposed) {
+      status.value = 'connecting'
+    }
+    if (!disposed) {
+      pollTimer = setTimeout(pollOnce, CLIENT_POLL_MS)
+    }
   }
 
   function connect() {
     if (disposed || !pairCode()) return
-    clearTimers()
+    if (pollTimer !== null) return
     status.value = 'connecting'
-
-    // Same origin: the TV serves this page.
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${proto}//${location.host}/api/ws?room=${encodeURIComponent(pairCode())}&role=${role}`
-    try {
-      ws = new WebSocket(url)
-    } catch {
-      scheduleReconnect()
-      return
-    }
-
-    ws.addEventListener('open', () => {
-      reconnectAttempt = 0
-      const hello: HelloPayload = { role, room: pairCode() }
-      send('session.hello', hello)
-    })
-
-    ws.addEventListener('message', (event) => {
-      let env: Partial<Envelope>
-      try {
-        env = JSON.parse(typeof event.data === 'string' ? event.data : '')
-      } catch {
-        return
-      }
-      if (typeof env.type !== 'string') return
-      if (env.type === 'pong') missedPongs = 0
-
-      const full = { ...env } as Envelope
-      lastMessage.value = full
-
-      if (env.type === 'session.welcome') {
-        status.value = 'connected'
-        startHeartbeat()
-      }
-      for (const handler of handlers) handler(full)
-    })
-
-    ws.addEventListener('close', () => {
-      status.value = 'disconnected'
-      clearTimers()
-      scheduleReconnect()
-    })
-    ws.addEventListener('error', () => ws?.close())
+    void pollOnce()
   }
 
   function disconnect() {
     disposed = true
-    clearTimers()
-    ws?.close()
-    ws = null
+    if (pollTimer) clearTimeout(pollTimer)
+    pollTimer = null
     status.value = 'disconnected'
   }
 
@@ -156,6 +138,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
 
   return {
     status: readonly(status),
+    deviceOnline: readonly(deviceOnline),
     lastMessage,
     debugLog,
     connect,
