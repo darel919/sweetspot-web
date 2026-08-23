@@ -4,12 +4,11 @@ import {
   type Envelope,
   type HelloPayload,
   type Role,
-  type WelcomePayload,
 } from '#shared/types/protocol'
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected'
 
-const HEARTBEAT_INTERVAL_MS = 25_000
+const HEARTBEAT_INTERVAL_MS = 20_000
 const MAX_MISSED_PONGS = 2
 
 let messageCounter = 0
@@ -18,9 +17,12 @@ function nextMessageId(): string {
   return `msg_${Date.now().toString(36)}_${(messageCounter++).toString(36)}`
 }
 
+/**
+ * Direct same-origin WebSocket to the TV (the page itself is served by the TV).
+ * role "client" joins the room advertised in the QR code; the TV owns the room.
+ */
 export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   const status = ref<ConnectionState>('disconnected')
-  const deviceOnline = ref(false)
   const lastMessage = shallowRef<Envelope | null>(null)
   const debugLog = shallowRef<Array<{ at: number; direction: 'in' | 'out' | 'sys'; text: string }>>([])
 
@@ -34,7 +36,6 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   const handlers = new Set<(env: Envelope) => void>()
 
   function log(direction: 'in' | 'out' | 'sys', text: string) {
-    if (!import.meta.dev) return
     debugLog.value = [...debugLog.value.slice(-99), { at: Date.now(), direction, text }]
   }
 
@@ -48,7 +49,6 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       ...(replyTo ? { replyTo } : {}),
     }
     ws?.send(JSON.stringify(env))
-    log('out', JSON.stringify(env))
     return env.id
   }
 
@@ -78,9 +78,8 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   function scheduleReconnect() {
     if (disposed) return
     status.value = 'connecting'
-    const delay = Math.min(1000 * 2 ** reconnectAttempt, 30_000)
-    const jitter = delay * (0.5 + Math.random() * 0.5)
-    reconnectTimer = setTimeout(connect, jitter)
+    const delay = Math.min(1000 * 2 ** reconnectAttempt, 15_000) * (0.5 + Math.random() * 0.5)
+    reconnectTimer = setTimeout(connect, delay)
     reconnectAttempt++
   }
 
@@ -101,8 +100,9 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     clearTimers()
     status.value = 'connecting'
 
+    // Same origin: the TV serves this page.
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${proto}//${location.host}/api/ws`
+    const url = `${proto}//${location.host}/api/ws?room=${encodeURIComponent(pairCode())}&role=${role}`
     try {
       ws = new WebSocket(url)
     } catch {
@@ -125,26 +125,22 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       }
       if (typeof env.type !== 'string') return
       if (env.type === 'pong') missedPongs = 0
-      if (env.type === 'ping') send('pong')
 
       const full = { ...env } as Envelope
       lastMessage.value = full
-      log('in', JSON.stringify(full))
 
       if (env.type === 'session.welcome') {
         status.value = 'connected'
         startHeartbeat()
-        const peers = (full.payload as WelcomePayload)?.peers
-        deviceOnline.value = !!peers?.deviceOnline
-      }
-      if (env.type === 'session.peerLeft') deviceOnline.value = false
-      if (env.type === 'session.peerJoined') {
-        if ((env.payload as { role?: Role })?.role === 'device') deviceOnline.value = true
       }
       for (const handler of handlers) handler(full)
     })
 
-    ws.addEventListener('close', () => scheduleReconnect())
+    ws.addEventListener('close', () => {
+      status.value = 'disconnected'
+      clearTimers()
+      scheduleReconnect()
+    })
     ws.addEventListener('error', () => ws?.close())
   }
 
@@ -160,7 +156,6 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
 
   return {
     status: readonly(status),
-    deviceOnline: readonly(deviceOnline),
     lastMessage,
     debugLog,
     connect,

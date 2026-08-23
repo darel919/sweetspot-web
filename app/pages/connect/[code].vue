@@ -15,8 +15,6 @@
         <dl>
           <dt>Room</dt>
           <dd>{{ room }}</dd>
-          <dt>TV status</dt>
-          <dd>{{ deviceOnline ? 'online' : 'offline' }}</dd>
           <dt>Last message</dt>
           <dd><pre class="last-message">{{ lastMessageText }}</pre></dd>
         </dl>
@@ -29,12 +27,11 @@
 
       <section v-else class="card">
         <h2>State snapshot</h2>
-        <p v-if="status === 'connected' && !deviceOnline">Waiting for the TV to join this room. Open SweetSpot on the TV.</p>
-        <p v-else-if="status === 'connected'">
-          TV is online.
+        <p v-if="status === 'connected'">
+          Connected to TV.
           <button @click="getState">Request state</button>
         </p>
-        <p v-else>Connecting...</p>
+        <p v-else>Connecting to TV...</p>
       </section>
 
       <details v-if="debugLog.length" class="card">
@@ -57,7 +54,7 @@ const room = computed(() => rawCode.value.toUpperCase())
 
 const connection = useSweetSpotConnection('client', () => rawCode.value)
 
-const { status, deviceOnline, lastMessage, debugLog, connect, request, onMessage } = connection
+const { status, lastMessage, debugLog, connect, request, onMessage } = connection
 
 const snapshot = ref<StateSnapshot | null>(null)
 const lastMessageText = computed(() => (lastMessage.value ? JSON.stringify(lastMessage.value) : ''))

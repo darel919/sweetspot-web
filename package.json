@@ -1,6 +1,10 @@
 {
   "name": "sweetspot-web",
-  "type": "module",
+  "dependencies": {
+    "nuxt": "^4.5.2",
+    "vue": "^3.5.41",
+    "vue-router": "^5.2.0"
+  },
   "private": true,
   "scripts": {
     "build": "nuxt build",
@@ -9,13 +13,5 @@
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare"
   },
-  "dependencies": {
-    "nuxt": "^4.5.2",
-    "vue": "^3.5.41",
-    "vue-router": "^5.2.0",
-    "ws": "^8.21.3"
-  },
-  "devDependencies": {
-    "@types/ws": "^8.18.1"
-  }
+  "type": "module"
 }
