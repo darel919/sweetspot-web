@@ -33,8 +33,52 @@
         <p v-else-if="status === 'connected'">
           TV is online.
           <button @click="getState">Request state</button>
+          <button class="secondary" :disabled="diagPending" @click="runEffectsDiagnostics">
+            {{ diagPending ? 'Diagnosing...' : 'Run effect diagnostics' }}
+          </button>
         </p>
         <p v-else>Connecting...</p>
+      </section>
+
+      <section v-if="effectsDiagnostics" class="card">
+        <h2>Effect diagnostics</h2>
+        <p v-if="effectsDiagnostics.error" class="error">Device error: {{ effectsDiagnostics.error }}</p>
+        <template v-else>
+          <h3>Platform effects ({{ effectsDiagnostics.inventory.length }})</h3>
+          <table v-if="effectsDiagnostics.inventory.length" class="fx-table">
+            <thead>
+              <tr><th>Type</th><th>Name</th><th>Mode</th><th>Vendor</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="(e, i) in effectsDiagnostics.inventory" :key="i"
+                  :class="{ vendor: e.isVendor, known: !e.isVendor }">
+                <td>{{ e.typeName }}</td>
+                <td>{{ e.name }}</td>
+                <td>{{ e.connectMode }}</td>
+                <td>{{ e.isVendor ? 'yes' : '' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else>No effects reported.</p>
+
+          <h3>Session-0 probes</h3>
+          <dl>
+            <template v-for="p in effectsDiagnostics.sessionProbes" :key="p.effectType">
+              <dt>{{ p.effectType }}</dt>
+              <dd>
+                <span v-if="!p.constructed" class="error">failed: {{ p.exception }}</span>
+                <span v-else>
+                  constructed, control={{ p.hasControl }}, enabled={{ p.enabled }}
+                  <code>{{ p.parameters }}</code>
+                </span>
+              </dd>
+            </template>
+          </dl>
+          <details>
+            <summary>Raw JSON</summary>
+            <pre class="debug-log">{{ JSON.stringify(effectsDiagnostics, null, 2) }}</pre>
+          </details>
+        </template>
       </section>
 
       <details v-if="debugLog.length" class="card">
@@ -46,7 +90,7 @@
 </template>
 
 <script setup lang="ts">
-import type { StateSnapshot } from '#shared/types/protocol'
+import type { EffectsDiagnostics, StateSnapshot } from '#shared/types/protocol'
 
 const route = useRoute()
 
@@ -60,6 +104,8 @@ const connection = useSweetSpotConnection('client', () => rawCode.value)
 const { status, deviceOnline, lastMessage, debugLog, connect, request, onMessage } = connection
 
 const snapshot = ref<StateSnapshot | null>(null)
+const effectsDiagnostics = ref<EffectsDiagnostics | null>(null)
+const diagPending = ref(false)
 const lastMessageText = computed(() => (lastMessage.value ? JSON.stringify(lastMessage.value) : ''))
 
 onMessage((env) => {
@@ -68,6 +114,18 @@ onMessage((env) => {
 
 function getState() {
   request('state.get')
+}
+
+async function runEffectsDiagnostics() {
+  if (diagPending.value) return
+  diagPending.value = true
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 30_000))
+  try {
+    const res = await Promise.race([request<EffectsDiagnostics>('diagnostics.effects'), timeout])
+    effectsDiagnostics.value = res ? (res.payload as EffectsDiagnostics) : { error: 'TV did not answer within 30s', inventory: [], sessionProbes: [] }
+  } finally {
+    diagPending.value = false
+  }
 }
 
 watchEffect(() => {
@@ -146,5 +204,32 @@ button {
   border: none;
   background: #2563eb;
   color: white;
+}
+button.secondary {
+  background: #64748b;
+  margin-left: 0.5rem;
+}
+button:disabled {
+  opacity: 0.6;
+}
+.fx-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.fx-table th,
+.fx-table td {
+  text-align: left;
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid #8883;
+}
+.fx-table tr.vendor td:first-child::after {
+  content: ' *';
+  color: #d97706;
+  font-weight: bold;
+}
+h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 0.9rem;
 }
 </style>

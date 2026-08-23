@@ -1,5 +1,5 @@
 // Long-poll wake test: device blocks on /commands; a client post must wake it instantly.
-const base = 'http://localhost:8787/api/room/TEST01'
+const base = 'https://sweetspot.darelisme.my.id/api/room/TEST01'
 
 async function j(url, opts) {
   const t0 = Date.now()

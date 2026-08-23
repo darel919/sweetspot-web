@@ -86,6 +86,30 @@ export interface DeviceCapabilities {
   supportsSweep: boolean
 }
 
+export interface EffectInventoryEntry {
+  name: string
+  typeName: string
+  typeUuid: string
+  implUuid: string
+  connectMode: string
+  isVendor: boolean
+}
+
+export interface SessionProbe {
+  effectType: string
+  constructed: boolean
+  hasControl: boolean
+  enabled: boolean
+  parameters: string
+  exception?: string | null
+}
+
+export interface EffectsDiagnostics {
+  inventory: EffectInventoryEntry[]
+  sessionProbes: SessionProbe[]
+  error?: string
+}
+
 export interface StateSnapshot {
   device: DeviceInfo
   engine: EngineState
@@ -134,6 +158,7 @@ export const KNOWN_TYPES = new Set<string>([
   'measurement.error',
   'diagnostics.deviceInfo',
   'diagnostics.probe',
+  'diagnostics.effects',
 ])
 
 export const SESSION_ONLY_TYPES = new Set<string>([
