@@ -240,29 +240,23 @@ wss.on('connection', (ws) => {
  */
 export default defineEventHandler((event) => {
   const req = event.node.req
-  if ((req.headers.upgrade ?? '').toLowerCase() !== 'websocket') {
-    throw createError({ statusCode: 426, statusMessage: 'Upgrade Required' })
-  }
-
   const ctxStore = (globalThis as Record<symbol, unknown>)[Symbol.for('@vercel/request-context')] as
     | { get?: () => { upgradeWebSocket?: () => { req: import('node:http').IncomingMessage; socket: import('node:stream').Duplex; head: Buffer } | null } }
     | undefined
   const ctx = typeof ctxStore?.get === 'function' ? ctxStore.get() : null
-  const upgrade = typeof ctx?.upgradeWebSocket === 'function' ? ctx.upgradeWebSocket() : null
 
-  if (upgrade?.req && upgrade?.socket) {
-    wss.handleUpgrade(upgrade.req, upgrade.socket, upgrade.head, (ws) => wss.emit('connection', ws, upgrade.req))
-    return new Promise<void>(() => {})
+  if (typeof ctx?.upgradeWebSocket !== 'function') {
+    throw createError({
+      statusCode: 501,
+      statusMessage: 'WebSocket upgrade not supported by this runtime',
+    })
   }
 
-  if (import.meta.dev && req.socket) {
-    wss.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => wss.emit('connection', ws, req))
-    return new Promise<void>(() => {})
+  const upgrade = ctx.upgradeWebSocket()
+  if (!upgrade?.req || !upgrade?.socket) {
+    throw createError({ statusCode: 502, statusMessage: 'Upgrade primitive returned no socket' })
   }
 
-  throw createError({
-    statusCode: 502,
-    statusMessage: 'WebSocket upgrade unavailable in this runtime',
-    message: `runtime=${import.meta.dev ? 'dev' : 'prod'} hasUpgradeCtx=${!!ctx?.upgradeWebSocket} hasNodeSocket=${!!(req as { socket?: unknown }).socket}`,
-  })
+  wss.handleUpgrade(upgrade.req, upgrade.socket, upgrade.head, (ws) => wss.emit('connection', ws, upgrade.req))
+  return new Promise<void>(() => {})
 })
