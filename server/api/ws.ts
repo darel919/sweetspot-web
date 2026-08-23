@@ -1,4 +1,5 @@
-import { defineWebSocketHandler, type Peer } from 'h3'
+import { defineEventHandler, createError } from 'h3'
+import { WebSocketServer, type WebSocket } from 'ws'
 import {
   MAX_PAYLOAD_BYTES,
   KNOWN_TYPES,
@@ -8,74 +9,26 @@ import {
   pairRoom,
   type Envelope,
   type ErrorPayload,
-  type PeerEventPayload,
   type Role,
-  type WelcomePayload,
 } from '../../shared/types/protocol'
 
 const RATE_LIMIT_WINDOW_MS = 10_000
 const RATE_LIMIT_MAX_MESSAGES = 60
 
 interface Room {
-  name: string
-  device?: Peer
-  clients: Set<Peer>
+  device?: WebSocket
+  clients: Set<WebSocket>
 }
 
-interface PeerContext {
+interface ConnContext {
   role: Role
   room: string
   helloDone: boolean
-  messageTimestamps: number[]
+  stamps: number[]
 }
 
 const rooms = new Map<string, Room>()
-
-function getRoom(name: string): Room {
-  let room = rooms.get(name)
-  if (!room) {
-    room = { name, clients: new Set() }
-    rooms.set(name, room)
-  }
-  return room
-}
-
-function dropPeer(peer: Peer<PeerContext>) {
-  const room = rooms.get(peer.context.room)
-  if (!room) return
-  if (peer.context.role === 'device') {
-    if (room.device === peer) room.device = undefined
-  } else {
-    room.clients.delete(peer)
-  }
-  if (!room.device && room.clients.size === 0) rooms.delete(peer.context.room)
-  broadcastRelayEvent(room, peer, 'session.peerLeft')
-}
-
-function broadcastRelayEvent(
-  room: Room,
-  from: Peer,
-  type: 'session.peerJoined' | 'session.peerLeft',
-) {
-  const data = JSON.stringify({
-    v: 1,
-    id: relayId(),
-    type,
-    ts: Date.now(),
-    payload: { role: from.context.role } satisfies PeerEventPayload,
-  })
-  for (const client of room.clients) {
-    if (client !== from) client.send(data)
-  }
-  if (room.device && room.device !== from) room.device.send(data)
-}
-
-function welcomeState(room: Room): WelcomePayload {
-  return {
-    room: room.name,
-    peers: { deviceOnline: !!room.device, clients: room.clients.size },
-  }
-}
+const contexts = new WeakMap<WebSocket, ConnContext>()
 
 let relayCounter = 0
 
@@ -83,154 +36,227 @@ function relayId(): string {
   return `relay_${Date.now().toString(36)}_${(relayCounter++).toString(36)}`
 }
 
-function sendError(peer: Peer<PeerContext>, code: ErrorPayload['code'], message?: string) {
-  peer.send(
-    JSON.stringify({
+function sendError(ws: WebSocket, code: ErrorPayload['code'], message?: string) {
+  ws.send(JSON.stringify({
+    v: 1,
+    id: relayId(),
+    type: 'session.error',
+    ts: Date.now(),
+    payload: { code, message },
+  }))
+}
+
+function welcomePayload(room: string, r: Room) {
+  return {
+    room,
+    peers: { deviceOnline: !!r.device, clients: r.clients.size },
+  }
+}
+
+function broadcastPeerEvent(room: Room, from: WebSocket, type: 'session.peerJoined' | 'session.peerLeft') {
+  const data = JSON.stringify({
+    v: 1,
+    id: relayId(),
+    type,
+    ts: Date.now(),
+    payload: { role: contexts.get(from)?.role ?? 'client' },
+  })
+  for (const client of room.clients) {
+    if (client !== from && client.readyState === WebSocket.OPEN) client.send(data)
+  }
+  if (room.device && room.device !== from && room.device.readyState === WebSocket.OPEN) {
+    room.device.send(data)
+  }
+}
+
+function dropConn(ws: WebSocket) {
+  const ctx = contexts.get(ws)
+  if (!ctx) return
+  const room = rooms.get(ctx.room)
+  if (room) {
+    if (ctx.role === 'device') {
+      if (room.device === ws) room.device = undefined
+    } else {
+      room.clients.delete(ws)
+    }
+    if (!room.device && room.clients.size === 0) rooms.delete(ctx.room)
+    broadcastPeerEvent(room, ws, 'session.peerLeft')
+  }
+  contexts.delete(ws)
+}
+
+function rateLimited(ctx: ConnContext): boolean {
+  const now = Date.now()
+  while (ctx.stamps.length && now - ctx.stamps[0] > RATE_LIMIT_WINDOW_MS) ctx.stamps.shift()
+  ctx.stamps.push(now)
+  return ctx.stamps.length > RATE_LIMIT_MAX_MESSAGES
+}
+
+function handleMessage(ws: WebSocket, text: string) {
+  const ctx = contexts.get(ws)
+  if (!ctx) return
+
+  if (rateLimited(ctx)) {
+    sendError(ws, 'rate_limited', 'too many messages')
+    ws.close()
+    return
+  }
+
+  if (text.length > MAX_PAYLOAD_BYTES) {
+    sendError(ws, 'payload_too_large')
+    ws.close()
+    return
+  }
+
+  let env: Partial<Envelope>
+  try {
+    env = JSON.parse(text)
+  } catch {
+    sendError(ws, 'bad_envelope', 'message is not valid JSON')
+    return
+  }
+
+  if (env.v !== 1 || typeof env.id !== 'string' || typeof env.type !== 'string') {
+    sendError(ws, 'bad_envelope', 'envelope requires v=1, id and type strings')
+    return
+  }
+
+  if (env.type === 'ping' || env.type === 'pong') {
+    if (env.type === 'ping') ws.send(JSON.stringify({ ...env, type: 'pong', ts: Date.now() }))
+    return
+  }
+
+  if (!KNOWN_TYPES.has(env.type)) {
+    sendError(ws, 'unknown_type', `unsupported message type "${env.type}"`)
+    return
+  }
+
+  if (!ctx.helloDone) {
+    if (env.type !== 'session.hello') {
+      sendError(ws, 'bad_envelope', 'first message must be session.hello')
+      ws.close()
+      return
+    }
+    const payload = env.payload as { role?: Role; room?: string } | undefined
+    const role = payload?.role
+    const roomName = payload?.room
+    if ((role !== 'device' && role !== 'client') || typeof roomName !== 'string' || !isValidPairCode(roomName)) {
+      sendError(ws, 'bad_envelope', 'session.hello requires role device|client and a valid pair-code room')
+      ws.close()
+      return
+    }
+    const roomKey = pairRoom(roomName)
+    const room = rooms.get(roomKey) ?? (() => {
+      const r = { clients: new Set<WebSocket>() }
+      rooms.set(roomKey, r)
+      return r
+    })()
+
+    ctx.role = role
+    ctx.room = roomKey
+
+    if (role === 'device') {
+      if (room.device) {
+        sendError(ws, 'bad_envelope', 'another device already owns this room')
+        ws.close()
+        return
+      }
+      room.device = ws
+    } else {
+      room.clients.add(ws)
+    }
+
+    ctx.helloDone = true
+    ws.send(JSON.stringify({
       v: 1,
       id: relayId(),
-      type: 'session.error',
+      type: 'session.welcome',
       ts: Date.now(),
-      payload: { code, message },
-    }),
-  )
+      payload: welcomePayload(roomKey, room),
+    }))
+    broadcastPeerEvent(room, ws, 'session.peerJoined')
+    return
+  }
+
+  if (SESSION_ONLY_TYPES.has(env.type)) {
+    sendError(ws, 'bad_envelope', `"${env.type}" is only allowed once after connect`)
+    return
+  }
+
+  if (isDeviceTargeted(env.type)) {
+    if (ctx.role !== 'client') {
+      sendError(ws, 'bad_envelope', `only clients may send "${env.type}"`)
+      return
+    }
+    const room = rooms.get(ctx.room)
+    if (!room?.device || room.device.readyState !== WebSocket.OPEN) {
+      sendError(ws, 'not_in_room', 'no device online in this room')
+      return
+    }
+    room.device.send(text)
+    return
+  }
+
+  const room = rooms.get(ctx.room)
+  if (!room) {
+    sendError(ws, 'not_in_room', 'peer is not in a room')
+    return
+  }
+  if (ctx.role === 'device') {
+    for (const client of room.clients) {
+      if (client.readyState === WebSocket.OPEN) client.send(text)
+    }
+  } else if (room.device && room.device.readyState === WebSocket.OPEN) {
+    room.device.send(text)
+  }
 }
 
-function rateLimited(peer: Peer<PeerContext>): boolean {
-  const now = Date.now()
-  const stamps = peer.context.messageTimestamps
-  while (stamps.length && now - stamps[0] > RATE_LIMIT_WINDOW_MS) stamps.shift()
-  stamps.push(now)
-  return stamps.length > RATE_LIMIT_MAX_MESSAGES
-}
+const wss = new WebSocketServer({
+  noServer: true,
+  handleProtocols: () => false,
+})
 
-export default defineWebSocketHandler({
-  open(peer) {
-    const ctx = (peer.context ??= {} as PeerContext)
-    ctx.role = 'client'
-    ctx.room = ''
-    ctx.helloDone = false
-    ctx.messageTimestamps = []
-  },
-
-  message(rawPeer, rawMessage) {
-    const peer = rawPeer as Peer<PeerContext>
-
-    if (rateLimited(peer)) {
-      sendError(peer, 'rate_limited', 'too many messages')
-      peer.close()
+wss.on('connection', (ws) => {
+  contexts.set(ws, { role: 'client', room: '', helloDone: false, stamps: [] })
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) {
+      sendError(ws, 'bad_envelope', 'binary frames are not accepted')
+      ws.close()
       return
     }
+    handleMessage(ws, data.toString())
+  })
+  ws.on('close', () => dropConn(ws))
+  ws.on('error', () => dropConn(ws))
+})
 
-    let text: string
-    try {
-      text = rawMessage.text()
-    } catch {
-      sendError(peer, 'bad_envelope', 'binary frames are not accepted')
-      peer.close()
-      return
-    }
+/**
+ * Manual WebSocket upgrade endpoint.
+ *
+ * Works on Vercel Functions (raw socket comes from the @vercel/request-context
+ * upgrade primitive) and on plain Node (raw socket comes straight off the h3
+ * event). Nitro's own experimental websocket support is intentionally NOT used;
+ * its Vercel preset gained upgrade support only in Nitro v3.
+ */
+export default defineEventHandler((event) => {
+  const req = event.node.req
+  if ((req.headers.upgrade ?? '').toLowerCase() !== 'websocket') {
+    throw createError({ statusCode: 426, statusMessage: 'Upgrade Required' })
+  }
 
-    if (text.length > MAX_PAYLOAD_BYTES) {
-      sendError(peer, 'payload_too_large')
-      peer.close()
-      return
-    }
+  const ctxGlobal = (globalThis as Record<symbol, unknown>)[Symbol.for('@vercel/request-context')] as
+    | { get?: () => { upgradeWebSocket?: () => { req: import('node:http').IncomingMessage; socket: import('node:stream').Duplex; head: Buffer } | null } }
+    | undefined
+  const upgrade = typeof ctxGlobal?.get === 'function' ? ctxGlobal.get()?.upgradeWebSocket?.() : null
 
-    let env: Partial<Envelope>
-    try {
-      env = JSON.parse(text)
-    } catch {
-      sendError(peer, 'bad_envelope', 'message is not valid JSON')
-      return
-    }
+  if (upgrade?.req && upgrade?.socket) {
+    wss.handleUpgrade(upgrade.req, upgrade.socket, upgrade.head, (ws) => wss.emit('connection', ws, upgrade.req))
+  } else if (req.socket) {
+    wss.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => wss.emit('connection', ws, req))
+  } else {
+    throw createError({ statusCode: 502, statusMessage: 'Cannot obtain raw socket for WebSocket upgrade' })
+  }
 
-    if (env.v !== 1 || typeof env.id !== 'string' || typeof env.type !== 'string') {
-      sendError(peer, 'bad_envelope', 'envelope requires v=1, id and type strings')
-      return
-    }
-
-    if (env.type === 'ping' || env.type === 'pong') {
-      if (env.type === 'ping') peer.send(JSON.stringify({ ...env, type: 'pong', ts: Date.now() }))
-      return
-    }
-
-    if (!KNOWN_TYPES.has(env.type)) {
-      sendError(peer, 'unknown_type', `unsupported message type "${env.type}"`)
-      return
-    }
-
-    if (!peer.context.helloDone) {
-      if (env.type !== 'session.hello') {
-        sendError(peer, 'bad_envelope', 'first message must be session.hello')
-        peer.close()
-        return
-      }
-      const payload = env.payload as { role?: Role; room?: string } | undefined
-      const role = payload?.role
-      const roomName = payload?.room
-      if ((role !== 'device' && role !== 'client') || typeof roomName !== 'string' || !isValidPairCode(roomName)) {
-        sendError(peer, 'bad_envelope', 'session.hello requires role device|client and a valid pair-code room')
-        peer.close()
-        return
-      }
-      const room = getRoom(pairRoom(roomName))
-      peer.context.role = role
-      peer.context.room = pairRoom(roomName)
-
-      if (role === 'device') {
-        if (room.device) {
-          sendError(peer, 'bad_envelope', 'another device already owns this room')
-          peer.close()
-          return
-        }
-        room.device = peer
-      } else {
-        room.clients.add(peer)
-      }
-
-      peer.context.helloDone = true
-      peer.send(JSON.stringify({ v: 1, id: relayId(), type: 'session.welcome', ts: Date.now(), payload: welcomeState(room) }))
-      broadcastRelayEvent(room, peer, 'session.peerJoined')
-      return
-    }
-
-    if (SESSION_ONLY_TYPES.has(env.type)) {
-      sendError(peer, 'bad_envelope', `"${env.type}" is only allowed once after connect`)
-      return
-    }
-
-    if (isDeviceTargeted(env.type)) {
-      if (peer.context.role !== 'client') {
-        sendError(peer, 'bad_envelope', `only clients may send "${env.type}"`)
-        return
-      }
-      const room = rooms.get(peer.context.room)
-      if (!room?.device) {
-        sendError(peer, 'not_in_room', 'no device online in this room')
-        return
-      }
-      room.device.send(text)
-      return
-    }
-
-    const room = rooms.get(peer.context.room)
-    if (!room) {
-      sendError(peer, 'not_in_room', 'peer is not in a room')
-      return
-    }
-
-    if (peer.context.role === 'device') {
-      for (const client of room.clients) client.send(text)
-    } else {
-      if (room.device) room.device.send(text)
-    }
-  },
-
-  close(peer) {
-    dropPeer(peer as Peer<PeerContext>)
-  },
-
-  error(peer) {
-    dropPeer(peer as Peer<PeerContext>)
-  },
+  // Never resolve: the socket now speaks WebSocket; h3 must not write to it.
+  return new Promise<void>(() => {})
 })
