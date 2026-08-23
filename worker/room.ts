@@ -10,6 +10,7 @@ import {
 } from '../shared/types/protocol'
 
 const DEVICE_TTL_MS = 15_000
+const CLIENT_TTL_MS = 10_000
 const MAX_QUEUE = 32
 const RATE_WINDOW_MS = 10_000
 const RATE_MAX = 60
@@ -27,6 +28,7 @@ interface ConnState {
 export class RoomDO {
   state: DurableObjectState
   deviceSeenAt = 0
+  clientSeenAt = 0
   commands: Envelope[] = []
   forClients: Array<{ env: Envelope; at: number }> = []
   waiters = new Set<Waiter>()
@@ -66,6 +68,10 @@ export class RoomDO {
     return Date.now() - this.deviceSeenAt < DEVICE_TTL_MS
   }
 
+  clientOnline(): boolean {
+    return Date.now() - this.clientSeenAt < CLIENT_TTL_MS
+  }
+
   wake() {
     for (const w of this.waiters) {
       clearTimeout(w.timer)
@@ -86,12 +92,13 @@ export class RoomDO {
     if (path === '/commands' && request.method === 'GET') {
       this.deviceSeenAt = Date.now()
       const waitS = Math.min(parseFloat(url.searchParams.get('wait') ?? '9') || 9, 25)
+      const clientOnline = () => this.clientOnline()
       if (this.commands.length > 0) {
         const out = this.commands
         this.commands = []
-        return Response.json({ commands: out })
+        return Response.json({ commands: out, clientOnline: clientOnline() })
       }
-      if (waitS <= 0) return Response.json({ commands: [] })
+      if (waitS <= 0) return Response.json({ commands: [], clientOnline: clientOnline() })
       const result = await new Promise<string>((resolve) => {
         const timer = setTimeout(() => {
           this.waiters.delete(w)
@@ -100,8 +107,8 @@ export class RoomDO {
         const w: Waiter = { resolve, timer }
         this.waiters.add(w)
       })
-      if (result) return Response.json(result)
-      return Response.json({ commands: this.commands.splice(0, this.commands.length) })
+      if (result) return Response.json({ ...(JSON.parse(result) as { commands: Envelope[] }), clientOnline: clientOnline() })
+      return Response.json({ commands: this.commands.splice(0, this.commands.length), clientOnline: clientOnline() })
     }
 
     if (path === '/device' && request.method === 'POST') {
@@ -138,6 +145,7 @@ export class RoomDO {
       if (!isDeviceTargeted(v.env.type)) {
         return Response.json({ error: 'unknown_type', message: `clients may only send device-targeted types` }, { status: 400 })
       }
+      this.clientSeenAt = Date.now()
       this.commands.push(v.env)
       if (this.commands.length > MAX_QUEUE) this.commands.splice(0, this.commands.length - MAX_QUEUE)
       this.wake()
@@ -147,7 +155,7 @@ export class RoomDO {
     if (path === '/state' && request.method === 'GET') {
       const since = parseInt(url.searchParams.get('since') ?? '0') || 0
       const messages = this.forClients.filter((m) => m.at > since).map((m) => m.env)
-      return Response.json({ deviceOnline: this.deviceOnline(), messages })
+      return Response.json({ deviceOnline: this.deviceOnline(), clientOnline: this.clientOnline(), messages })
     }
 
     return new Response('not found', { status: 404 })
