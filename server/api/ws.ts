@@ -244,19 +244,25 @@ export default defineEventHandler((event) => {
     throw createError({ statusCode: 426, statusMessage: 'Upgrade Required' })
   }
 
-  const ctxGlobal = (globalThis as Record<symbol, unknown>)[Symbol.for('@vercel/request-context')] as
+  const ctxStore = (globalThis as Record<symbol, unknown>)[Symbol.for('@vercel/request-context')] as
     | { get?: () => { upgradeWebSocket?: () => { req: import('node:http').IncomingMessage; socket: import('node:stream').Duplex; head: Buffer } | null } }
     | undefined
-  const upgrade = typeof ctxGlobal?.get === 'function' ? ctxGlobal.get()?.upgradeWebSocket?.() : null
+  const ctx = typeof ctxStore?.get === 'function' ? ctxStore.get() : null
+  const upgrade = typeof ctx?.upgradeWebSocket === 'function' ? ctx.upgradeWebSocket() : null
 
   if (upgrade?.req && upgrade?.socket) {
     wss.handleUpgrade(upgrade.req, upgrade.socket, upgrade.head, (ws) => wss.emit('connection', ws, upgrade.req))
-  } else if (req.socket) {
-    wss.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => wss.emit('connection', ws, req))
-  } else {
-    throw createError({ statusCode: 502, statusMessage: 'Cannot obtain raw socket for WebSocket upgrade' })
+    return new Promise<void>(() => {})
   }
 
-  // Never resolve: the socket now speaks WebSocket; h3 must not write to it.
-  return new Promise<void>(() => {})
+  if (import.meta.dev && req.socket) {
+    wss.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => wss.emit('connection', ws, req))
+    return new Promise<void>(() => {})
+  }
+
+  throw createError({
+    statusCode: 502,
+    statusMessage: 'WebSocket upgrade unavailable in this runtime',
+    message: `runtime=${import.meta.dev ? 'dev' : 'prod'} hasUpgradeCtx=${!!ctx?.upgradeWebSocket} hasNodeSocket=${!!(req as { socket?: unknown }).socket}`,
+  })
 })
