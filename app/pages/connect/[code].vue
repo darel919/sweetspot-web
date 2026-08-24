@@ -11,6 +11,12 @@
       </div>
     </header>
 
+    <Transition name="toast">
+      <div v-if="toastMessage" class="toast" role="status" aria-live="assertive">
+        {{ toastMessage }}
+      </div>
+    </Transition>
+
     <section v-if="codeError" class="block">
       <p class="error">INVALID PAIR CODE. Scan the QR code on your TV again.</p>
     </section>
@@ -93,6 +99,71 @@
 
       <section v-if="snapshot" class="block">
         <h2 class="label">03 · Calibration</h2>
+        <h3 class="sub-label">Room measurement</h3>
+        <p class="note">
+          Follow the instructions shown on the TV. The browser captures the microphone and analyzes the sweep locally. Raw microphone audio never leaves this browser.
+        </p>
+        <div v-if="measurement.profiles.length" class="actions">
+          <label class="inline-form">
+            <span class="mini-label">microphone profile</span>
+            <select v-model="measurement.selectedProfileId" :disabled="measurementBusy">
+              <option v-for="profile in measurement.profiles" :key="profile.id" :value="profile.id">
+                {{ profile.name }}
+              </option>
+            </select>
+          </label>
+        </div>
+        <p v-if="measurement.profileError" class="error">{{ measurement.profileError }}</p>
+        <p v-else-if="!measurement.profiles.length" class="note">Loading microphone profiles…</p>
+        <p v-if="!snapshot.capabilities.supportsSweep" class="note">
+          This TV build does not advertise a target-validated sweep yet. Calibration is unavailable until the real TV output path has been tested.
+        </p>
+        <div class="actions">
+          <button
+            :disabled="!snapshot.capabilities.supportsSweep || measurementBusy"
+            @click="startMeasurement"
+          >
+            {{ measurementBusy ? measurement.message : 'Start measurement' }}
+          </button>
+          <button v-if="measurementBusy" @click="measurement.cancel">Cancel</button>
+        </div>
+        <p v-if="measurement.message" class="note">{{ measurement.message }}</p>
+
+        <dl v-if="measurement.captureInfo" class="spec">
+          <dt>sample rate</dt><dd>{{ measurement.captureInfo.settings.sampleRate ?? 'unknown' }} Hz</dd>
+          <dt>channels</dt><dd>{{ measurement.captureInfo.settings.channelCount ?? 'unknown' }}</dd>
+          <dt>echo cancellation</dt><dd>{{ settingLabel(measurement.captureInfo.settings.echoCancellation) }}</dd>
+          <dt>noise suppression</dt><dd>{{ settingLabel(measurement.captureInfo.settings.noiseSuppression) }}</dd>
+          <dt>auto gain</dt><dd>{{ settingLabel(measurement.captureInfo.settings.autoGainControl) }}</dd>
+        </dl>
+
+        <div v-if="measurement.analysis" class="response-graph">
+          <p class="mini-label">Measured response, mic-compensated relative display</p>
+          <svg viewBox="0 0 800 280" role="img" aria-label="Measured speaker response">
+            <line x1="0" y1="140" x2="800" y2="140" class="graph-zero" />
+            <polyline :points="responsePolyline(measurement.analysis.points)" class="graph-line" />
+            <text x="0" y="268" class="graph-label">20 Hz</text>
+            <text x="760" y="268" class="graph-label">20 kHz</text>
+            <text x="8" y="16" class="graph-label">+12 dB</text>
+            <text x="8" y="154" class="graph-label">0 dB</text>
+            <text x="8" y="276" class="graph-label">−12 dB</text>
+          </svg>
+          <dl class="spec">
+            <dt>signal RMS</dt><dd>{{ dbfs(measurement.analysis.diagnostics.signalRms) }}</dd>
+            <dt>peak</dt><dd>{{ dbfs(measurement.analysis.diagnostics.signalPeak) }}</dd>
+            <dt>detected offset</dt><dd>{{ measurement.analysis.diagnostics.detectionOffsetMs?.toFixed(1) ?? 'unknown' }} ms</dd>
+            <dt>clipping</dt><dd>{{ measurement.analysis.diagnostics.clipped ? 'yes' : 'no' }}</dd>
+            <dt>mic profile</dt><dd>{{ measurement.analysis.micProfile.name }}</dd>
+            <dt>profile source</dt>
+            <dd>
+              <a :href="measurement.analysis.micProfile.sourceUrl" target="_blank" rel="noreferrer">
+                {{ measurement.analysis.micProfile.dataMethod }}, {{ measurement.analysis.micProfile.sourceDate }}
+              </a>
+            </dd>
+            <dt>capture path</dt><dd>{{ measurement.analysis.micProfile.capturePath }}</dd>
+          </dl>
+        </div>
+
         <dl class="spec">
           <dt>status</dt>
           <dd>{{ snapshot.calibration.active ? 'active' : 'inactive' }}</dd>
@@ -230,7 +301,7 @@
 
       <section v-else class="block">
         <h2 class="label">05 · State</h2>
-        <p v-if="status === 'connected' && !deviceOnline" class="note">Waiting for the TV. Open SweetSpot on the TV.</p>
+        <p v-if="status === 'offline'" class="note">The TV is offline. Open SweetSpot on the TV.</p>
         <div v-else-if="status === 'connected'" class="actions">
           <button @click="getState">Request state</button>
         </div>
@@ -260,6 +331,9 @@ import type {
   ProbeDiagnostics,
   StateSnapshot,
 } from '#shared/types/protocol'
+import type { ResponsePoint } from '~/lib/audio/measurement/response'
+import { shouldNotifyOffline } from '~/composables/connectionState'
+import { onMounted, onScopeDispose } from 'vue'
 
 const route = useRoute()
 
@@ -270,6 +344,10 @@ const room = computed(() => rawCode.value.toUpperCase())
 
 const connection = useSweetSpotConnection('client', () => rawCode.value)
 const { status, deviceOnline, debugLog, connect, send, request, onMessage } = connection
+const measurement = useCalibrationSession(connection)
+const measurementBusy = computed(() => ['requesting-microphone', 'preparing', 'recording', 'analyzing', 'ending'].includes(measurement.stage.value))
+const toastMessage = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | null = null
 
 const snapshot = ref<StateSnapshot | null>(null)
 const effectsDiagnostics = ref<EffectsDiagnostics | null>(null)
@@ -287,6 +365,32 @@ const calJson = ref('')
 const calStatus = ref('')
 const calIsError = ref(false)
 const profileName = ref('')
+
+onMounted(() => {
+  void measurement.loadProfiles().catch(() => undefined)
+})
+
+function showToast(message: string) {
+  toastMessage.value = message
+  if (toastTimer !== null) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toastMessage.value = ''
+    toastTimer = null
+  }, 5000)
+}
+
+watch([status, deviceOnline], ([nextStatus, nextOnline], [previousStatus, previousOnline]) => {
+  if (shouldNotifyOffline(
+    { status: previousStatus, deviceOnline: previousOnline },
+    { status: nextStatus, deviceOnline: nextOnline },
+  )) {
+    showToast('The TV connection is offline. Changes will not apply.')
+  }
+})
+
+onScopeDispose(() => {
+  if (toastTimer !== null) clearTimeout(toastTimer)
+})
 
 onMessage((env) => {
   if (env.type !== 'state.snapshot') return
@@ -402,6 +506,30 @@ async function resetCalibration() {
 
 function getState() {
   request('state.get')
+}
+
+function startMeasurement() {
+  if (!snapshot.value?.capabilities.supportsSweep) return
+  void measurement.start()
+}
+
+function settingLabel(value: boolean | null): string {
+  return value == null ? 'not exposed' : value ? 'on' : 'off'
+}
+
+function dbfs(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '−∞ dBFS'
+  return `${(20 * Math.log10(value)).toFixed(1)} dBFS`
+}
+
+function responsePolyline(points: ResponsePoint[]): string {
+  if (points.length === 0) return ''
+  return points.map((point) => {
+    const frequencyPosition = Math.log10(point.frequencyHz / 20) / Math.log10(20_000 / 20)
+    const boundedPosition = Math.max(0, Math.min(1, frequencyPosition))
+    const y = 268 - Math.max(0, Math.min(1, (point.magnitudeDb + 12) / 24)) * 252
+    return `${(boundedPosition * 800).toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
 }
 
 const virtualizerOn = ref(false)
@@ -563,6 +691,35 @@ watchEffect(() => {
 .conn[data-state='connected'] .conn-label {
   color: var(--ink);
 }
+.conn[data-state='offline'] .conn-dot {
+  background: var(--ink);
+}
+.conn[data-state='offline'] .conn-label {
+  color: var(--ink);
+}
+.toast {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  z-index: 10;
+  width: min(32rem, calc(100vw - 2rem));
+  padding: 0.8rem 1rem;
+  transform: translateX(-50%);
+  border: 1px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  text-align: center;
+  box-shadow: 0 0.5rem 2rem rgba(0, 0, 0, 0.35);
+}
+.toast-enter-active,
+.toast-leave-active {
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -0.5rem);
+}
 
 .block {
   padding: 1.75rem 0;
@@ -582,6 +739,34 @@ watchEffect(() => {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.16em;
+}
+.response-graph {
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+.response-graph svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0.5rem 0 1rem;
+  background: #0d0d0f;
+  border: 1px solid var(--line);
+}
+.graph-zero {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  stroke-dasharray: 4 5;
+}
+.graph-line {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.graph-label {
+  fill: var(--dim);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 .note {
   margin: 0.35rem 0;

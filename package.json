@@ -7,9 +7,11 @@
   },
   "private": true,
   "scripts": {
-    "dev": "nuxt dev",
-    "generate": "nuxt generate",
-    "deploy": "nuxt generate && bunx wrangler deploy"
+    "dev": "bun run generate:profile-index && nuxt dev",
+    "generate": "bun run generate:profile-index && nuxt generate",
+    "generate:profile-index": "bun scripts/generate-calibration-profile-index.mjs",
+    "deploy": "bun run generate && bunx wrangler deploy",
+    "test": "bun test"
   },
   "type": "module",
   "devDependencies": {

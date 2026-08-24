@@ -1,14 +1,21 @@
 import { onScopeDispose, readonly, ref, shallowRef } from 'vue'
 import {
   PROTOCOL_VERSION,
+  isEnvelope,
   type Envelope,
   type Role,
 } from '#shared/types/protocol'
+import {
+  connectionStateForDevice,
+  type ConnectionState,
+} from './connectionState'
 
-export type ConnectionState = 'disconnected' | 'connecting' | 'connected'
+interface RoomStateResponse {
+  deviceOnline: boolean
+  messages: Envelope[]
+}
 
 const CLIENT_POLL_MS = 1200
-const DEVICE_TTL_MS = 15_000
 
 let messageCounter = 0
 
@@ -18,6 +25,13 @@ function nextMessageId(): string {
 
 function roomUrl(code: string, action: string): string {
   return `/api/room/${encodeURIComponent(code)}/${action}`
+}
+
+function isRoomStateResponse(value: unknown): value is RoomStateResponse {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (!('deviceOnline' in value) || typeof value.deviceOnline !== 'boolean') return false
+  if (!('messages' in value) || !Array.isArray(value.messages)) return false
+  return value.messages.every(isEnvelope)
 }
 
 /**
@@ -52,6 +66,10 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     }
   }
 
+  function markConnectionInterrupted() {
+    if (!disposed && status.value === 'connected') status.value = 'connecting'
+  }
+
   async function post(env: Envelope): Promise<boolean> {
     try {
       const res = await fetch(roomUrl(pairCode(), role === 'client' ? 'client' : 'device'), {
@@ -59,8 +77,10 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(env),
       })
+      if (!res.ok) markConnectionInterrupted()
       return res.ok
     } catch {
+      markConnectionInterrupted()
       return false
     }
   }
@@ -90,18 +110,17 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
 
   async function pollOnce() {
     if (disposed) return
-    let res: Response | null = null
     try {
-      res = await fetch(roomUrl(pairCode(), `state?since=${since}`))
-    } catch {
-      /* network hiccup; keep trying */
-    }
-    if (!disposed && res && res.ok) {
-      status.value = 'connected'
-      const data = (await res.json()) as { deviceOnline: boolean; messages: Envelope[] }
+      const res = await fetch(roomUrl(pairCode(), `state?since=${since}`))
+      if (!res.ok) throw new Error(`state request failed with HTTP ${res.status}`)
+      const raw: unknown = await res.json()
+      if (!isRoomStateResponse(raw)) throw new Error('state response was malformed')
+      if (disposed) return
+
       const wasOnline = deviceOnline.value
-      deviceOnline.value = data.deviceOnline
-      for (const env of data.messages) {
+      deviceOnline.value = raw.deviceOnline
+      status.value = connectionStateForDevice(raw.deviceOnline)
+      for (const env of raw.messages) {
         since = Math.max(since, Date.now() - 1)
         lastMessage.value = env
         log('in', JSON.stringify(env))
@@ -109,11 +128,10 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
         for (const handler of handlers) handler(env)
       }
       if (!wasOnline && deviceOnline.value) {
-        // Fresh presence: request a snapshot so late-joining UIs fill in.
         void send('state.get')
       }
-    } else if (!disposed) {
-      status.value = 'connecting'
+    } catch {
+      if (!disposed) status.value = 'connecting'
     }
     if (!disposed) {
       pollTimer = setTimeout(pollOnce, CLIENT_POLL_MS)

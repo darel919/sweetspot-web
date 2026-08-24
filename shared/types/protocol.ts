@@ -118,6 +118,76 @@ export interface PersistentProbeState {
   curveSummary?: CurveSummary | null
 }
 
+export type CalibrationChannel = 'both' | 'left' | 'right'
+
+export const CALIBRATION_ERROR_CODES = [
+  'audio_focus_denied',
+  'audio_focus_lost',
+  'calibration_ui_failed',
+  'calibration_ui_closed',
+  'measurement_timeout',
+  'sweep_playback_failed',
+  'invalid_session',
+  'already_measuring',
+  'capture_clipped',
+  'sweep_not_found',
+  'signal_too_low',
+  'calibration_aborted',
+] as const
+
+export type CalibrationErrorCode = (typeof CALIBRATION_ERROR_CODES)[number]
+
+export interface CalibrationSessionPayload {
+  sessionId: string
+}
+
+export interface CalibrationSessionBeginPayload extends CalibrationSessionPayload {
+  channel: CalibrationChannel
+}
+
+export interface CalibrationSessionEndPayload extends CalibrationSessionPayload {}
+
+export interface CalibrationSessionAbortPayload extends CalibrationSessionPayload {
+  code?: CalibrationErrorCode
+  message?: string
+}
+
+export interface MeasurementSweep {
+  algorithm: 'exponential-sine-v1'
+  sampleRate: number
+  startHz: number
+  endHz: number
+  durationMs: number
+  preRollMs: number
+  postRollMs: number
+  levelDbfs: number
+  fadeInMs: number
+  fadeOutMs: number
+}
+
+export interface MeasurementPreparePayload extends CalibrationSessionPayload {
+  channel: CalibrationChannel
+}
+
+export interface MeasurementPlaySweepPayload extends CalibrationSessionPayload {}
+
+export interface MeasurementAbortPayload extends CalibrationSessionPayload {}
+
+export interface MeasurementReadyPayload extends CalibrationSessionPayload {
+  sweep: MeasurementSweep
+}
+
+export interface MeasurementStartedPayload extends CalibrationSessionPayload {
+  sweep: MeasurementSweep
+}
+
+export interface MeasurementFinishedPayload extends CalibrationSessionPayload {}
+
+export interface MeasurementErrorPayload extends CalibrationSessionPayload {
+  code: CalibrationErrorCode
+  message?: string
+}
+
 /** Reply to probe.run / probe.status: DynamicsProcessing capacity + persistent instance state. */
 export interface ProbeDiagnostics {
   running: boolean
@@ -230,6 +300,9 @@ const DEVICE_TARGETED_TYPES = [
   'calibration.get',
   'calibration.apply',
   'calibration.reset',
+  'calibrationSession.begin',
+  'calibrationSession.end',
+  'calibrationSession.abort',
   'measurement.prepare',
   'measurement.playSweep',
   'measurement.abort',
@@ -255,6 +328,8 @@ export const KNOWN_TYPES = new Set<string>([
   'pong',
   'state.snapshot',
   'state.changed',
+  'calibrationSession.started',
+  'calibrationSession.ended',
   'measurement.ready',
   'measurement.started',
   'measurement.finished',
@@ -274,5 +349,114 @@ export const SESSION_ONLY_TYPES = new Set<string>([
 ])
 
 export function isDeviceTargeted(type: string): type is DeviceTargetedType {
-  return (DEVICE_TARGETED_TYPES as readonly string[]).includes(type)
+  return DEVICE_TARGETED_TYPES.some((candidate) => candidate === type)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isSessionId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 128
+    && !/[\u0000-\u001f\u007f\s]/.test(value)
+}
+
+function isCalibrationChannel(value: unknown): value is CalibrationChannel {
+  return value === 'both' || value === 'left' || value === 'right'
+}
+
+function isCalibrationErrorCode(value: unknown): value is CalibrationErrorCode {
+  return CALIBRATION_ERROR_CODES.some((code) => code === value)
+}
+
+function hasOptionalMessage(value: Record<string, unknown>): boolean {
+  return value.message === undefined
+    || (typeof value.message === 'string' && value.message.length <= 1024)
+}
+
+export function isMeasurementSweep(value: unknown): value is MeasurementSweep {
+  if (!isRecord(value)) return false
+  if (value.algorithm !== 'exponential-sine-v1') return false
+  if (!isFiniteNumber(value.sampleRate) || !Number.isInteger(value.sampleRate)) return false
+  if (value.sampleRate < 8_000 || value.sampleRate > 192_000) return false
+  if (!isFiniteNumber(value.startHz) || value.startHz <= 0) return false
+  if (!isFiniteNumber(value.endHz) || value.endHz <= value.startHz) return false
+  if (value.endHz > value.sampleRate / 2) return false
+  if (!isFiniteNumber(value.durationMs) || value.durationMs <= 0 || value.durationMs > 120_000) return false
+  if (!isFiniteNumber(value.preRollMs) || value.preRollMs < 0 || value.preRollMs > 60_000) return false
+  if (!isFiniteNumber(value.postRollMs) || value.postRollMs < 0 || value.postRollMs > 60_000) return false
+  if (!isFiniteNumber(value.levelDbfs) || value.levelDbfs > 0 || value.levelDbfs < -120) return false
+  if (!isFiniteNumber(value.fadeInMs) || value.fadeInMs < 0 || value.fadeInMs > value.durationMs) return false
+  if (!isFiniteNumber(value.fadeOutMs) || value.fadeOutMs < 0 || value.fadeOutMs > value.durationMs) return false
+  return value.fadeInMs + value.fadeOutMs <= value.durationMs
+}
+
+export function isEnvelope(value: unknown): value is Envelope<unknown> {
+  if (!isRecord(value)) return false
+  if (value.v !== PROTOCOL_VERSION) return false
+  if (typeof value.id !== 'string' || value.id.length === 0 || value.id.length > 256) return false
+  if (typeof value.type !== 'string' || value.type.length === 0) return false
+  if (!isFiniteNumber(value.ts)) return false
+  if (!Object.hasOwn(value, 'payload')) return false
+  return value.replyTo === undefined || (typeof value.replyTo === 'string' && value.replyTo.length <= 256)
+}
+
+function isSessionPayload(value: unknown): value is CalibrationSessionPayload {
+  return isRecord(value) && isSessionId(value.sessionId)
+}
+
+function isSessionWithChannel(value: unknown): value is CalibrationSessionBeginPayload {
+  return isSessionPayload(value) && isCalibrationChannel(value.channel)
+}
+
+function isSessionWithSweep(value: unknown): value is MeasurementReadyPayload {
+  return isSessionPayload(value) && isMeasurementSweep(value.sweep)
+}
+
+export function isMeasurementReadyPayload(value: unknown): value is MeasurementReadyPayload {
+  return isSessionWithSweep(value)
+}
+
+function isAbortPayload(value: unknown): value is CalibrationSessionAbortPayload {
+  return isSessionPayload(value)
+    && (value.code === undefined || isCalibrationErrorCode(value.code))
+    && hasOptionalMessage(value)
+}
+
+export function validatePayload(type: string, payload: unknown): string | null {
+  switch (type) {
+    case 'calibrationSession.begin':
+    case 'measurement.prepare':
+      return isSessionWithChannel(payload) ? null : `${type} requires sessionId and channel`
+    case 'calibrationSession.end':
+    case 'measurement.playSweep':
+    case 'measurement.abort':
+    case 'calibrationSession.started':
+    case 'calibrationSession.ended':
+    case 'measurement.finished':
+      return isSessionPayload(payload) ? null : `${type} requires sessionId`
+    case 'calibrationSession.abort':
+      return isAbortPayload(payload) ? null : `${type} requires sessionId and a valid optional error`
+    case 'measurement.ready':
+    case 'measurement.started':
+      return isSessionWithSweep(payload) ? null : `${type} requires sessionId and sweep`
+    case 'measurement.error':
+      return isSessionPayload(payload)
+        && isCalibrationErrorCode(payload.code)
+        && hasOptionalMessage(payload)
+        ? null
+        : `${type} requires sessionId and a valid code`
+    default:
+      return null
+  }
+}
+
+export function isValidPayload(type: string, payload: unknown): boolean {
+  return validatePayload(type, payload) === null
 }

@@ -1,0 +1,516 @@
+{
+  "id": "apple_iphone17pro_2025",
+  "name": "Apple iPhone 17 Pro bottom microphone, Faber 2025 free-field",
+  "manufacturer": "Apple",
+  "model": "iPhone 17 Pro",
+  "sourceUrl": "https://www.faberacoustical.com/blog/2025/ios/iphone/measured-iphone-17-pro-microphone-frequency-response-and-directivity/",
+  "sourceDate": "2025-09-25",
+  "referenceType": "free-field",
+  "sourceSmoothing": "1/24-octave",
+  "capturePath": "SignalScope with iOS measurement mode enabled; Safari getUserMedia capture path is not validated",
+  "dataMethod": "digitized-figure",
+  "normalizeAtHz": 1000,
+  "referenceMicrophone": "PCB 378B02",
+  "referenceMicSpacingMm": 1,
+  "referenceMicSpacingApproximate": true,
+  "measurementEnvironment": "anechoic chamber",
+  "excitation": "swept-sine",
+  "orientationsAveraged": 2,
+  "referenceCalibration": "factory calibration applied to the reference microphone",
+  "publishedTraces": [
+    "pressure",
+    "free-field corrected"
+  ],
+  "directivityMeasuredSeparately": true,
+  "points": [
+    {
+      "frequencyHz": 20.0,
+      "responseDb": -11.9
+    },
+    {
+      "frequencyHz": 21.2,
+      "responseDb": -11.5
+    },
+    {
+      "frequencyHz": 22.4,
+      "responseDb": -11.0
+    },
+    {
+      "frequencyHz": 23.8,
+      "responseDb": -10.2
+    },
+    {
+      "frequencyHz": 25.2,
+      "responseDb": -9.2
+    },
+    {
+      "frequencyHz": 26.7,
+      "responseDb": -8.4
+    },
+    {
+      "frequencyHz": 28.3,
+      "responseDb": -7.4
+    },
+    {
+      "frequencyHz": 30.0,
+      "responseDb": -7.0
+    },
+    {
+      "frequencyHz": 31.7,
+      "responseDb": -6.1
+    },
+    {
+      "frequencyHz": 33.6,
+      "responseDb": -5.5
+    },
+    {
+      "frequencyHz": 35.6,
+      "responseDb": -5.1
+    },
+    {
+      "frequencyHz": 37.8,
+      "responseDb": -4.5
+    },
+    {
+      "frequencyHz": 40.0,
+      "responseDb": -4.0
+    },
+    {
+      "frequencyHz": 42.4,
+      "responseDb": -3.8
+    },
+    {
+      "frequencyHz": 44.9,
+      "responseDb": -3.4
+    },
+    {
+      "frequencyHz": 47.6,
+      "responseDb": -3.1
+    },
+    {
+      "frequencyHz": 50.4,
+      "responseDb": -2.8
+    },
+    {
+      "frequencyHz": 53.4,
+      "responseDb": -2.6
+    },
+    {
+      "frequencyHz": 56.6,
+      "responseDb": -2.4
+    },
+    {
+      "frequencyHz": 59.9,
+      "responseDb": -2.2
+    },
+    {
+      "frequencyHz": 63.5,
+      "responseDb": -2.0
+    },
+    {
+      "frequencyHz": 67.3,
+      "responseDb": -1.9
+    },
+    {
+      "frequencyHz": 71.3,
+      "responseDb": -1.8
+    },
+    {
+      "frequencyHz": 75.5,
+      "responseDb": -1.7
+    },
+    {
+      "frequencyHz": 80.0,
+      "responseDb": -1.6
+    },
+    {
+      "frequencyHz": 84.8,
+      "responseDb": -1.5
+    },
+    {
+      "frequencyHz": 89.8,
+      "responseDb": -1.4
+    },
+    {
+      "frequencyHz": 95.1,
+      "responseDb": -1.3
+    },
+    {
+      "frequencyHz": 100.8,
+      "responseDb": -1.2
+    },
+    {
+      "frequencyHz": 106.8,
+      "responseDb": -1.2
+    },
+    {
+      "frequencyHz": 113.1,
+      "responseDb": -1.1
+    },
+    {
+      "frequencyHz": 119.9,
+      "responseDb": -1.1
+    },
+    {
+      "frequencyHz": 127.0,
+      "responseDb": -1.0
+    },
+    {
+      "frequencyHz": 134.5,
+      "responseDb": -0.9
+    },
+    {
+      "frequencyHz": 142.5,
+      "responseDb": -0.9
+    },
+    {
+      "frequencyHz": 151.0,
+      "responseDb": -0.8
+    },
+    {
+      "frequencyHz": 160.0,
+      "responseDb": -0.9
+    },
+    {
+      "frequencyHz": 169.5,
+      "responseDb": -0.8
+    },
+    {
+      "frequencyHz": 179.6,
+      "responseDb": -0.8
+    },
+    {
+      "frequencyHz": 190.3,
+      "responseDb": -0.7
+    },
+    {
+      "frequencyHz": 201.6,
+      "responseDb": -0.7
+    },
+    {
+      "frequencyHz": 213.6,
+      "responseDb": -0.7
+    },
+    {
+      "frequencyHz": 226.3,
+      "responseDb": -0.7
+    },
+    {
+      "frequencyHz": 239.7,
+      "responseDb": -0.6
+    },
+    {
+      "frequencyHz": 254.0,
+      "responseDb": -0.6
+    },
+    {
+      "frequencyHz": 269.1,
+      "responseDb": -0.6
+    },
+    {
+      "frequencyHz": 285.1,
+      "responseDb": -0.6
+    },
+    {
+      "frequencyHz": 302.0,
+      "responseDb": -0.5
+    },
+    {
+      "frequencyHz": 320.0,
+      "responseDb": -0.5
+    },
+    {
+      "frequencyHz": 339.0,
+      "responseDb": -0.5
+    },
+    {
+      "frequencyHz": 359.2,
+      "responseDb": -0.5
+    },
+    {
+      "frequencyHz": 380.5,
+      "responseDb": -0.4
+    },
+    {
+      "frequencyHz": 403.2,
+      "responseDb": -0.4
+    },
+    {
+      "frequencyHz": 427.1,
+      "responseDb": -0.4
+    },
+    {
+      "frequencyHz": 452.5,
+      "responseDb": -0.4
+    },
+    {
+      "frequencyHz": 479.5,
+      "responseDb": -0.2
+    },
+    {
+      "frequencyHz": 508.0,
+      "responseDb": -0.2
+    },
+    {
+      "frequencyHz": 538.2,
+      "responseDb": -0.2
+    },
+    {
+      "frequencyHz": 570.2,
+      "responseDb": -0.2
+    },
+    {
+      "frequencyHz": 604.1,
+      "responseDb": -0.1
+    },
+    {
+      "frequencyHz": 640.0,
+      "responseDb": -0.1
+    },
+    {
+      "frequencyHz": 678.1,
+      "responseDb": -0.1
+    },
+    {
+      "frequencyHz": 718.4,
+      "responseDb": -0.0
+    },
+    {
+      "frequencyHz": 761.1,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 806.3,
+      "responseDb": -0.0
+    },
+    {
+      "frequencyHz": 854.3,
+      "responseDb": -0.0
+    },
+    {
+      "frequencyHz": 905.1,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 958.9,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 1015.9,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 1076.3,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 1140.4,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 1208.2,
+      "responseDb": -0.0
+    },
+    {
+      "frequencyHz": 1280.0,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 1356.1,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 1436.8,
+      "responseDb": -0.0
+    },
+    {
+      "frequencyHz": 1522.2,
+      "responseDb": -0.0
+    },
+    {
+      "frequencyHz": 1612.7,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 1708.6,
+      "responseDb": 0.0
+    },
+    {
+      "frequencyHz": 1810.2,
+      "responseDb": 0.1
+    },
+    {
+      "frequencyHz": 1917.8,
+      "responseDb": 0.2
+    },
+    {
+      "frequencyHz": 2031.9,
+      "responseDb": 0.2
+    },
+    {
+      "frequencyHz": 2152.7,
+      "responseDb": 0.3
+    },
+    {
+      "frequencyHz": 2280.7,
+      "responseDb": 0.3
+    },
+    {
+      "frequencyHz": 2416.3,
+      "responseDb": 0.3
+    },
+    {
+      "frequencyHz": 2560.0,
+      "responseDb": 0.4
+    },
+    {
+      "frequencyHz": 2712.2,
+      "responseDb": 0.5
+    },
+    {
+      "frequencyHz": 2873.5,
+      "responseDb": 0.6
+    },
+    {
+      "frequencyHz": 3044.4,
+      "responseDb": 0.6
+    },
+    {
+      "frequencyHz": 3225.4,
+      "responseDb": 0.7
+    },
+    {
+      "frequencyHz": 3417.2,
+      "responseDb": 0.8
+    },
+    {
+      "frequencyHz": 3620.4,
+      "responseDb": 0.9
+    },
+    {
+      "frequencyHz": 3835.7,
+      "responseDb": 1.1
+    },
+    {
+      "frequencyHz": 4063.7,
+      "responseDb": 1.3
+    },
+    {
+      "frequencyHz": 4305.4,
+      "responseDb": 1.3
+    },
+    {
+      "frequencyHz": 4561.4,
+      "responseDb": 1.3
+    },
+    {
+      "frequencyHz": 4832.6,
+      "responseDb": 1.3
+    },
+    {
+      "frequencyHz": 5120.0,
+      "responseDb": 1.3
+    },
+    {
+      "frequencyHz": 5424.5,
+      "responseDb": 1.5
+    },
+    {
+      "frequencyHz": 5747.0,
+      "responseDb": 1.6
+    },
+    {
+      "frequencyHz": 6088.7,
+      "responseDb": 1.6
+    },
+    {
+      "frequencyHz": 6450.8,
+      "responseDb": 1.6
+    },
+    {
+      "frequencyHz": 6834.4,
+      "responseDb": 1.6
+    },
+    {
+      "frequencyHz": 7240.8,
+      "responseDb": 1.5
+    },
+    {
+      "frequencyHz": 7671.3,
+      "responseDb": 1.4
+    },
+    {
+      "frequencyHz": 8127.5,
+      "responseDb": 1.1
+    },
+    {
+      "frequencyHz": 8610.8,
+      "responseDb": 0.6
+    },
+    {
+      "frequencyHz": 9122.8,
+      "responseDb": 0.4
+    },
+    {
+      "frequencyHz": 9665.3,
+      "responseDb": 2.5
+    },
+    {
+      "frequencyHz": 10240.0,
+      "responseDb": 6.9
+    },
+    {
+      "frequencyHz": 10848.9,
+      "responseDb": 11.1
+    },
+    {
+      "frequencyHz": 11494.0,
+      "responseDb": 9.7
+    },
+    {
+      "frequencyHz": 12177.5,
+      "responseDb": 7.2
+    },
+    {
+      "frequencyHz": 12901.6,
+      "responseDb": 6.2
+    },
+    {
+      "frequencyHz": 13668.8,
+      "responseDb": 8.3
+    },
+    {
+      "frequencyHz": 14481.5,
+      "responseDb": 7.9
+    },
+    {
+      "frequencyHz": 15342.7,
+      "responseDb": 1.0
+    },
+    {
+      "frequencyHz": 16255.0,
+      "responseDb": -0.9
+    },
+    {
+      "frequencyHz": 17221.6,
+      "responseDb": 0.1
+    },
+    {
+      "frequencyHz": 18245.6,
+      "responseDb": -6.0
+    },
+    {
+      "frequencyHz": 19330.5,
+      "responseDb": -12.4
+    },
+    {
+      "frequencyHz": 20000.0,
+      "responseDb": -17.1
+    }
+  ],
+  "trust": {
+    "minHz": 30,
+    "fullTrustMaxHz": 8000,
+    "taperToHz": 12000
+  }
+}

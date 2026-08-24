@@ -3,8 +3,10 @@ import {
   MAX_PAYLOAD_BYTES,
   KNOWN_TYPES,
   SESSION_ONLY_TYPES,
+  isEnvelope,
   isDeviceTargeted,
   isValidPairCode,
+  validatePayload,
   type Envelope,
   type ErrorPayload,
 } from '../shared/types/protocol'
@@ -51,17 +53,18 @@ export class RoomDO {
   }
 
   validate(env: unknown): { ok: true; env: Envelope } | { ok: false; code: ErrorPayload['code']; message: string } {
-    const e = env as Partial<Envelope>
-    if (!e || e.v !== 1 || typeof e.id !== 'string' || typeof e.type !== 'string') {
+    if (!isEnvelope(env)) {
       return { ok: false, code: 'bad_envelope', message: 'envelope requires v=1, id and type strings' }
     }
-    if (!KNOWN_TYPES.has(e.type)) {
-      return { ok: false, code: 'unknown_type', message: `unsupported message type "${e.type}"` }
+    if (!KNOWN_TYPES.has(env.type)) {
+      return { ok: false, code: 'unknown_type', message: `unsupported message type "${env.type}"` }
     }
-    if (SESSION_ONLY_TYPES.has(e.type)) {
-      return { ok: false, code: 'bad_envelope', message: `"${e.type}" is session-scoped and not routed` }
+    if (SESSION_ONLY_TYPES.has(env.type)) {
+      return { ok: false, code: 'bad_envelope', message: `"${env.type}" is session-scoped and not routed` }
     }
-    return { ok: true, env: e as Envelope }
+    const payloadError = validatePayload(env.type, env.payload)
+    if (payloadError) return { ok: false, code: 'bad_envelope', message: payloadError }
+    return { ok: true, env }
   }
 
   deviceOnline(): boolean {
