@@ -32,4 +32,16 @@ describe('browser-local impulse analysis', () => {
     expect(result.summary.room.earlyReflections[0].delayMs).toBeCloseTo(5, 1)
     expect(result.summary.room.earlyReflections[0].levelDbRelativeToDirect).toBeLessThan(-5)
   })
+
+  test('deconvolves the active sweep without retaining the silent pre-roll', () => {
+    const reference = generateSweepReference(sweep)
+    const directDelay = 160
+    const capture = new Float32Array(reference.length + directDelay)
+    capture.set(reference, directDelay)
+
+    const result = deconvolveSweep(capture, sweep.sampleRate, sweep, directDelay)
+
+    expect(result.samples.length).toBeLessThanOrEqual(1_048_576)
+    expect(result.summary.room.directArrivalMs).toBeCloseTo(0, 1)
+  })
 })

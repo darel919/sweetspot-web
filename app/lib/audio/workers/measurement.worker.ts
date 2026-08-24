@@ -30,6 +30,12 @@ declare const self: MeasurementWorkerScope
 
 self.addEventListener('message', (event) => {
   try {
+    if (!(event.data.samples instanceof ArrayBuffer)) {
+      throw new Error('Measurement worker received an invalid PCM buffer.')
+    }
+    if (!Number.isFinite(event.data.sampleRate) || event.data.sampleRate <= 0) {
+      throw new Error('Measurement worker received an invalid sample rate.')
+    }
     if (!isMeasurementSweep(event.data.sweep)) throw new Error('Measurement worker received an invalid sweep.')
     const samples = new Float32Array(event.data.samples)
     const micProfile = parseMicCalibrationProfile(event.data.micProfile)

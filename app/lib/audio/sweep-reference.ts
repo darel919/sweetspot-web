@@ -16,9 +16,9 @@ export function sweepSampleParts(sweep: MeasurementSweep, sampleRate = sweep.sam
   }
 }
 
-export function generateSweepReference(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
+export function generateSweepSignal(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
   const parts = sweepSampleParts(sweep, sampleRate)
-  const reference = new Float32Array(parts.preRollSamples + parts.sweepSamples + parts.postRollSamples)
+  const signal = new Float32Array(parts.sweepSamples)
   const amplitude = 10 ** (sweep.levelDbfs / 20)
   const durationSeconds = sweep.durationMs / 1000
   const logarithmicRate = Math.log(sweep.endHz / sweep.startHz) / durationSeconds
@@ -33,8 +33,15 @@ export function generateSweepReference(sweep: MeasurementSweep, sampleRate = swe
     const fadeIn = fadeInSamples <= 1 ? 1 : Math.min(1, index / (fadeInSamples - 1))
     const remaining = parts.sweepSamples - 1 - index
     const fadeOut = fadeOutSamples <= 1 ? 1 : Math.min(1, remaining / (fadeOutSamples - 1))
-    reference[parts.preRollSamples + index] = amplitude * fadeIn * fadeOut * Math.sin(phase)
+    signal[index] = amplitude * fadeIn * fadeOut * Math.sin(phase)
   }
 
+  return signal
+}
+
+export function generateSweepReference(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
+  const parts = sweepSampleParts(sweep, sampleRate)
+  const reference = new Float32Array(parts.preRollSamples + parts.sweepSamples + parts.postRollSamples)
+  reference.set(generateSweepSignal(sweep, sampleRate), parts.preRollSamples)
   return reference
 }

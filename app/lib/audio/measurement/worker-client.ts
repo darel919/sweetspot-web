@@ -20,33 +20,69 @@ export function analyzeInWorker(
   sweep: MeasurementSweep,
   micProfile: MicCalibrationProfile,
 ): Promise<MeasurementAnalysis> {
-  const worker = new Worker(new URL('../workers/measurement.worker.ts', import.meta.url), { type: 'module' })
-  const transferableSamples = samples.slice()
   return new Promise((resolve, reject) => {
-    const close = () => worker.terminate()
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('../workers/measurement.worker.ts', import.meta.url), { type: 'module' })
+    } catch (error: unknown) {
+      reject(error instanceof Error ? error : new Error('Could not start the measurement worker.'))
+      return
+    }
+
+    let settled = false
+    const close = () => {
+      worker.onmessage = null
+      worker.onmessageerror = null
+      worker.onerror = null
+      worker.terminate()
+    }
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
+      close()
+      reject(error)
+    }
+    const succeed = (result: MeasurementAnalysis) => {
+      if (settled) return
+      settled = true
+      close()
+      resolve(result)
+    }
+
     worker.onmessage = (event: MessageEvent<unknown>) => {
       const response = event.data
       if (!isResponse(response)) {
-        close()
-        reject(new Error('Measurement worker returned an invalid response.'))
+        fail(new Error('Measurement worker returned an invalid response.'))
         return
       }
-      close()
       if (response.ok && response.result) {
-        resolve(response.result)
+        succeed(response.result)
       } else {
-        reject(new Error(response.error ?? 'Measurement analysis failed.'))
+        fail(new Error(response.error ?? 'Measurement analysis failed.'))
       }
     }
-    worker.onerror = () => {
-      close()
-      reject(new Error('Measurement worker failed.'))
+    worker.onerror = (event: ErrorEvent) => {
+      const detail = typeof event.message === 'string' && event.message.trim().length > 0
+        ? `: ${event.message.trim()}`
+        : ''
+      fail(new Error(`Measurement worker failed${detail}.`))
     }
-    worker.postMessage({
-      samples: transferableSamples.buffer,
-      sampleRate,
-      sweep,
-      micProfile,
-    }, [transferableSamples.buffer])
+    worker.onmessageerror = () => {
+      fail(new Error('Measurement worker could not transfer its result.'))
+    }
+
+    try {
+      const transferableSamples = samples.byteOffset === 0 && samples.byteLength === samples.buffer.byteLength
+        ? samples
+        : samples.slice()
+      worker.postMessage({
+        samples: transferableSamples.buffer,
+        sampleRate,
+        sweep,
+        micProfile,
+      }, [transferableSamples.buffer])
+    } catch (error: unknown) {
+      fail(error instanceof Error ? error : new Error('Could not send samples to the measurement worker.'))
+    }
   })
 }

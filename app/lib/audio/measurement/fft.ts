@@ -1,3 +1,5 @@
+export type FftArray = Float32Array | Float64Array
+
 export function nextPowerOfTwo(value: number): number {
   let result = 1
   while (result < value) result *= 2
@@ -5,7 +7,7 @@ export function nextPowerOfTwo(value: number): number {
 }
 
 /** In-place radix-2 FFT. The sign is negative for the forward transform. */
-export function fftInPlace(real: Float64Array, imaginary: Float64Array, inverse = false): void {
+export function fftInPlace(real: FftArray, imaginary: FftArray, inverse = false): void {
   const length = real.length
   if (length === 0 || (length & (length - 1)) !== 0 || imaginary.length !== length) {
     throw new Error('FFT requires equal non-empty power-of-two arrays.')

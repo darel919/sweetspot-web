@@ -1,5 +1,5 @@
 import type { MeasurementSweep } from '#shared/types/protocol'
-import { generateSweepReference } from '../sweep-reference'
+import { generateSweepSignal, sweepSampleParts } from '../sweep-reference'
 import { fftInPlace, nextPowerOfTwo } from './fft'
 
 export interface EarlyReflection {
@@ -249,21 +249,26 @@ export function deconvolveSweep(
   sweep: MeasurementSweep,
   startSample: number,
 ): ImpulseResult {
-  const reference = generateSweepReference(sweep, sampleRate)
-  const available = Math.max(0, samples.length - startSample)
+  const parts = sweepSampleParts(sweep, sampleRate)
+  const reference = generateSweepSignal(sweep, sampleRate)
+  // Detection returns the beginning of the TV's complete sweep envelope. The
+  // pre-roll is silence, so exclude it from the transfer calculation. This
+  // keeps the FFT bounded when the recorder captured a long lead-in.
+  const captureStart = Math.min(samples.length, Math.max(0, startSample + parts.preRollSamples))
+  const available = Math.max(0, samples.length - captureStart)
   const maximumTailSamples = Math.round(sampleRate * 2)
   const captureLength = Math.min(available, reference.length + maximumTailSamples)
   // Zero padding prevents the late room response from wrapping around the
   // start of the recovered impulse during frequency-domain division.
   const fftLength = nextPowerOfTwo(Math.max(1, reference.length + captureLength - 1))
-  const referenceReal = new Float64Array(fftLength)
-  const captureReal = new Float64Array(fftLength)
-  const referenceImaginary = new Float64Array(fftLength)
-  const captureImaginary = new Float64Array(fftLength)
+  const referenceReal = new Float32Array(fftLength)
+  const captureReal = new Float32Array(fftLength)
+  const referenceImaginary = new Float32Array(fftLength)
+  const captureImaginary = new Float32Array(fftLength)
   for (let index = 0; index < reference.length; index++) {
     referenceReal[index] = reference[index]
   }
-  for (let index = 0; index < captureLength; index++) captureReal[index] = samples[startSample + index]
+  for (let index = 0; index < captureLength; index++) captureReal[index] = samples[captureStart + index]
   fftInPlace(referenceReal, referenceImaginary)
   fftInPlace(captureReal, captureImaginary)
   let maximumReferencePower = 0
@@ -314,8 +319,8 @@ export function windowedImpulseResponse(
   if (!(peak > 0)) return []
 
   const fftLength = nextPowerOfTwo(impulse.length)
-  const real = new Float64Array(fftLength)
-  const imaginary = new Float64Array(fftLength)
+  const real = new Float32Array(fftLength)
+  const imaginary = new Float32Array(fftLength)
   const preSamples = Math.max(1, Math.round(sampleRate * 0.001))
   const gateSamples = Math.max(preSamples + 1, Math.round(sampleRate * 0.25))
   const taperSamples = Math.max(1, Math.round(sampleRate * 0.04))
