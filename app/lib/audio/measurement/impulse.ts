@@ -8,6 +8,7 @@ export interface EarlyReflection {
 }
 
 export interface RoomMetrics {
+  /** Arrival index inside the recovered causal impulse response, not the recorder capture. */
   directArrivalMs: number | null
   earlyReflections: EarlyReflection[]
   directToLateDb: number | null
@@ -31,10 +32,32 @@ export interface ImpulseResponsePoint {
   magnitudeDb: number
 }
 
-interface ImpulseResult {
+export interface ImpulseResult {
+  kind: 'ok'
   samples: Float32Array
   summary: ImpulseSummary
 }
+
+export interface CaptureTooShortResult {
+  kind: 'capture_too_short'
+  availableSamples: number
+  requiredSamples: number
+}
+
+export type DeconvolutionResult = ImpulseResult | CaptureTooShortResult
+
+interface ReferenceFft {
+  key: string
+  real: Float32Array
+  imaginary: Float32Array
+  maximumPower: number
+}
+
+// A direct speaker-to-phone path should arrive well before this. Keeping the
+// search bounded prevents any later circular/padded artifact from becoming
+// the reported acoustic arrival even if a caller passes an untrimmed buffer.
+const DIRECT_SEARCH_WINDOW_MS = 80
+let cachedReferenceFft: ReferenceFft | null = null
 
 function rms(samples: Float32Array, start = 0, end = samples.length): number {
   let sum = 0
@@ -93,20 +116,62 @@ function energyBetween(samples: Float32Array, start: number, end: number): numbe
   return energy
 }
 
+function referenceCacheKey(
+  sweep: MeasurementSweep,
+  sampleRate: number,
+  fftLength: number,
+): string {
+  return [
+    sweep.algorithm,
+    sweep.sampleRate,
+    sweep.startHz,
+    sweep.endHz,
+    sweep.durationMs,
+    sweep.preRollMs,
+    sweep.postRollMs,
+    sweep.levelDbfs,
+    sweep.fadeInMs,
+    sweep.fadeOutMs,
+    sampleRate,
+    fftLength,
+  ].join('|')
+}
+
+function getReferenceFft(
+  sweep: MeasurementSweep,
+  sampleRate: number,
+  fftLength: number,
+): ReferenceFft {
+  const key = referenceCacheKey(sweep, sampleRate, fftLength)
+  if (cachedReferenceFft?.key === key) return cachedReferenceFft
+
+  const reference = generateSweepSignal(sweep, sampleRate)
+  const real = new Float32Array(fftLength)
+  const imaginary = new Float32Array(fftLength)
+  for (let index = 0; index < reference.length; index++) real[index] = reference[index]
+  fftInPlace(real, imaginary)
+  let maximumPower = 0
+  for (let index = 0; index < fftLength; index++) {
+    maximumPower = Math.max(maximumPower, real[index] ** 2 + imaginary[index] ** 2)
+  }
+  cachedReferenceFft = { key, real, imaginary, maximumPower }
+  return cachedReferenceFft
+}
+
 function findDirectArrival(samples: Float32Array, sampleRate: number): {
   index: number | null
   peakIndex: number | null
   noiseRms: number
   peak: number
 } {
-  // The deconvolved impulse starts at the trimmed sweep boundary, so its
-  // beginning contains the direct sound rather than a quiet pre-roll. Use the
-  // far tail for the noise estimate instead of contaminating it with the
-  // direct arrival.
-  const noiseStart = Math.min(
-    Math.max(0, Math.round(samples.length * 0.75)),
-    Math.max(0, samples.length - Math.round(sampleRate * 0.25)),
-  )
+  // The causal impulse starts at the trimmed active-sweep boundary. A short
+  // tail must not become the noise estimate for the direct path at index zero.
+  const noiseStart = samples.length > 8
+    ? Math.max(
+        Math.floor(samples.length * 0.75),
+        samples.length - Math.round(sampleRate * 0.25),
+      )
+    : samples.length
   const noiseFloorRms = rms(samples, noiseStart, samples.length)
   let peak = 0
   let peakIndex = -1
@@ -117,25 +182,38 @@ function findDirectArrival(samples: Float32Array, sampleRate: number): {
       peakIndex = index
     }
   }
-  if (peakIndex < 0 || peak <= Math.max(noiseFloorRms * 6, 1e-7)) {
+  const searchEnd = Math.min(samples.length, Math.max(1, Math.round(sampleRate * DIRECT_SEARCH_WINDOW_MS / 1000)))
+  let directPeak = 0
+  let directPeakIndex = -1
+  for (let index = 0; index < searchEnd; index++) {
+    const value = Math.abs(samples[index])
+    if (value > directPeak) {
+      directPeak = value
+      directPeakIndex = index
+    }
+  }
+  if (directPeakIndex < 0 || directPeak <= Math.max(noiseFloorRms * 6, 1e-7)) {
     return { index: null, peakIndex: null, noiseRms: noiseFloorRms, peak }
   }
 
-  const threshold = Math.max(peak * 0.08, noiseFloorRms * 8, 1e-7)
-  const searchStart = Math.max(0, peakIndex - Math.round(sampleRate * 0.08))
+  const threshold = Math.max(directPeak * 0.03, noiseFloorRms * 8, 1e-7)
   const sustain = Math.max(2, Math.round(sampleRate * 0.001))
-  for (let index = searchStart; index <= peakIndex; index++) {
-    if (Math.abs(samples[index]) < threshold) continue
+  for (let index = 0; index <= directPeakIndex; index++) {
+    const value = Math.abs(samples[index])
+    const left = index > 0 ? Math.abs(samples[index - 1]) : value
+    const right = index + 1 < searchEnd ? Math.abs(samples[index + 1]) : value
+    if (value < left || value < right) continue
+    if (value < threshold) continue
     let sustained = true
-    for (let cursor = index + 1; cursor < Math.min(samples.length, index + sustain); cursor++) {
+    for (let cursor = index + 1; cursor < Math.min(searchEnd, index + sustain); cursor++) {
       if (Math.abs(samples[cursor]) < threshold * 0.35) {
         sustained = false
         break
       }
     }
-    if (sustained) return { index, peakIndex, noiseRms: noiseFloorRms, peak }
+    if (sustained) return { index, peakIndex: directPeakIndex, noiseRms: noiseFloorRms, peak }
   }
-  return { index: peakIndex, peakIndex, noiseRms: noiseFloorRms, peak }
+  return { index: directPeakIndex, peakIndex: directPeakIndex, noiseRms: noiseFloorRms, peak }
 }
 
 function findEarlyReflections(
@@ -149,9 +227,10 @@ function findEarlyReflections(
   const minimum = Math.max(directPeak * 0.08, 1e-7)
   const separation = Math.max(1, Math.round(sampleRate * 0.001))
   const candidates: Array<{ index: number; value: number }> = []
-  for (let index = start + 1; index < end - 1; index++) {
+  for (let index = start + 1; index < end; index++) {
     const value = Math.abs(samples[index])
-    if (value < minimum || value < Math.abs(samples[index - 1]) || value < Math.abs(samples[index + 1])) continue
+    const right = index + 1 < samples.length ? Math.abs(samples[index + 1]) : value
+    if (value < minimum || value < Math.abs(samples[index - 1]) || value < right) continue
     candidates.push({ index, value })
   }
   candidates.sort((left, right) => right.value - left.value)
@@ -248,50 +327,51 @@ export function deconvolveSweep(
   sampleRate: number,
   sweep: MeasurementSweep,
   startSample: number,
-): ImpulseResult {
+): DeconvolutionResult {
   const parts = sweepSampleParts(sweep, sampleRate)
-  const reference = generateSweepSignal(sweep, sampleRate)
+  const referenceLength = parts.sweepSamples
   // Detection returns the beginning of the TV's complete sweep envelope. The
   // pre-roll is silence, so exclude it from the transfer calculation. This
   // keeps the FFT bounded when the recorder captured a long lead-in.
   const captureStart = Math.min(samples.length, Math.max(0, startSample + parts.preRollSamples))
   const available = Math.max(0, samples.length - captureStart)
-  const maximumTailSamples = Math.round(sampleRate * 2)
-  const captureLength = Math.min(available, reference.length + maximumTailSamples)
+  if (available < referenceLength) {
+    return {
+      kind: 'capture_too_short',
+      availableSamples: available,
+      requiredSamples: referenceLength,
+    }
+  }
+
+  // Only the active sweep and the intentionally captured post-roll belong in
+  // the transfer estimate. The causal IR therefore ends at post-roll + 1.
+  const captureLength = Math.min(available, referenceLength + parts.postRollSamples)
+  const causalLength = Math.min(
+    captureLength - referenceLength + 1,
+    parts.postRollSamples + 1,
+  )
   // Zero padding prevents the late room response from wrapping around the
-  // start of the recovered impulse during frequency-domain division.
-  const fftLength = nextPowerOfTwo(Math.max(1, reference.length + captureLength - 1))
-  const referenceReal = new Float32Array(fftLength)
+  // start of the recovered causal impulse during frequency-domain division.
+  const fftLength = nextPowerOfTwo(Math.max(1, referenceLength + captureLength - 1))
+  const referenceFft = getReferenceFft(sweep, sampleRate, fftLength)
   const captureReal = new Float32Array(fftLength)
-  const referenceImaginary = new Float32Array(fftLength)
   const captureImaginary = new Float32Array(fftLength)
-  for (let index = 0; index < reference.length; index++) {
-    referenceReal[index] = reference[index]
-  }
   for (let index = 0; index < captureLength; index++) captureReal[index] = samples[captureStart + index]
-  fftInPlace(referenceReal, referenceImaginary)
   fftInPlace(captureReal, captureImaginary)
-  let maximumReferencePower = 0
+  const regularization = Math.max(referenceFft.maximumPower * 1e-7, 1e-12)
   for (let index = 0; index < fftLength; index++) {
-    maximumReferencePower = Math.max(
-      maximumReferencePower,
-      referenceReal[index] ** 2 + referenceImaginary[index] ** 2,
-    )
-  }
-  const regularization = Math.max(maximumReferencePower * 1e-7, 1e-12)
-  for (let index = 0; index < fftLength; index++) {
-    const xReal = referenceReal[index]
-    const xImaginary = referenceImaginary[index]
+    const xReal = referenceFft.real[index]
+    const xImaginary = referenceFft.imaginary[index]
     const denominator = xReal * xReal + xImaginary * xImaginary + regularization
     const yReal = captureReal[index]
     const yImaginary = captureImaginary[index]
-    referenceReal[index] = (yReal * xReal + yImaginary * xImaginary) / denominator
-    referenceImaginary[index] = (yImaginary * xReal - yReal * xImaginary) / denominator
+    captureReal[index] = (yReal * xReal + yImaginary * xImaginary) / denominator
+    captureImaginary[index] = (yImaginary * xReal - yReal * xImaginary) / denominator
   }
-  fftInPlace(referenceReal, referenceImaginary, true)
-  const impulse = new Float32Array(referenceReal.length)
-  for (let index = 0; index < impulse.length; index++) impulse[index] = referenceReal[index]
-  return { samples: impulse, summary: summarizeImpulse(impulse, sampleRate) }
+  fftInPlace(captureReal, captureImaginary, true)
+  const impulse = new Float32Array(causalLength)
+  for (let index = 0; index < impulse.length; index++) impulse[index] = captureReal[index]
+  return { kind: 'ok', samples: impulse, summary: summarizeImpulse(impulse, sampleRate) }
 }
 
 /**
@@ -307,18 +387,11 @@ export function windowedImpulseResponse(
   pointCount = 48,
 ): ImpulseResponsePoint[] {
   if (impulse.length === 0 || sampleRate <= 0 || pointCount < 1) return []
-  let peakIndex = 0
-  let peak = 0
-  for (let index = 0; index < impulse.length; index++) {
-    const value = Math.abs(impulse[index])
-    if (value > peak) {
-      peak = value
-      peakIndex = index
-    }
-  }
-  if (!(peak > 0)) return []
+  const arrival = findDirectArrival(impulse, sampleRate)
+  if (arrival.index === null) return []
+  const peakIndex = arrival.index
 
-  const fftLength = nextPowerOfTwo(impulse.length)
+  const fftLength = nextPowerOfTwo(Math.max(impulse.length, 256, pointCount * 4))
   const real = new Float32Array(fftLength)
   const imaginary = new Float32Array(fftLength)
   const preSamples = Math.max(1, Math.round(sampleRate * 0.001))

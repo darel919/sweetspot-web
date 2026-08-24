@@ -137,6 +137,34 @@ describe('measurement protocol boundary', () => {
     })).not.toBeNull()
   })
 
+  test('accepts compact aggregate response curves and rejects malformed points', () => {
+    const curve = {
+      frequenciesHz: [20, 100, 1_000, 20_000],
+      magnitudesDb: [1.1, 0.8, 0.2, -1.4],
+    }
+    expect(validatePayload('measurement.response', {
+      sessionId: 'cal_test',
+      current: 7,
+      total: 20,
+      left: curve,
+      right: null,
+    })).toBeNull()
+    expect(validatePayload('measurement.response', {
+      sessionId: 'cal_test',
+      current: 7,
+      total: 20,
+      left: { ...curve, magnitudesDb: [0] },
+      right: null,
+    })).not.toBeNull()
+    expect(validatePayload('measurement.response', {
+      sessionId: 'cal_test',
+      current: 7,
+      total: 20,
+      left: { ...curve, magnitudesDb: [1, 2, Number.NaN, 4] },
+      right: null,
+    })).not.toBeNull()
+  })
+
   test('recognizes room socket control messages separately from envelopes', () => {
     expect(isRoomSocketPingMessage({ kind: 'room.ping' })).toBe(true)
     expect(isRoomSocketServerMessage({ kind: 'room.presence', deviceOnline: false })).toBe(true)

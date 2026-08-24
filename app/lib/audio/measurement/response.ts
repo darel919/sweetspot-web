@@ -20,14 +20,17 @@ export interface ResponsePoint {
 export interface SweepDetection {
   found: boolean
   startSample: number | null
+  /** Offset of the complete sweep envelope in the recorder capture. */
   offsetMs: number | null
   confidence: number
 }
 
-export type MeasurementAnalysisStatus = 'ok' | 'signal_too_low' | 'sweep_not_found' | 'capture_clipped'
+export type MeasurementAnalysisStatus = 'ok' | 'signal_too_low' | 'sweep_not_found' | 'capture_too_short' | 'capture_clipped'
+export type MeasurementAnalysisFailure = Exclude<MeasurementAnalysisStatus, 'ok'>
 
 export interface MeasurementAnalysisDiagnostics {
   detected: boolean
+  /** Where the recorded sweep envelope was found inside the browser capture. */
   detectionOffsetMs: number | null
   detectionConfidence: number
   signalRms: number
@@ -37,6 +40,7 @@ export interface MeasurementAnalysisDiagnostics {
   clippedSamples: number
   sampleCount: number
   frequencyPoints: number
+  failureReason: MeasurementAnalysisFailure | null
 }
 
 export interface MeasurementAnalysis {
@@ -124,7 +128,10 @@ export function detectSweepStart(
   }
   if (maximum < 0.0001) return { found: false, startSample: null, offsetMs: null, confidence: 0 }
 
-  const baselineBlocks = Math.min(blocks, 12)
+  const baselineBlocks = Math.min(
+    blocks,
+    Math.max(1, Math.floor(sweepSampleParts(sweep, sampleRate).preRollSamples / blockSize)),
+  )
   let baseline = 0
   for (let index = 0; index < baselineBlocks; index++) baseline += levels[index]
   baseline = baselineBlocks > 0 ? baseline / baselineBlocks : 0
@@ -202,7 +209,7 @@ function emptyAnalysis(
     room: null,
     impulse: null,
     micProfile: summarizeMicCalibrationProfile(micProfile),
-    diagnostics,
+    diagnostics: { ...diagnostics, failureReason: status === 'ok' ? null : status },
   }
 }
 
@@ -226,6 +233,7 @@ export function analyzeMeasurement(
     clippedSamples: signal.clippedSamples,
     sampleCount: samples.length,
     frequencyPoints: 0,
+    failureReason: null,
   }
 
   if (signal.rms < 0.0001) return emptyAnalysis('signal_too_low', micProfile, baseDiagnostics)
@@ -235,9 +243,12 @@ export function analyzeMeasurement(
   const diagnostics = { ...baseDiagnostics, snrEstimateDb }
   if (snrEstimateDb !== null && snrEstimateDb < 8) return emptyAnalysis('signal_too_low', micProfile, diagnostics)
 
-  const impulse = deconvolveSweep(centeredSamples, sampleRate, sweep, detection.startSample)
+  const deconvolution = deconvolveSweep(centeredSamples, sampleRate, sweep, detection.startSample)
+  if (deconvolution.kind === 'capture_too_short') {
+    return emptyAnalysis('capture_too_short', micProfile, diagnostics)
+  }
   const rawPoints = normalizePoints(windowedImpulseResponse(
-    impulse.samples,
+    deconvolution.samples,
     sampleRate,
     sweep.startHz,
     sweep.endHz,
@@ -251,9 +262,13 @@ export function analyzeMeasurement(
     status: signal.clippedSamples > 0 ? 'capture_clipped' : 'ok',
     rawPoints,
     points,
-    room: impulse.summary.room,
-    impulse: impulse.summary,
+    room: deconvolution.summary.room,
+    impulse: deconvolution.summary,
     micProfile: summarizeMicCalibrationProfile(micProfile),
-    diagnostics: { ...diagnostics, frequencyPoints: points.length },
+    diagnostics: {
+      ...diagnostics,
+      frequencyPoints: points.length,
+      failureReason: signal.clippedSamples > 0 ? 'capture_clipped' : null,
+    },
   }
 }

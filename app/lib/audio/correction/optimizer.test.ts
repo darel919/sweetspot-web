@@ -23,6 +23,7 @@ function aggregate(values: number[]): AggregateResponse {
     spreadDb: points.map((point) => ({ ...point, magnitudeDb: 1 })),
     records: [],
     repeatability: [],
+    failedGroups: [],
   }
 }
 

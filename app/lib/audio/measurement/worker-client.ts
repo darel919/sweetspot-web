@@ -2,18 +2,86 @@ import type { MeasurementSweep } from '#shared/types/protocol'
 import type { MeasurementAnalysis } from './response'
 import type { MicCalibrationProfile } from '../mics/types'
 
+interface MeasurementWorkerRequest {
+  id: number
+  samples: ArrayBuffer
+  sampleRate: number
+  sweep: MeasurementSweep
+  micProfile: MicCalibrationProfile
+}
+
 interface MeasurementWorkerResponse {
+  id: number
   ok: boolean
   result?: MeasurementAnalysis
   error?: string
 }
 
+interface PendingRequest {
+  resolve: (result: MeasurementAnalysis) => void
+  reject: (error: Error) => void
+}
+
+let worker: Worker | null = null
+let nextRequestId = 1
+const pending = new Map<number, PendingRequest>()
+
 function isResponse(value: unknown): value is MeasurementWorkerResponse {
-  if (typeof value !== 'object' || value === null || !('ok' in value)) return false
+  if (typeof value !== 'object' || value === null || !('id' in value) || !('ok' in value)) return false
+  if (typeof value.id !== 'number' || !Number.isInteger(value.id) || value.id < 1) return false
   if (value.ok === true) return 'result' in value && value.result !== undefined
   return value.ok === false && (!('error' in value) || typeof value.error === 'string')
 }
 
+function rejectAll(error: Error) {
+  for (const request of pending.values()) request.reject(error)
+  pending.clear()
+}
+
+function resetWorker(error: Error) {
+  const current = worker
+  worker = null
+  if (current) {
+    current.onmessage = null
+    current.onerror = null
+    current.onmessageerror = null
+  }
+  current?.terminate()
+  rejectAll(error)
+}
+
+function getWorker(): Worker {
+  if (worker) return worker
+  const created = new Worker(new URL('../workers/measurement.worker.ts', import.meta.url), { type: 'module' })
+  created.onmessage = (event: MessageEvent<unknown>) => {
+    if (!isResponse(event.data)) {
+      resetWorker(new Error('Measurement worker returned an invalid response.'))
+      return
+    }
+    const request = pending.get(event.data.id)
+    if (!request) return
+    pending.delete(event.data.id)
+    if (event.data.ok && event.data.result) request.resolve(event.data.result)
+    else request.reject(new Error(event.data.error ?? 'Measurement analysis failed.'))
+  }
+  created.onerror = (event: ErrorEvent) => {
+    const detail = typeof event.message === 'string' && event.message.trim().length > 0
+      ? `: ${event.message.trim()}`
+      : ''
+    resetWorker(new Error(`Measurement worker failed${detail}.`))
+  }
+  created.onmessageerror = () => {
+    resetWorker(new Error('Measurement worker could not transfer its result.'))
+  }
+  worker = created
+  return created
+}
+
+/**
+ * Keep one worker alive for the calibration session. The worker module caches
+ * the generated sweep FFT, so sequential takes with the same sweep avoid
+ * rebuilding and re-transforming that reference.
+ */
 export function analyzeInWorker(
   samples: Float32Array,
   sampleRate: number,
@@ -21,68 +89,35 @@ export function analyzeInWorker(
   micProfile: MicCalibrationProfile,
 ): Promise<MeasurementAnalysis> {
   return new Promise((resolve, reject) => {
-    let worker: Worker
+    let currentWorker: Worker
     try {
-      worker = new Worker(new URL('../workers/measurement.worker.ts', import.meta.url), { type: 'module' })
+      currentWorker = getWorker()
     } catch (error: unknown) {
       reject(error instanceof Error ? error : new Error('Could not start the measurement worker.'))
       return
     }
 
-    let settled = false
-    const close = () => {
-      worker.onmessage = null
-      worker.onmessageerror = null
-      worker.onerror = null
-      worker.terminate()
-    }
-    const fail = (error: Error) => {
-      if (settled) return
-      settled = true
-      close()
-      reject(error)
-    }
-    const succeed = (result: MeasurementAnalysis) => {
-      if (settled) return
-      settled = true
-      close()
-      resolve(result)
-    }
-
-    worker.onmessage = (event: MessageEvent<unknown>) => {
-      const response = event.data
-      if (!isResponse(response)) {
-        fail(new Error('Measurement worker returned an invalid response.'))
-        return
-      }
-      if (response.ok && response.result) {
-        succeed(response.result)
-      } else {
-        fail(new Error(response.error ?? 'Measurement analysis failed.'))
-      }
-    }
-    worker.onerror = (event: ErrorEvent) => {
-      const detail = typeof event.message === 'string' && event.message.trim().length > 0
-        ? `: ${event.message.trim()}`
-        : ''
-      fail(new Error(`Measurement worker failed${detail}.`))
-    }
-    worker.onmessageerror = () => {
-      fail(new Error('Measurement worker could not transfer its result.'))
-    }
-
+    const id = nextRequestId++
+    pending.set(id, { resolve, reject })
     try {
-      const transferableSamples = samples.byteOffset === 0 && samples.byteLength === samples.buffer.byteLength
-        ? samples
-        : samples.slice()
-      worker.postMessage({
-        samples: transferableSamples.buffer,
+      let sampleBuffer: ArrayBuffer
+      if (samples.byteOffset === 0 && samples.byteLength === samples.buffer.byteLength && samples.buffer instanceof ArrayBuffer) {
+        sampleBuffer = samples.buffer
+      } else {
+        sampleBuffer = new ArrayBuffer(samples.byteLength)
+        new Uint8Array(sampleBuffer).set(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength))
+      }
+      const request: MeasurementWorkerRequest = {
+        id,
+        samples: sampleBuffer,
         sampleRate,
         sweep,
         micProfile,
-      }, [transferableSamples.buffer])
+      }
+      currentWorker.postMessage(request, [sampleBuffer])
     } catch (error: unknown) {
-      fail(error instanceof Error ? error : new Error('Could not send samples to the measurement worker.'))
+      pending.delete(id)
+      reject(error instanceof Error ? error : new Error('Could not send samples to the measurement worker.'))
     }
   })
 }

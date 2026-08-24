@@ -158,6 +158,7 @@ export const CALIBRATION_ERROR_CODES = [
   'invalid_session',
   'already_measuring',
   'capture_clipped',
+  'capture_too_short',
   'sweep_not_found',
   'signal_too_low',
   'measurement_unstable',
@@ -266,6 +267,18 @@ export interface MeasurementDiagnosticsPayload extends CalibrationSessionPayload
   current: number
   total: number
   diagnostics: MeasurementDiagnosticsValues
+}
+
+export interface MeasurementResponseChannel {
+  frequenciesHz: number[]
+  magnitudesDb: number[]
+}
+
+export interface MeasurementResponsePayload extends CalibrationSessionPayload {
+  current: number
+  total: number
+  left: MeasurementResponseChannel | null
+  right: MeasurementResponseChannel | null
 }
 
 /** Reply to probe.run / probe.status: DynamicsProcessing capacity + persistent instance state. */
@@ -394,6 +407,7 @@ const DEVICE_TARGETED_TYPES = [
   'measurement.playSweep',
   'measurement.abort',
   'measurement.diagnostics',
+  'measurement.response',
   'probe.run',
   'probe.status',
   'probe.persistent.start',
@@ -620,6 +634,37 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
       || diagnostics.decayConfidence === 'low')
 }
 
+const MAX_RESPONSE_POINTS = 64
+
+function isMeasurementResponseChannel(value: unknown): value is MeasurementResponseChannel {
+  if (!isRecord(value)) return false
+  const frequenciesHz = value.frequenciesHz
+  const magnitudesDb = value.magnitudesDb
+  if (!Array.isArray(frequenciesHz) || !Array.isArray(magnitudesDb)) return false
+  if (frequenciesHz.length < 2 || frequenciesHz.length > MAX_RESPONSE_POINTS || frequenciesHz.length !== magnitudesDb.length) {
+    return false
+  }
+  let previousFrequency = 0
+  for (let index = 0; index < frequenciesHz.length; index++) {
+    const frequency = frequenciesHz[index]
+    const magnitude = magnitudesDb[index]
+    if (!isFiniteNumber(frequency) || frequency <= 0 || frequency <= previousFrequency || !isFiniteNumber(magnitude)) {
+      return false
+    }
+    previousFrequency = frequency
+  }
+  return true
+}
+
+function isMeasurementResponsePayload(value: unknown): value is Record<string, unknown> & MeasurementResponsePayload {
+  if (!isSessionPayload(value)) return false
+  if (!isInteger(value.current) || value.current < 0) return false
+  if (!isInteger(value.total) || value.total < 1 || value.total > 256 || value.current > value.total) return false
+  if (value.left === null && value.right === null) return false
+  return (value.left === null || isMeasurementResponseChannel(value.left))
+    && (value.right === null || isMeasurementResponseChannel(value.right))
+}
+
 function isDbArray(value: unknown): value is number[] {
   return Array.isArray(value)
     && value.length === 64
@@ -715,6 +760,8 @@ export function validatePayload(type: string, payload: unknown): string | null {
       return isSessionWithOptionalContext(payload) ? null : `${type} requires sessionId and a valid optional context`
     case 'measurement.diagnostics':
       return isMeasurementDiagnosticsPayload(payload) ? null : `${type} requires compact diagnostics and a valid context`
+    case 'measurement.response':
+      return isMeasurementResponsePayload(payload) ? null : `${type} requires a compact finite response curve`
     case 'calibrationSession.abort':
       return isAbortPayload(payload) ? null : `${type} requires sessionId and a valid optional error`
     case 'calibration.apply':

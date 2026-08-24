@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { generateSweepReference } from '../sweep-reference'
+import { generateSweepReference, sweepSampleParts } from '../sweep-reference'
 import { deconvolveSweep } from './impulse'
 
 const sweep = {
@@ -16,6 +16,30 @@ const sweep = {
 }
 
 describe('browser-local impulse analysis', () => {
+  test('detects a direct path at the first causal sample', () => {
+    const reference = generateSweepReference(sweep)
+    const result = deconvolveSweep(reference, sweep.sampleRate, sweep, 0)
+
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') throw new Error('Expected a causal impulse response.')
+    expect(result.samples.length).toBe(sweepSampleParts(sweep).postRollSamples + 1)
+    expect(result.summary.room.directArrivalMs).toBeCloseTo(0, 1)
+  })
+
+  test('finds a small delayed direct path inside the causal search window', () => {
+    const parts = sweepSampleParts(sweep)
+    const directDelay = 8
+    const active = generateSweepReference(sweep).subarray(parts.preRollSamples)
+    const capture = new Float32Array(parts.preRollSamples + active.length + directDelay)
+    capture.set(active, parts.preRollSamples + directDelay)
+
+    const result = deconvolveSweep(capture, sweep.sampleRate, sweep, 0)
+
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') throw new Error('Expected a causal impulse response.')
+    expect(result.summary.room.directArrivalMs).toBeCloseTo(directDelay * 1000 / sweep.sampleRate, 1)
+  })
+
   test('finds an early reflection from a delayed swept-sine echo', () => {
     const reference = generateSweepReference(sweep)
     const directDelay = 160
@@ -28,6 +52,8 @@ describe('browser-local impulse analysis', () => {
       }
     }
     const result = deconvolveSweep(capture, sweep.sampleRate, sweep, directDelay)
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') throw new Error('Expected a causal impulse response.')
     expect(result.summary.room.directArrivalMs).toBeCloseTo(0, 1)
     expect(result.summary.room.earlyReflections[0].delayMs).toBeCloseTo(5, 1)
     expect(result.summary.room.earlyReflections[0].levelDbRelativeToDirect).toBeLessThan(-5)
@@ -41,7 +67,24 @@ describe('browser-local impulse analysis', () => {
 
     const result = deconvolveSweep(capture, sweep.sampleRate, sweep, directDelay)
 
-    expect(result.samples.length).toBeLessThanOrEqual(1_048_576)
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') throw new Error('Expected a causal impulse response.')
+    expect(result.samples.length).toBe(sweepSampleParts(sweep).postRollSamples + 1)
     expect(result.summary.room.directArrivalMs).toBeCloseTo(0, 1)
+  })
+
+  test('ignores samples after the intentionally captured post-roll', () => {
+    const reference = generateSweepReference(sweep)
+    const capture = new Float32Array(reference.length + 2_000)
+    capture.set(reference)
+    capture.fill(100, reference.length)
+
+    const result = deconvolveSweep(capture, sweep.sampleRate, sweep, 0)
+
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') throw new Error('Expected a causal impulse response.')
+    expect(result.samples.length).toBe(sweepSampleParts(sweep).postRollSamples + 1)
+    expect(result.summary.room.directArrivalMs).toBeCloseTo(0, 1)
+    expect(result.summary.peak).toBeLessThan(2)
   })
 })

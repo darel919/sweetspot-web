@@ -6,6 +6,7 @@ import {
 import { parseMicCalibrationProfile } from '../mics/profile'
 
 interface MeasurementWorkerRequest {
+  id: number
   samples: ArrayBuffer
   sampleRate: number
   sweep: unknown
@@ -13,6 +14,7 @@ interface MeasurementWorkerRequest {
 }
 
 interface MeasurementWorkerResponse {
+  id: number
   ok: boolean
   result?: MeasurementAnalysis
   error?: string
@@ -45,9 +47,10 @@ self.addEventListener('message', (event) => {
       event.data.sweep,
       micProfile,
     )
-    self.postMessage({ ok: true, result })
+    self.postMessage({ id: event.data.id, ok: true, result })
   } catch (error: unknown) {
     self.postMessage({
+      id: event.data.id,
       ok: false,
       error: error instanceof Error ? error.message : 'Measurement analysis failed.',
     })

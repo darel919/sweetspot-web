@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import type { MeasurementSweep } from '#shared/types/protocol'
 import { analyzeMeasurement } from './response'
-import { generateSweepReference } from '../sweep-reference'
+import { windowedImpulseResponse } from './impulse'
+import { generateSweepReference, sweepSampleParts } from '../sweep-reference'
 import { parseMicCalibrationProfile } from '../mics/profile'
 import type { MicCalibrationProfile } from '../mics/types'
 
@@ -65,6 +66,7 @@ describe('measurement response analysis', () => {
     expect(result.micProfile.id).toBe('test-microphone')
     expect(result.diagnostics.detected).toBe(true)
     expect(result.diagnostics.detectionOffsetMs).toBeGreaterThanOrEqual(0)
+    expect(result.diagnostics.failureReason).toBeNull()
   })
 
   test('rejects silence before trying to estimate a response', () => {
@@ -86,5 +88,32 @@ describe('measurement response analysis', () => {
     expect(result.status).toBe('ok')
     const pointIndex = Math.floor(result.points.length / 2)
     expect(result.rawPoints[pointIndex].magnitudeDb - result.points[pointIndex].magnitudeDb).toBeCloseTo(3, 1)
+  })
+
+  test('rejects a capture that ends before the active sweep ends', () => {
+    const reference = generateSweepReference(sweep)
+    const parts = sweepSampleParts(sweep)
+    const shortCapture = reference.slice(0, parts.preRollSamples + parts.sweepSamples - 1)
+
+    const result = analyzeMeasurement(shortCapture, sweep.sampleRate, sweep, profile)
+
+    expect(result.status).toBe('capture_too_short')
+    expect(result.diagnostics.failureReason).toBe('capture_too_short')
+    expect(result.points).toHaveLength(0)
+  })
+
+  test('gates late response artifacts using the bounded direct path', () => {
+    const clean = new Float32Array(4_096)
+    clean[0] = 1
+    const withLateArtifact = clean.slice()
+    withLateArtifact[2_500] = 100
+
+    const cleanPoints = windowedImpulseResponse(clean, sweep.sampleRate, 20, 3_500, 12)
+    const gatedPoints = windowedImpulseResponse(withLateArtifact, sweep.sampleRate, 20, 3_500, 12)
+
+    expect(gatedPoints).toHaveLength(cleanPoints.length)
+    for (let index = 0; index < cleanPoints.length; index++) {
+      expect(gatedPoints[index].magnitudeDb).toBeCloseTo(cleanPoints[index].magnitudeDb, 5)
+    }
   })
 })

@@ -38,10 +38,16 @@ function responsePolyline(points: ResponsePoint[]): string {
 
 <template>
   <div class="response-graph">
-    <p class="mini-label">Measured response, mic-compensated relative display</p>
+    <p class="mini-label">
+      {{ aggregateLeft || aggregateRight ? 'Final robust aggregate, mic-compensated relative display' : 'Measured response, mic-compensated relative display' }}
+    </p>
     <svg viewBox="0 0 800 280" role="img" aria-label="Measured speaker response">
       <line x1="0" y1="140" x2="800" y2="140" class="graph-zero" />
-      <polyline :points="responsePolyline(analysis.points)" class="graph-line" />
+      <polyline
+        v-if="!aggregateLeft && !aggregateRight"
+        :points="responsePolyline(analysis.points)"
+        class="graph-line"
+      />
       <polyline v-if="aggregateLeft" :points="responsePolyline(aggregateLeft.points)" class="graph-line graph-left" />
       <polyline v-if="aggregateRight" :points="responsePolyline(aggregateRight.points)" class="graph-line graph-right" />
       <text x="0" y="268" class="graph-label">20 Hz</text>

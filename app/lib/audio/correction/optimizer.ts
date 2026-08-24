@@ -143,6 +143,7 @@ export function combineChannelAggregates(
     spreadDb,
     records: [...left.records, ...right.records],
     repeatability: [...left.repeatability, ...right.repeatability],
+    failedGroups: [...left.failedGroups, ...right.failedGroups],
   }
 }
 

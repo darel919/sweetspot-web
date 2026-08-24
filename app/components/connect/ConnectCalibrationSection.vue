@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AggregateResponse, MeasurementRecord } from '~/lib/audio/measurement/aggregation'
+import type { AggregateResponse, MeasurementRecord, RepeatabilitySummary } from '~/lib/audio/measurement/aggregation'
 import type { CalibrationPosition } from '~/lib/audio/measurement/plan'
 import type { MeasurementAnalysis } from '~/lib/audio/measurement/response'
 import type { MicCalibrationProfile } from '~/lib/audio/mics/types'
@@ -25,6 +25,7 @@ defineProps<{
   measurementAggregateRight: AggregateResponse | null
   measurementValidationAnalysis: MeasurementAnalysis | null
   measurementRepeatabilityPassed: boolean
+  measurementFailedGroups: readonly RepeatabilitySummary[]
   measurementCurrentPosition: CalibrationPosition | null
   measurementProgress: { current: number; total: number }
   measurementCaptureInfo: CalibrationCaptureInfo | null
@@ -49,6 +50,7 @@ const emit = defineEmits<{
   (event: 'confirm-loudness'): void
   (event: 'continue-measurement'): void
   (event: 'cancel-measurement'): void
+  (event: 'retry-failed-groups'): void
   (event: 'start-validation'): void
   (event: 'apply-recommended-correction'): void
   (event: 'apply-calibration'): void
@@ -118,21 +120,34 @@ function settingLabel(value: boolean | null): string {
     </dl>
 
     <ConnectResponseGraph
-      v-if="measurementAnalysis"
+      v-if="measurementStage === 'complete' && measurementAnalysis"
       :analysis="measurementAnalysis"
       :aggregate-left="measurementAggregateLeft"
       :aggregate-right="measurementAggregateRight"
     />
 
-    <div v-if="measurementAggregateLeft || measurementAggregateRight" class="response-graph">
+    <div v-if="measurementStage === 'complete' && (measurementAggregateLeft || measurementAggregateRight)" class="response-graph">
       <p class="mini-label">Advanced result: left/right robust spatial aggregates</p>
+      <p :class="measurementRepeatabilityPassed ? 'calibration-result calibration-result-good' : 'calibration-result calibration-result-failed'">
+        {{ measurementRepeatabilityPassed ? 'CALIBRATION COMPLETE' : 'CALIBRATION FAILED — measurements were not repeatable' }}
+      </p>
       <dl class="spec">
         <dt>repeatability</dt>
-        <dd>{{ measurementRepeatabilityPassed ? 'passed' : 'not passed — do not apply correction' }}</dd>
+        <dd>{{ measurementRepeatabilityPassed ? 'passed' : 'failed — do not apply correction' }}</dd>
         <dt>left takes</dt><dd>{{ measurementAggregateLeft?.records.length ?? 0 }}</dd>
         <dt>right takes</dt><dd>{{ measurementAggregateRight?.records.length ?? 0 }}</dd>
         <dt>room readings</dt><dd>{{ measurementRecords.length }}</dd>
       </dl>
+      <ul v-if="measurementFailedGroups.length" class="calibration-failures">
+        <li v-for="failure in measurementFailedGroups" :key="`${failure.positionId}:${failure.channel}`">
+          <template v-if="failure.failureReason === 'insufficient_takes'">
+            {{ failure.positionId }} / {{ failure.channel }}. Only {{ failure.takeCount }} of {{ failure.expectedTakeCount }} takes were valid; failed takes {{ failure.failedTakeIndices.map((index) => index + 1).join(', ') }}.
+          </template>
+          <template v-else>
+            {{ failure.positionId }} / {{ failure.channel }}. Median spread {{ failure.medianSpreadDb.toFixed(1) }} dB, maximum {{ failure.maxSpreadDb.toFixed(1) }} dB, {{ Math.round(failure.withinTwoDbFraction * 100) }}% within 2 dB.
+          </template>
+        </li>
+      </ul>
       <p class="note">The curves are separate channel checks. Echo and decay metrics are diagnostic; magnitude EQ cannot remove physical reflections.</p>
       <div class="actions">
         <span class="mini-label">correction strength</span>
@@ -143,6 +158,13 @@ function settingLabel(value: boolean | null): string {
           @click="emit('select-strength', strength.id)"
         >
           {{ strength.label }}
+        </button>
+        <button
+          v-if="measurementFailedGroups.length"
+          :disabled="correctionPending"
+          @click="emit('retry-failed-groups')"
+        >
+          Retry failed position/channel groups
         </button>
       </div>
       <div class="actions">
@@ -190,3 +212,25 @@ function settingLabel(value: boolean | null): string {
     </details>
   </section>
 </template>
+
+<style scoped>
+.calibration-result {
+  margin: 0.75rem 0;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.calibration-result-good {
+  color: #a9e6b1;
+}
+
+.calibration-result-failed {
+  color: #ffb48a;
+}
+
+.calibration-failures {
+  margin: 0.75rem 0;
+  padding-left: 1.2rem;
+  color: #ffb48a;
+}
+</style>

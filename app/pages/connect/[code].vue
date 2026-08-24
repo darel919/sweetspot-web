@@ -1,109 +1,126 @@
 <template>
   <div class="page connect-page">
-    <ConnectHeaderStatus :status="status" :toast-message="toastMessage" />
+    <div :inert="calibrationLocked" :aria-hidden="calibrationLocked ? 'true' : undefined">
+      <ConnectHeaderStatus :status="status" :toast-message="toastMessage" />
 
-    <section v-if="codeError" class="block">
-      <p class="error">INVALID PAIR CODE. Scan the QR code on your TV again.</p>
-    </section>
+      <section v-if="codeError" class="block">
+        <p class="error">INVALID PAIR CODE. Scan the QR code on your TV again.</p>
+      </section>
 
-    <template v-else>
-      <ConnectDeviceSection
-        :room="room"
-        :device-online="deviceOnline"
-        :snapshot="snapshot"
-      />
+      <template v-else>
+        <ConnectDeviceSection
+          :room="room"
+          :device-online="deviceOnline"
+          :snapshot="snapshot"
+        />
 
-      <ConnectEqualizerSection
-        v-if="snapshot"
-        :snapshot="snapshot"
-        :presets="presets"
-        :eq-draft="eqDraft"
-        :eq-dirty="eqDirty"
-        :profile-name="profileName"
-        @band-input="onBandInput"
-        @commit-bands="commitBands"
-        @reset-bands="resetBands"
-        @set-engine="setEngine"
-        @apply-preset="applyPreset"
-        @update-profile-name="profileName = $event"
-        @save-profile="saveProfile"
-        @load-profile="loadProfile"
-        @delete-profile="deleteProfile"
-      />
+        <ConnectEqualizerSection
+          v-if="snapshot"
+          :snapshot="snapshot"
+          :presets="presets"
+          :eq-draft="eqDraft"
+          :eq-dirty="eqDirty"
+          :profile-name="profileName"
+          @band-input="onBandInput"
+          @commit-bands="commitBands"
+          @reset-bands="resetBands"
+          @set-engine="setEngine"
+          @apply-preset="applyPreset"
+          @update-profile-name="profileName = $event"
+          @save-profile="saveProfile"
+          @load-profile="loadProfile"
+          @delete-profile="deleteProfile"
+        />
 
-      <ConnectCalibrationSection
-        v-if="snapshot"
-        :snapshot="snapshot"
-        :measurement-stage="measurementStage"
-        :measurement-busy="measurementBusy"
-        :measurement-message="measurementMessage"
-        :measurement-analysis="measurementAnalysis"
-        :measurement-records="measurementRecords"
-        :measurement-aggregate-left="measurementAggregateLeft"
-        :measurement-aggregate-right="measurementAggregateRight"
-        :measurement-validation-analysis="measurementValidationAnalysis"
-        :measurement-repeatability-passed="measurementRepeatabilityPassed"
-        :measurement-current-position="measurementCurrentPosition"
-        :measurement-progress="measurementProgress"
-        :measurement-capture-info="measurementCaptureInfo"
-        :measurement-profiles="measurementProfiles"
-        :measurement-selected-profile-id="measurementSelectedProfileId"
-        :measurement-profile-error="measurementProfileError"
-        :recommended-correction="recommendedCorrection"
-        :correction-strength="correctionStrength"
-        :correction-strength-options="correctionStrengthOptions"
-        :correction-pending="correctionPending"
-        :calibration-applied="calibrationApplied"
-        :cal-json="calJson"
-        :cal-status="calStatus"
-        :validation-metrics="validationMetrics"
-        @select-profile="measurementSelectedProfileId = $event"
-        @select-strength="correctionStrength = $event"
-        @edit-curve="calJson = $event"
-        @start-measurement="startMeasurement"
-        @confirm-loudness="confirmLoudness"
-        @continue-measurement="continueMeasurement"
-        @cancel-measurement="cancelMeasurement"
-        @start-validation="startValidation"
-        @apply-recommended-correction="applyRecommendedCorrection"
-        @apply-calibration="applyCalibration"
-        @reset-calibration="resetCalibration"
-      />
+        <ConnectCalibrationSection
+          v-if="snapshot"
+          :snapshot="snapshot"
+          :measurement-stage="measurementStage"
+          :measurement-busy="measurementBusy"
+          :measurement-message="measurementMessage"
+          :measurement-analysis="measurementAnalysis"
+          :measurement-records="measurementRecords"
+          :measurement-aggregate-left="measurementAggregateLeft"
+          :measurement-aggregate-right="measurementAggregateRight"
+          :measurement-validation-analysis="measurementValidationAnalysis"
+          :measurement-repeatability-passed="measurementRepeatabilityPassed"
+          :measurement-failed-groups="measurementFailedGroups"
+          :measurement-current-position="measurementCurrentPosition"
+          :measurement-progress="measurementProgress"
+          :measurement-capture-info="measurementCaptureInfo"
+          :measurement-profiles="measurementProfiles"
+          :measurement-selected-profile-id="measurementSelectedProfileId"
+          :measurement-profile-error="measurementProfileError"
+          :recommended-correction="recommendedCorrection"
+          :correction-strength="correctionStrength"
+          :correction-strength-options="correctionStrengthOptions"
+          :correction-pending="correctionPending"
+          :calibration-applied="calibrationApplied"
+          :cal-json="calJson"
+          :cal-status="calStatus"
+          :validation-metrics="validationMetrics"
+          @select-profile="measurementSelectedProfileId = $event"
+          @select-strength="correctionStrength = $event"
+          @edit-curve="calJson = $event"
+          @start-measurement="startMeasurement"
+          @confirm-loudness="confirmLoudness"
+          @continue-measurement="continueMeasurement"
+          @cancel-measurement="cancelMeasurement"
+          @retry-failed-groups="retryFailedGroups"
+          @start-validation="startValidation"
+          @apply-recommended-correction="applyRecommendedCorrection"
+          @apply-calibration="applyCalibration"
+          @reset-calibration="resetCalibration"
+        />
 
-      <ConnectDiagnosticsSection
-        v-if="snapshot"
-        :diag-pending="diagPending"
-        :probe="probe"
-        :probe-pending="probePending"
-        :persistent-state="persistentState"
-        :persist-bands="persistBands"
-        :virtualizer-on="virtualizerOn"
-        :device-info="deviceInfo"
-        :dev-info-pending="devInfoPending"
-        @run-effects-diagnostics="runEffectsDiagnostics"
-        @run-capacity-probe="runCapacityProbe"
-        @set-persist-bands="persistBands = $event"
-        @create-persistent="createPersistent"
-        @release-persistent="releasePersistent"
-        @apply-test-curve="applyTestCurve"
-        @quick-audible="quickAudible"
-        @set-virtualizer="setVirtualizer"
-        @fetch-device-info="fetchDeviceInfo"
-      />
+        <ConnectDiagnosticsSection
+          v-if="snapshot"
+          :diag-pending="diagPending"
+          :probe="probe"
+          :probe-pending="probePending"
+          :persistent-state="persistentState"
+          :persist-bands="persistBands"
+          :virtualizer-on="virtualizerOn"
+          :device-info="deviceInfo"
+          :dev-info-pending="devInfoPending"
+          @run-effects-diagnostics="runEffectsDiagnostics"
+          @run-capacity-probe="runCapacityProbe"
+          @set-persist-bands="persistBands = $event"
+          @create-persistent="createPersistent"
+          @release-persistent="releasePersistent"
+          @apply-test-curve="applyTestCurve"
+          @quick-audible="quickAudible"
+          @set-virtualizer="setVirtualizer"
+          @fetch-device-info="fetchDeviceInfo"
+        />
 
-      <ConnectEffectChainSection
-        v-if="effectsDiagnostics"
-        :effects-diagnostics="effectsDiagnostics"
-      />
-      <ConnectStateSection
-        v-else
-        :status="status"
-        @request-state="getState"
-      />
+        <ConnectEffectChainSection
+          v-if="effectsDiagnostics"
+          :effects-diagnostics="effectsDiagnostics"
+        />
+        <ConnectStateSection
+          v-else
+          :status="status"
+          @request-state="getState"
+        />
 
-      <ConnectDebugPanel v-if="debugLog.length" :entries="debugLog" />
-      <ConnectFooter :version="snapshot?.device.appVersion ?? '—'" />
-    </template>
+        <ConnectDebugPanel v-if="debugLog.length" :entries="debugLog" />
+        <ConnectFooter :version="snapshot?.device.appVersion ?? '—'" />
+      </template>
+    </div>
+
+    <ConnectCalibrationOverlay
+      v-if="calibrationLocked"
+      :stage="measurementStage"
+      :message="measurementMessage"
+      :current-position="measurementCurrentPosition"
+      :current-channel="measurementCurrentChannel"
+      :progress="measurementProgress"
+      :estimated-remaining-seconds="measurementEstimatedRemainingSeconds"
+      @confirm-loudness="confirmLoudness"
+      @continue-measurement="continueMeasurement"
+      @cancel-measurement="cancelMeasurement"
+    />
   </div>
 </template>
 
@@ -120,9 +137,11 @@ import type {
 import { calculateCorrection, combineChannelAggregates, targetErrorRms, type CorrectionStrength } from '~/lib/audio/correction/optimizer'
 import { mapCorrectionToBands } from '~/lib/audio/correction/bandMapper'
 import { shouldNotifyOffline } from '~/composables/connectionState'
-import { onMounted, onScopeDispose } from 'vue'
+import { onMounted, onScopeDispose, watch } from 'vue'
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import '~/components/connect/connect.css'
 import ConnectCalibrationSection from '~/components/connect/ConnectCalibrationSection.vue'
+import ConnectCalibrationOverlay from '~/components/connect/ConnectCalibrationOverlay.vue'
 import ConnectDebugPanel from '~/components/connect/ConnectDebugPanel.vue'
 import ConnectDeviceSection from '~/components/connect/ConnectDeviceSection.vue'
 import ConnectDiagnosticsSection from '~/components/connect/ConnectDiagnosticsSection.vue'
@@ -131,6 +150,7 @@ import ConnectEqualizerSection from '~/components/connect/ConnectEqualizerSectio
 import ConnectFooter from '~/components/connect/ConnectFooter.vue'
 import ConnectHeaderStatus from '~/components/connect/ConnectHeaderStatus.vue'
 import ConnectStateSection from '~/components/connect/ConnectStateSection.vue'
+import { isCalibrationActiveStage } from '~/composables/useCalibrationSession'
 import type {
   AggregateResponse,
 } from '~/lib/audio/measurement/aggregation'
@@ -161,8 +181,11 @@ const {
   validationAggregateLeft: measurementValidationAggregateLeft,
   validationAggregateRight: measurementValidationAggregateRight,
   repeatabilityPassed: measurementRepeatabilityPassed,
+  failedRepeatabilityGroups: measurementFailedGroups,
   currentPosition: measurementCurrentPosition,
+  currentChannel: measurementCurrentChannel,
   progress: measurementProgress,
+  estimatedRemainingSeconds: measurementEstimatedRemainingSeconds,
   captureInfo: measurementCaptureInfo,
   profiles: measurementProfiles,
   selectedProfileId: measurementSelectedProfileId,
@@ -170,13 +193,54 @@ const {
   loadProfiles: loadMeasurementProfiles,
   start: startMeasurementSession,
   startValidation: startValidationSession,
+  retryFailedGroups,
   confirmLoudness,
   continuePosition: continueMeasurement,
   cancel: cancelMeasurement,
 } = useCalibrationSession(connection)
-const measurementBusy = computed(() => ['requesting-microphone', 'preparing', 'loudness', 'position-pause', 'recording', 'analyzing', 'ending'].includes(measurementStage.value))
+const measurementBusy = computed(() => isCalibrationActiveStage(measurementStage.value))
+const calibrationLocked = measurementBusy
 const toastMessage = ref('')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
+let restoreScrollLock: (() => void) | null = null
+let beforeUnloadAttached = false
+
+function preventCalibrationUnload(event: BeforeUnloadEvent) {
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+function syncCalibrationLock(locked: boolean) {
+  if (!import.meta.client) return
+  if (locked && restoreScrollLock === null) {
+    const bodyOverflow = document.body.style.overflow
+    const documentOverflow = document.documentElement.style.overflow
+    document.body.style.overflow = 'hidden'
+    document.documentElement.style.overflow = 'hidden'
+    restoreScrollLock = () => {
+      document.body.style.overflow = bodyOverflow
+      document.documentElement.style.overflow = documentOverflow
+    }
+  }
+  if (locked && !beforeUnloadAttached) {
+    window.addEventListener('beforeunload', preventCalibrationUnload)
+    beforeUnloadAttached = true
+  }
+  if (!locked) {
+    restoreScrollLock?.()
+    restoreScrollLock = null
+    if (beforeUnloadAttached) {
+      window.removeEventListener('beforeunload', preventCalibrationUnload)
+      beforeUnloadAttached = false
+    }
+  }
+}
+
+watch(calibrationLocked, syncCalibrationLock, { immediate: true })
+onBeforeRouteLeave(() => calibrationLocked.value ? false : undefined)
+onBeforeRouteUpdate((to, from) => {
+  if (calibrationLocked.value && to.fullPath !== from.fullPath) return false
+})
 
 const snapshot = ref<StateSnapshot | null>(null)
 const effectsDiagnostics = ref<EffectsDiagnostics | null>(null)
@@ -209,6 +273,7 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
   if (!currentSnapshot || !profile) return null
   const bandCutoffs = currentSnapshot.calibration.frequenciesHz
   if (bandCutoffs.length !== 64) return null
+  if (measurementStage.value !== 'complete' || !measurementRepeatabilityPassed.value) return null
   const headroomVerified = currentSnapshot.capabilities.supportsHeadroomCompensation === true
   const independent = currentSnapshot.capabilities.supportsIndependentCalibration === true
     && measurementAggregateLeft.value !== null
@@ -218,6 +283,7 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
       ? combineChannelAggregates(measurementAggregateLeft.value, measurementAggregateRight.value)
       : null)
   if (!commonAggregate) return null
+  if (commonAggregate.points.length < 2) return null
 
   const common = calculateCorrection(commonAggregate, profile, {
     strength: correctionStrength.value,
@@ -284,6 +350,7 @@ watch([status, deviceOnline], ([nextStatus, nextOnline], [previousStatus, previo
 
 onScopeDispose(() => {
   if (toastTimer !== null) clearTimeout(toastTimer)
+  syncCalibrationLock(false)
 })
 
 onMessage((env) => {
@@ -388,7 +455,7 @@ async function applyCalibration() {
 
 async function applyRecommendedCorrection() {
   const correction = recommendedCorrection.value
-  if (!correction || !measurementRepeatabilityPassed.value || correctionPending.value) return
+  if (measurementStage.value !== 'complete' || !correction || !measurementRepeatabilityPassed.value || correctionPending.value) return
   if (!deviceOnline.value) {
     showToast('The TV connection is offline. The correction cannot apply.')
     return
