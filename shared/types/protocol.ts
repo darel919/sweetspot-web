@@ -239,6 +239,7 @@ const DEVICE_TARGETED_TYPES = [
   'probe.persistent.release',
   'probe.curve.apply',
   'diagnostics.deviceInfo',
+  'diagnostics.effects',
 ] as const
 
 export type DeviceTargetedType = (typeof DEVICE_TARGETED_TYPES)[number]
