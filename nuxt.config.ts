@@ -3,5 +3,10 @@ export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: true },
   ssr: false,
-  nitro: { preset: 'static' },
+  nitro: {
+    preset: 'static',
+    prerender: {
+      routes: ['/api/calibration/profiles'],
+    },
+  },
 })

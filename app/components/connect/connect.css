@@ -1,0 +1,232 @@
+.connect-page {
+  --bg: #0a0a0b;
+  --ink: #ececea;
+  --dim: #85858a;
+  --faint: #4c4c52;
+  --line: #232327;
+  --line-strong: #3a3a40;
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 4rem;
+  background: var(--bg);
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  letter-spacing: 0.01em;
+}
+
+.connect-page .block {
+  padding: 1.75rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.connect-page .label {
+  margin: 0 0 1rem;
+  font-size: 0.68rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--dim);
+}
+.connect-page .sub-label {
+  margin: 1.5rem 0 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+.connect-page .response-graph {
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+.connect-page .note {
+  margin: 0.35rem 0;
+  font-size: 0.72rem;
+  color: var(--dim);
+}
+.connect-page .error {
+  margin: 0;
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  text-decoration-color: var(--dim);
+}
+.connect-page .dim {
+  color: var(--faint);
+}
+.connect-page .mark {
+  color: var(--dim);
+}
+
+.connect-page .spec {
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  row-gap: 0.3rem;
+  column-gap: 1rem;
+  margin: 0;
+}
+.connect-page .spec.wide {
+  grid-template-columns: 8rem 1fr;
+  margin-top: 1rem;
+}
+.connect-page .spec dt {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--dim);
+}
+.connect-page .spec dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.connect-page .actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+.connect-page button {
+  padding: 0.42rem 0.95rem;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.connect-page button:hover:not(:disabled),
+.connect-page button:focus-visible {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+  outline: none;
+}
+.connect-page button:active:not(:disabled) {
+  background: var(--dim);
+  border-color: var(--dim);
+}
+.connect-page button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.connect-page button.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+}
+
+.connect-page input[type='text'],
+.connect-page input[type='number'],
+.connect-page textarea {
+  padding: 0.42rem 0.6rem;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.78rem;
+}
+.connect-page input:focus-visible,
+.connect-page textarea:focus-visible {
+  outline: none;
+  border-color: var(--dim);
+}
+.connect-page textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  display: block;
+  margin-bottom: 0.6rem;
+}
+
+.connect-page .inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.75rem 0;
+}
+.connect-page .inline-form input[type='text'] {
+  flex: 1;
+  min-width: 12rem;
+}
+.connect-page .inline-form input[type='number'] {
+  width: 5rem;
+}
+
+.connect-page .list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+.connect-page .list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0;
+  border-top: 1px solid var(--line);
+}
+.connect-page .list-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+.connect-page .list-actions button {
+  padding: 0.25rem 0.6rem;
+}
+
+.connect-page .grid {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  font-size: 0.74rem;
+}
+.connect-page .grid th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--dim);
+  padding: 0.3rem 0.6rem 0.3rem 0;
+  border-bottom: 1px solid var(--ink);
+}
+.connect-page .grid td {
+  padding: 0.35rem 0.6rem 0.35rem 0;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+
+.connect-page .fold summary {
+  cursor: pointer;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--dim);
+  user-select: none;
+  padding: 0.3rem 0;
+}
+.connect-page .fold[open] summary {
+  color: var(--ink);
+}
+.connect-page .fold textarea {
+  margin-top: 0.6rem;
+}
+
+.connect-page .log {
+  max-height: 22rem;
+  overflow-y: auto;
+  margin: 0.5rem 0 0;
+  padding: 0.6rem;
+  border: 1px solid var(--line);
+  white-space: pre-wrap;
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: var(--dim);
+}

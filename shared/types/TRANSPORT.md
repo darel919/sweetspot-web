@@ -1,4 +1,4 @@
-# SweetSpot transport: HTTP mailbox over Cloudflare
+# SweetSpot transport: WebSocket-first mailbox over Cloudflare
 
 The SPA (static) and the room API live on one Cloudflare Worker.
 Room state lives in a Durable Object, in memory only. No database.
@@ -6,7 +6,7 @@ Room state lives in a Durable Object, in memory only. No database.
 ## Roles
 
 - `device` = the Android TV. Registers with a pair code and long-polls for commands.
-- `client` = the phone/laptop dashboard. Posts commands, reads device-originated messages.
+- `client` = the phone/laptop dashboard. Sends commands and receives device-originated messages.
 
 ## Pair code → room
 
@@ -36,11 +36,17 @@ has not polled for over 15 s — clients then see it offline.
 ```
 GET  /api/room/{code}/state           -> { deviceOnline: bool, messages: [Envelope,...] }
 POST /api/room/{code}/client          Envelope       -> { ok: true }
+GET  /api/room/{code}/ws              WebSocket      -> room.ready, Envelope, or room.presence
 ```
 
-`state` returns everything the device has published since the client's last
-poll plus current presence. Clients poll this every 1-2 s while the page is
-open; there is no persistent connection.
+The dashboard opens `/ws` first. The room sends `room.ready` with current
+presence and queued device messages. It then sends each new device Envelope
+immediately. The dashboard sends `room.ping` on the same connection to refresh
+presence.
+
+The dashboard falls back to `state?since=...` when the WebSocket cannot open.
+The HTTP endpoints remain part of the transport so older browsers and device
+builds keep working.
 
 ## Envelope
 
@@ -51,8 +57,10 @@ rate limiting per connection.
 ## Delivery semantics
 
 At-most-once. A command is removed from the queue when handed to the device's
-poll. The dashboard treats missing `replyTo` responses as retryable; all
-calibration flows are user-driven, so nothing depends on guaranteed delivery.
+poll. A command sent through the WebSocket enters the same queue as a command
+sent to `/client`. The dashboard treats missing `replyTo` responses as
+retryable. All calibration flows are user-driven, so nothing depends on
+guaranteed delivery.
 
 ## Lifecycle
 

@@ -1,26 +1,28 @@
 import { describe, expect, test } from 'bun:test'
+import { readdir } from 'node:fs/promises'
 import { parseMicCalibrationProfile } from './profile'
-import { parseMicCalibrationManifest } from './registry'
+import { parseMicCalibrationFileList } from './registry'
 
 describe('microphone profile catalog', () => {
   test('accepts safe JSON profile filenames and preserves catalog order', () => {
-    expect(parseMicCalibrationManifest({
-      profiles: ['apple_iphone17pro_2025.json', 'studio_reference.json'],
-    }).profiles).toEqual(['apple_iphone17pro_2025.json', 'studio_reference.json'])
+    expect(parseMicCalibrationFileList({
+      files: ['apple_iphone17pro_2025.json', 'studio_reference.json'],
+    }).files).toEqual(['apple_iphone17pro_2025.json', 'studio_reference.json'])
   })
 
-  test('rejects directory traversal, index self-reference, and duplicates', () => {
-    expect(() => parseMicCalibrationManifest({ profiles: ['../profile.json'] })).toThrow()
-    expect(() => parseMicCalibrationManifest({ profiles: ['index.json'] })).toThrow()
-    expect(() => parseMicCalibrationManifest({ profiles: ['profile.json', 'profile.json'] })).toThrow()
+  test('rejects directory traversal and duplicates', () => {
+    expect(() => parseMicCalibrationFileList({ files: ['../profile.json'] })).toThrow()
+    expect(() => parseMicCalibrationFileList({ files: ['profile.json', 'profile.json'] })).toThrow()
   })
 
-  test('the checked-in public catalog points to parseable profiles', async () => {
-    const manifestInput: unknown = JSON.parse(await Bun.file('public/calibration/profiles/index.json').text())
-    const manifest = parseMicCalibrationManifest(manifestInput)
-    expect(manifest.profiles.length).toBeGreaterThan(0)
+  test('the public profile directory contains parseable profiles', async () => {
+    const entries = await readdir('public/calibration/profiles', { withFileTypes: true })
+    const fileList = parseMicCalibrationFileList({
+      files: entries.filter((entry) => entry.isFile()).map((entry) => entry.name),
+    })
+    expect(fileList.files.length).toBeGreaterThan(0)
 
-    for (const filename of manifest.profiles) {
+    for (const filename of fileList.files) {
       const profileInput: unknown = JSON.parse(await Bun.file(`public/calibration/profiles/${filename}`).text())
       const profile = parseMicCalibrationProfile(profileInput)
       expect(profile.points.length).toBeGreaterThan(100)

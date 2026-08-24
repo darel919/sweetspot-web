@@ -2,6 +2,7 @@ import { onScopeDispose, readonly, ref, shallowRef } from 'vue'
 import {
   PROTOCOL_VERSION,
   isEnvelope,
+  isRoomSocketServerMessage,
   type Envelope,
   type Role,
 } from '#shared/types/protocol'
@@ -16,6 +17,9 @@ interface RoomStateResponse {
 }
 
 const CLIENT_POLL_MS = 1200
+const SOCKET_RECONNECT_MIN_MS = 800
+const SOCKET_RECONNECT_MAX_MS = 10_000
+const SOCKET_FALLBACK_ATTEMPTS = 2
 
 let messageCounter = 0
 
@@ -27,6 +31,12 @@ function roomUrl(code: string, action: string): string {
   return `/api/room/${encodeURIComponent(code)}/${action}`
 }
 
+function roomSocketUrl(code: string): string {
+  const url = new URL(roomUrl(code, 'ws'), window.location.href)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
+}
+
 function isRoomStateResponse(value: unknown): value is RoomStateResponse {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   if (!('deviceOnline' in value) || typeof value.deviceOnline !== 'boolean') return false
@@ -34,11 +44,6 @@ function isRoomStateResponse(value: unknown): value is RoomStateResponse {
   return value.messages.every(isEnvelope)
 }
 
-/**
- * Polling client for the phone/laptop dashboard.
- * Posts commands and polls device-published messages from the room mailbox.
- * No persistent connection: plain fetch works everywhere, including iOS Safari.
- */
 export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   const status = ref<ConnectionState>('disconnected')
   const deviceOnline = ref(false)
@@ -47,9 +52,16 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
 
   let disposed = false
   let pollTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  let socket: WebSocket | null = null
+  let socketReady = false
+  let socketAttempts = 0
+  let fallbackPolling = false
   let since = 0
 
   const handlers = new Set<(env: Envelope) => void>()
+  const seenMessageIds = new Set<string>()
 
   function log(direction: 'in' | 'out', text: string) {
     debugLog.value = [...debugLog.value.slice(-99), { at: Date.now(), direction, text }]
@@ -67,7 +79,22 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   }
 
   function markConnectionInterrupted() {
-    if (!disposed && status.value === 'connected') status.value = 'connecting'
+    if (disposed) return
+    deviceOnline.value = false
+    status.value = 'offline'
+  }
+
+  function deliver(env: Envelope) {
+    if (seenMessageIds.has(env.id)) return
+    seenMessageIds.add(env.id)
+    if (seenMessageIds.size > 512) {
+      const first = seenMessageIds.values().next().value
+      if (first) seenMessageIds.delete(first)
+    }
+    lastMessage.value = env
+    log('in', JSON.stringify(env))
+    if (env.type === 'pong') return
+    for (const handler of handlers) handler(env)
   }
 
   async function post(env: Envelope): Promise<boolean> {
@@ -85,21 +112,35 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     }
   }
 
+  function dispatch(env: Envelope) {
+    if (role === 'client' && socketReady && socket?.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(JSON.stringify(env))
+        return
+      } catch {
+        markConnectionInterrupted()
+      }
+    }
+    void post(env)
+  }
+
   function send(type: string, payload: unknown = {}, replyTo?: string): string {
     const env = makeEnvelope(type, payload, replyTo)
     log('out', JSON.stringify(env))
-    void post(env)
+    dispatch(env)
     return env.id
   }
 
   function request<T = unknown>(type: string, payload: unknown = {}): Promise<Envelope<T>> {
     return new Promise((resolve) => {
-      const id = send(type, payload)
-      const off = onMessage((env) => {
-        if (env.replyTo !== id) return
+      const env = makeEnvelope(type, payload)
+      const off = onMessage((incoming) => {
+        if (incoming.replyTo !== env.id) return
         off()
-        resolve(env as Envelope<T>)
+        resolve(incoming as Envelope<T>)
       })
+      log('out', JSON.stringify(env))
+      dispatch(env)
     })
   }
 
@@ -108,47 +149,164 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     return () => handlers.delete(handler)
   }
 
+  function stopPolling() {
+    if (pollTimer !== null) clearTimeout(pollTimer)
+    pollTimer = null
+    fallbackPolling = false
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer !== null) clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+
+  function startHeartbeat() {
+    stopHeartbeat()
+    heartbeatTimer = setInterval(() => {
+      if (!socketReady || socket?.readyState !== WebSocket.OPEN) return
+      try {
+        socket.send(JSON.stringify({ kind: 'room.ping' }))
+      } catch {
+        socket?.close()
+      }
+    }, 5000)
+  }
+
+  function applySocketMessage(value: unknown) {
+    if (isEnvelope(value)) {
+      deliver(value)
+      return
+    }
+    if (!isRoomSocketServerMessage(value)) return
+    if (value.kind === 'room.ready') {
+      const wasOnline = deviceOnline.value
+      deviceOnline.value = value.deviceOnline
+      status.value = connectionStateForDevice(value.deviceOnline)
+      for (const env of value.messages) deliver(env)
+      if (!wasOnline && value.deviceOnline) send('state.get')
+      return
+    }
+    if (value.kind === 'room.presence') {
+      const wasOnline = deviceOnline.value
+      deviceOnline.value = value.deviceOnline
+      status.value = connectionStateForDevice(value.deviceOnline)
+      if (!wasOnline && value.deviceOnline) send('state.get')
+      return
+    }
+    log('in', JSON.stringify(value))
+  }
+
+  function startPolling() {
+    if (disposed || pollTimer !== null || socketReady) return
+    fallbackPolling = true
+    void pollOnce()
+  }
+
   async function pollOnce() {
-    if (disposed) return
+    if (disposed || socketReady || !fallbackPolling) return
     try {
       const res = await fetch(roomUrl(pairCode(), `state?since=${since}`))
       if (!res.ok) throw new Error(`state request failed with HTTP ${res.status}`)
       const raw: unknown = await res.json()
       if (!isRoomStateResponse(raw)) throw new Error('state response was malformed')
-      if (disposed) return
+      if (disposed || socketReady) return
 
       const wasOnline = deviceOnline.value
       deviceOnline.value = raw.deviceOnline
       status.value = connectionStateForDevice(raw.deviceOnline)
-      for (const env of raw.messages) {
-        since = Math.max(since, Date.now() - 1)
-        lastMessage.value = env
-        log('in', JSON.stringify(env))
-        if (env.type === 'pong') continue
-        for (const handler of handlers) handler(env)
-      }
-      if (!wasOnline && deviceOnline.value) {
-        void send('state.get')
-      }
+      for (const env of raw.messages) deliver(env)
+      if (raw.messages.length > 0) since = Date.now()
+      if (!wasOnline && deviceOnline.value) send('state.get')
     } catch {
-      if (!disposed) status.value = 'connecting'
+      markConnectionInterrupted()
     }
-    if (!disposed) {
-      pollTimer = setTimeout(pollOnce, CLIENT_POLL_MS)
+    if (!disposed && fallbackPolling && !socketReady) {
+      pollTimer = setTimeout(() => {
+        pollTimer = null
+        void pollOnce()
+      }, CLIENT_POLL_MS)
+    }
+  }
+
+  function scheduleReconnect() {
+    if (disposed || reconnectTimer !== null) return
+    socketAttempts++
+    if (socketAttempts >= SOCKET_FALLBACK_ATTEMPTS) startPolling()
+    const delay = Math.min(
+      SOCKET_RECONNECT_MIN_MS * (2 ** Math.max(0, socketAttempts - 1)),
+      SOCKET_RECONNECT_MAX_MS,
+    )
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      openSocket()
+    }, delay)
+  }
+
+  function openSocket() {
+    if (disposed || role !== 'client' || socket !== null) return
+    let next: WebSocket
+    try {
+      next = new WebSocket(roomSocketUrl(pairCode()))
+    } catch {
+      markConnectionInterrupted()
+      scheduleReconnect()
+      return
+    }
+    socket = next
+    next.onopen = () => {
+      if (socket !== next || disposed) return
+      socketReady = true
+      socketAttempts = 0
+      stopPolling()
+      startHeartbeat()
+      status.value = 'connecting'
+    }
+    next.onmessage = (event) => {
+      if (socket !== next || disposed) return
+      let value: unknown
+      try {
+        value = JSON.parse(typeof event.data === 'string' ? event.data : '')
+      } catch {
+        return
+      }
+      applySocketMessage(value)
+    }
+    next.onerror = () => {
+      if (socket === next) next.close()
+    }
+    next.onclose = () => {
+      if (socket !== next) return
+      socket = null
+      socketReady = false
+      stopHeartbeat()
+      if (disposed) return
+      markConnectionInterrupted()
+      scheduleReconnect()
     }
   }
 
   function connect() {
     if (disposed || !pairCode()) return
+    if (role === 'client') {
+      if (socket !== null || reconnectTimer !== null) return
+      status.value = 'connecting'
+      openSocket()
+      return
+    }
     if (pollTimer !== null) return
     status.value = 'connecting'
-    void pollOnce()
+    startPolling()
   }
 
   function disconnect() {
     disposed = true
-    if (pollTimer) clearTimeout(pollTimer)
-    pollTimer = null
+    stopPolling()
+    stopHeartbeat()
+    if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+    reconnectTimer = null
+    socket?.close()
+    socket = null
+    socketReady = false
     status.value = 'disconnected'
   }
 

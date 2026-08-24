@@ -12,6 +12,7 @@ export interface MicCalibrationTrust {
 export interface MicCalibrationProfile {
   readonly id: string
   readonly name: string
+  readonly author: string
   readonly manufacturer: string
   readonly model: string
   readonly sourceUrl: string
@@ -37,6 +38,7 @@ export interface MicCalibrationProfile {
 export interface MicCalibrationSummary {
   readonly id: string
   readonly name: string
+  readonly author: string
   readonly sourceUrl: string
   readonly sourceDate: string
   readonly referenceType: MicCalibrationProfile['referenceType']

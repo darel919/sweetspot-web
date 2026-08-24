@@ -2,7 +2,7 @@
 
 Transport-agnostic message contract between the browser dashboard (`client`)
 and the Android TV (`device`). Transport details live in
-[TRANSPORT.md](./TRANSPORT.md) (HTTP mailbox on Cloudflare).
+[TRANSPORT.md](./TRANSPORT.md) (WebSocket-first mailbox on Cloudflare).
 
 ## Envelope
 
@@ -26,17 +26,22 @@ Rules:
 
 ## Message types
 
-Session-scoped types from the earlier WebSocket relay (`session.hello`,
-`session.welcome`, `session.peerJoined/Left`, `session.error`) are no longer
-routed; presence is derived from polling activity.
+Session-scoped types (`session.hello`, `session.welcome`, `session.peerJoined/Left`,
+`session.error`) are not routed. Room WebSocket presence uses `room.ready` and
+`room.presence` control frames.
 
 Device-targeted (client -> device): `state.get`, `engine.enable`,
 `engine.bypass`, `engine.setBands`, `engine.applyPreset`, `profile.list`,
 `profile.save`, `profile.load`, `profile.delete`, `calibration.get`,
-`calibration.apply`, `calibration.reset`, `measurement.prepare`,
-`measurement.playSweep`, `measurement.abort`.
+`calibration.apply`, `calibration.reset`, `calibrationSession.begin`,
+`calibrationSession.end`, `calibrationSession.abort`,
+`calibrationSession.loudness.start`, `calibrationSession.loudness.stop`,
+`calibrationSession.progress`, `measurement.prepare`,
+`measurement.playSweep`, `measurement.abort`, `measurement.diagnostics`.
 
 Device-published (device -> clients): `state.snapshot`, `state.changed`,
+`calibrationSession.started`, `calibrationSession.ended`,
+`calibrationSession.loudness.started`, `calibrationSession.loudness.stopped`,
 `measurement.ready`, `measurement.started`, `measurement.finished`,
 `measurement.error`.
 

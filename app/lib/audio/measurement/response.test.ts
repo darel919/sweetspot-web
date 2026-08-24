@@ -26,6 +26,7 @@ function makeProfile(points: MicCalibrationProfile['points'] = [
   return parseMicCalibrationProfile({
     id: 'test-microphone',
     name: 'Test microphone',
+    author: 'Test author',
     manufacturer: 'Test',
     model: 'Test',
     sourceUrl: 'https://example.test/microphone',

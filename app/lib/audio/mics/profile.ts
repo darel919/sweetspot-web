@@ -90,6 +90,7 @@ export function parseMicCalibrationProfile(input: unknown): MicCalibrationProfil
   return {
     id: requiredString(input, 'id'),
     name: requiredString(input, 'name'),
+    author: requiredString(input, 'author'),
     manufacturer: requiredString(input, 'manufacturer'),
     model: requiredString(input, 'model'),
     sourceUrl: requiredString(input, 'sourceUrl'),
@@ -163,6 +164,7 @@ export function summarizeMicCalibrationProfile(profile: MicCalibrationProfile): 
   return {
     id: profile.id,
     name: profile.name,
+    author: profile.author,
     sourceUrl: profile.sourceUrl,
     sourceDate: profile.sourceDate,
     referenceType: profile.referenceType,

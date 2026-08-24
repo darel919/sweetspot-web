@@ -1,322 +1,108 @@
 <template>
-  <div class="page">
-    <header class="masthead">
-      <div class="brand">
-        <h1>SWEETSPOT</h1>
-        <p class="sub">remote equalizer console</p>
-      </div>
-      <div class="conn" :data-state="status">
-        <span class="conn-dot"></span>
-        <span class="conn-label">{{ status }}</span>
-      </div>
-    </header>
-
-    <Transition name="toast">
-      <div v-if="toastMessage" class="toast" role="status" aria-live="assertive">
-        {{ toastMessage }}
-      </div>
-    </Transition>
+  <div class="page connect-page">
+    <ConnectHeaderStatus :status="status" :toast-message="toastMessage" />
 
     <section v-if="codeError" class="block">
       <p class="error">INVALID PAIR CODE. Scan the QR code on your TV again.</p>
     </section>
 
     <template v-else>
-      <section class="block">
-        <h2 class="label">01 · Device</h2>
-        <dl class="spec">
-          <dt>room</dt>
-          <dd>{{ room }}</dd>
-          <dt>television</dt>
-          <dd>{{ deviceOnline ? 'online' : 'offline' }}</dd>
-          <dt>engine</dt>
-          <dd>
-            <template v-if="snapshot">
-              {{ snapshot.engine.enabled ? (snapshot.engine.hasControl ? 'active' : 'no control') : 'bypassed' }}
-              <span class="dim">/</span> {{ snapshot.engine.presetName }}
-            </template>
-            <template v-else>unknown</template>
-          </dd>
-        </dl>
-      </section>
+      <ConnectDeviceSection
+        :room="room"
+        :device-online="deviceOnline"
+        :snapshot="snapshot"
+      />
 
-      <section v-if="snapshot" class="block">
-        <h2 class="label">02 · Equalizer</h2>
+      <ConnectEqualizerSection
+        v-if="snapshot"
+        :snapshot="snapshot"
+        :presets="presets"
+        :eq-draft="eqDraft"
+        :eq-dirty="eqDirty"
+        :profile-name="profileName"
+        @band-input="onBandInput"
+        @commit-bands="commitBands"
+        @reset-bands="resetBands"
+        @set-engine="setEngine"
+        @apply-preset="applyPreset"
+        @update-profile-name="profileName = $event"
+        @save-profile="saveProfile"
+        @load-profile="loadProfile"
+        @delete-profile="deleteProfile"
+      />
 
-        <div class="actions">
-          <button @click="setEngine(true)" :disabled="snapshot.engine.enabled">Enable</button>
-          <button :disabled="!snapshot.engine.enabled" @click="setEngine(false)">Bypass</button>
-        </div>
+      <ConnectCalibrationSection
+        v-if="snapshot"
+        :snapshot="snapshot"
+        :measurement-stage="measurementStage"
+        :measurement-busy="measurementBusy"
+        :measurement-message="measurementMessage"
+        :measurement-analysis="measurementAnalysis"
+        :measurement-records="measurementRecords"
+        :measurement-aggregate-left="measurementAggregateLeft"
+        :measurement-aggregate-right="measurementAggregateRight"
+        :measurement-validation-analysis="measurementValidationAnalysis"
+        :measurement-repeatability-passed="measurementRepeatabilityPassed"
+        :measurement-current-position="measurementCurrentPosition"
+        :measurement-progress="measurementProgress"
+        :measurement-capture-info="measurementCaptureInfo"
+        :measurement-profiles="measurementProfiles"
+        :measurement-selected-profile-id="measurementSelectedProfileId"
+        :measurement-profile-error="measurementProfileError"
+        :recommended-correction="recommendedCorrection"
+        :correction-strength="correctionStrength"
+        :correction-strength-options="correctionStrengthOptions"
+        :correction-pending="correctionPending"
+        :calibration-applied="calibrationApplied"
+        :cal-json="calJson"
+        :cal-status="calStatus"
+        :validation-metrics="validationMetrics"
+        @select-profile="measurementSelectedProfileId = $event"
+        @select-strength="correctionStrength = $event"
+        @edit-curve="calJson = $event"
+        @start-measurement="startMeasurement"
+        @confirm-loudness="confirmLoudness"
+        @continue-measurement="continueMeasurement"
+        @cancel-measurement="cancelMeasurement"
+        @start-validation="startValidation"
+        @apply-recommended-correction="applyRecommendedCorrection"
+        @apply-calibration="applyCalibration"
+        @reset-calibration="resetCalibration"
+      />
 
-        <div v-if="presets.length" class="actions">
-          <span class="mini-label">preset</span>
-          <button
-            v-for="p in presets"
-            :key="p.id"
-            :class="{ active: snapshot.engine.activePreset === p.id }"
-            @click="applyPreset(p.id)"
-          >
-            {{ p.name }}
-          </button>
-        </div>
+      <ConnectDiagnosticsSection
+        v-if="snapshot"
+        :diag-pending="diagPending"
+        :probe="probe"
+        :probe-pending="probePending"
+        :persistent-state="persistentState"
+        :persist-bands="persistBands"
+        :virtualizer-on="virtualizerOn"
+        :device-info="deviceInfo"
+        :dev-info-pending="devInfoPending"
+        @run-effects-diagnostics="runEffectsDiagnostics"
+        @run-capacity-probe="runCapacityProbe"
+        @set-persist-bands="persistBands = $event"
+        @create-persistent="createPersistent"
+        @release-persistent="releasePersistent"
+        @apply-test-curve="applyTestCurve"
+        @quick-audible="quickAudible"
+        @set-virtualizer="setVirtualizer"
+        @fetch-device-info="fetchDeviceInfo"
+      />
 
-        <div class="band-scroll">
-          <div v-for="(lvl, i) in eqDraft" :key="i" class="band">
-            <span class="band-val">{{ lvl.toFixed(1) }}</span>
-            <input
-              type="range"
-              :min="snapshot.userEq.minDb"
-              :max="snapshot.userEq.maxDb"
-              step="0.5"
-              :value="lvl"
-              @input="onBandInput(i, $event)"
-              @change="commitBands"
-            />
-            <span class="band-hz">{{ hzLabel(snapshot.userEq.frequenciesHz[i]) }}</span>
-          </div>
-        </div>
+      <ConnectEffectChainSection
+        v-if="effectsDiagnostics"
+        :effects-diagnostics="effectsDiagnostics"
+      />
+      <ConnectStateSection
+        v-else
+        :status="status"
+        @request-state="getState"
+      />
 
-        <div class="actions">
-          <button :disabled="!eqDirty" @click="resetBands">Discard changes</button>
-        </div>
-
-        <form class="inline-form" @submit.prevent="saveProfile">
-          <input v-model="profileName" type="text" placeholder="new profile name" />
-          <button type="submit" :disabled="!profileName.trim()">Save</button>
-        </form>
-
-        <ul v-if="snapshot.profiles.length" class="list">
-          <li v-for="p in snapshot.profiles" :key="p.id">
-            <span>{{ p.name }}</span>
-            <span class="list-actions">
-              <button @click="loadProfile(p.name)">Load</button>
-              <button @click="deleteProfile(p.name)">Delete</button>
-            </span>
-          </li>
-        </ul>
-        <p v-else class="note">No saved profiles.</p>
-      </section>
-
-      <section v-if="snapshot" class="block">
-        <h2 class="label">03 · Calibration</h2>
-        <h3 class="sub-label">Room measurement</h3>
-        <p class="note">
-          Follow the instructions shown on the TV. The browser captures the microphone and analyzes the sweep locally. Raw microphone audio never leaves this browser.
-        </p>
-        <div v-if="measurementProfiles.length" class="actions">
-          <label class="inline-form">
-            <span class="mini-label">microphone profile</span>
-            <select v-model="measurementSelectedProfileId" :disabled="measurementBusy">
-              <option v-for="profile in measurementProfiles" :key="profile.id" :value="profile.id">
-                {{ profile.name }}
-              </option>
-            </select>
-          </label>
-        </div>
-        <p v-if="measurementProfileError" class="error">{{ measurementProfileError }}</p>
-        <p v-else-if="!measurementProfiles.length" class="note">Loading microphone profiles…</p>
-        <p v-if="!snapshot.capabilities.supportsSweep" class="note">
-          This TV build does not advertise a target-validated sweep yet. Calibration is unavailable until the real TV output path has been tested.
-        </p>
-        <div class="actions">
-          <button
-            :disabled="!snapshot.capabilities.supportsSweep || measurementBusy"
-            @click="startMeasurement"
-          >
-            {{ measurementBusy ? measurementMessage : 'Start measurement' }}
-          </button>
-          <button v-if="measurementBusy" @click="cancelMeasurement">Cancel</button>
-        </div>
-        <p v-if="measurementMessage" class="note">{{ measurementMessage }}</p>
-
-        <dl v-if="measurementCaptureInfo" class="spec">
-          <dt>sample rate</dt><dd>{{ measurementCaptureInfo.settings.sampleRate ?? 'unknown' }} Hz</dd>
-          <dt>channels</dt><dd>{{ measurementCaptureInfo.settings.channelCount ?? 'unknown' }}</dd>
-          <dt>echo cancellation</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.echoCancellation) }}</dd>
-          <dt>noise suppression</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.noiseSuppression) }}</dd>
-          <dt>auto gain</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.autoGainControl) }}</dd>
-        </dl>
-
-        <div v-if="measurementAnalysis" class="response-graph">
-          <p class="mini-label">Measured response, mic-compensated relative display</p>
-          <svg viewBox="0 0 800 280" role="img" aria-label="Measured speaker response">
-            <line x1="0" y1="140" x2="800" y2="140" class="graph-zero" />
-            <polyline :points="responsePolyline(measurementAnalysis.points)" class="graph-line" />
-            <text x="0" y="268" class="graph-label">20 Hz</text>
-            <text x="760" y="268" class="graph-label">20 kHz</text>
-            <text x="8" y="16" class="graph-label">+12 dB</text>
-            <text x="8" y="154" class="graph-label">0 dB</text>
-            <text x="8" y="276" class="graph-label">−12 dB</text>
-          </svg>
-          <dl class="spec">
-            <dt>signal RMS</dt><dd>{{ dbfs(measurementAnalysis.diagnostics.signalRms) }}</dd>
-            <dt>peak</dt><dd>{{ dbfs(measurementAnalysis.diagnostics.signalPeak) }}</dd>
-            <dt>detected offset</dt><dd>{{ measurementAnalysis.diagnostics.detectionOffsetMs?.toFixed(1) ?? 'unknown' }} ms</dd>
-            <dt>clipping</dt><dd>{{ measurementAnalysis.diagnostics.clipped ? 'yes' : 'no' }}</dd>
-            <dt>mic profile</dt><dd>{{ measurementAnalysis.micProfile.name }}</dd>
-            <dt>profile source</dt>
-            <dd>
-              <a :href="measurementAnalysis.micProfile.sourceUrl" target="_blank" rel="noreferrer">
-                {{ measurementAnalysis.micProfile.dataMethod }}, {{ measurementAnalysis.micProfile.sourceDate }}
-              </a>
-            </dd>
-            <dt>capture path</dt><dd>{{ measurementAnalysis.micProfile.capturePath }}</dd>
-          </dl>
-        </div>
-
-        <dl class="spec">
-          <dt>status</dt>
-          <dd>{{ snapshot.calibration.active ? 'active' : 'inactive' }}</dd>
-          <dt>bands</dt>
-          <dd>{{ snapshot.calibration.bandsDb.length }}</dd>
-        </dl>
-        <details class="fold">
-          <summary>Curve JSON</summary>
-          <textarea v-model="calJson" rows="4" spellcheck="false"></textarea>
-          <div class="actions">
-            <button @click="applyCalibration">Apply curve</button>
-            <button @click="resetCalibration">Reset to flat</button>
-          </div>
-          <p v-if="calStatus" class="note">{{ calStatus }}</p>
-        </details>
-      </section>
-
-      <section v-if="snapshot" class="block">
-        <h2 class="label">04 · Diagnostics</h2>
-        <p class="note">Upmix experiments. Effect-chain inventory, DynamicsProcessing capacity, persistent test instances.</p>
-
-        <div class="actions">
-          <button :disabled="diagPending" @click="runEffectsDiagnostics">
-            {{ diagPending ? 'Working…' : 'Effect chain' }}
-          </button>
-          <button :disabled="probePending" @click="runCapacityProbe">
-            {{ probePending ? 'Probing…' : 'Capacity probe' }}
-          </button>
-        </div>
-
-        <template v-if="probe">
-          <dl class="spec">
-            <dt>highest reliable</dt><dd>{{ probe.highest }} bands</dd>
-            <dt>recommended</dt><dd>{{ probe.recommended }} bands</dd>
-          </dl>
-          <table v-if="probe.results.length" class="grid">
-            <thead>
-              <tr><th>bands</th><th>result</th><th>actual</th><th>control</th><th>enabled</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in probe.results" :key="r.requested">
-                <td>{{ r.requested }}</td>
-                <td>{{ r.pass ? 'PASS' : 'FAIL' }}</td>
-                <td>{{ r.actualBands }}</td>
-                <td>{{ r.hasControl }}</td>
-                <td>{{ r.enabled }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </template>
-
-        <h3 class="sub-label">Persistent instance</h3>
-        <form class="inline-form" @submit.prevent="createPersistent">
-          <input v-model.number="persistBands" type="number" min="1" max="64" />
-          <button type="submit">Create enabled</button>
-          <button type="button" @click="releasePersistent">Release</button>
-        </form>
-        <p v-if="persistentState" class="note">
-          {{ persistentState.active ? `ACTIVE at ${persistentState.bands} bands` : 'none' }}
-          <template v-if="persistentState.active && persistentState.curve"> · curve {{ persistentState.curve }}</template>
-          <template v-if="persistentState.curveSummary">
-            · {{ persistentState.curveSummary.bandsCut }} cut / {{ persistentState.curveSummary.bandsFlat }} flat
-          </template>
-        </p>
-
-        <h3 class="sub-label">Audible test curves</h3>
-        <p class="note">Dramatic EQ through the persistent instance. Proof it sits on the live path.</p>
-        <div class="actions">
-          <button @click="applyTestCurve('hollow')">Hollow mids</button>
-          <button @click="applyTestCurve('flat')">Flat</button>
-          <button v-for="n in [16, 32, 64]" :key="n" @click="quickAudible(n)">Hollow @ {{ n }}</button>
-        </div>
-
-        <h3 class="sub-label">Virtualizer A/B</h3>
-        <p class="note">Persistent session-0 Virtualizer at max strength. Toggle while playing stereo through AUX.</p>
-        <div class="actions">
-          <button :class="{ active: virtualizerOn }" @click="setVirtualizer(true)">Virtualizer ON</button>
-          <button :class="{ active: !virtualizerOn }" @click="setVirtualizer(false)">Virtualizer OFF</button>
-        </div>
-        <p class="note">{{ virtualizerOn ? 'Widening active' : 'Bypassed' }}</p>
-
-        <h3 class="sub-label">Device info</h3>
-        <div class="actions">
-          <button :disabled="devInfoPending" @click="fetchDeviceInfo">
-            {{ devInfoPending ? 'Sampling…' : 'Sample CPU / memory' }}
-          </button>
-        </div>
-        <dl v-if="deviceInfo" class="spec">
-          <dt>app cpu</dt><dd>{{ deviceInfo.cpuPercent.toFixed(1) }}%</dd>
-          <dt>audioserver cpu</dt>
-          <dd>{{ deviceInfo.audioserverPid != null ? deviceInfo.audioserverCpuPercent.toFixed(1) + '%' : 'n/a' }}</dd>
-          <dt>native heap</dt><dd>{{ fmtBytes(deviceInfo.nativeHeapAllocated) }} / {{ fmtBytes(deviceInfo.nativeHeapSize) }}</dd>
-          <dt>java heap</dt><dd>{{ fmtBytes(deviceInfo.javaHeapTotal - deviceInfo.javaHeapFree) }} / {{ fmtBytes(deviceInfo.javaHeapMax) }}</dd>
-          <dt>pss</dt><dd>{{ fmtBytes(deviceInfo.pssTotalKb * 1024) }}</dd>
-        </dl>
-      </section>
-
-      <section v-if="effectsDiagnostics" class="block">
-        <h2 class="label">05 · Effect chain</h2>
-        <p v-if="effectsDiagnostics.error" class="error">{{ effectsDiagnostics.error }}</p>
-        <template v-else>
-          <table v-if="effectsDiagnostics.inventory.length" class="grid">
-            <thead>
-              <tr><th>type</th><th>name</th><th>mode</th><th>vendor</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="(e, i) in effectsDiagnostics.inventory" :key="i">
-                <td>{{ e.typeName }}<span v-if="e.isVendor" class="mark">*</span></td>
-                <td>{{ e.name }}</td>
-                <td>{{ e.connectMode }}</td>
-                <td>{{ e.isVendor ? 'yes' : '' }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="note">No effects reported.</p>
-
-          <dl class="spec wide">
-            <template v-for="p in effectsDiagnostics.sessionProbes" :key="p.effectType">
-              <dt>{{ p.effectType }}</dt>
-              <dd>
-                <template v-if="!p.constructed">failed: {{ p.exception }}</template>
-                <template v-else>
-                  constructed · control {{ p.hasControl }} · enabled {{ p.enabled }}
-                  <code>{{ p.parameters }}</code>
-                </template>
-              </dd>
-            </template>
-          </dl>
-          <details class="fold">
-            <summary>Raw JSON</summary>
-            <pre class="log">{{ JSON.stringify(effectsDiagnostics, null, 2) }}</pre>
-          </details>
-        </template>
-      </section>
-
-      <section v-else class="block">
-        <h2 class="label">05 · State</h2>
-        <p v-if="status === 'offline'" class="note">The TV is offline. Open SweetSpot on the TV.</p>
-        <div v-else-if="status === 'connected'" class="actions">
-          <button @click="getState">Request state</button>
-        </div>
-        <p v-else class="note">Connecting…</p>
-      </section>
-
-      <details v-if="debugLog.length" class="block fold">
-        <summary>Debug log · {{ debugLog.length }}</summary>
-        <pre class="log">{{ debugLog.map(l => `${new Date(l.at).toISOString()} ${l.direction.toUpperCase()} ${l.text}`).join('\n') }}</pre>
-      </details>
-
-      <footer class="colophon">
-        <span>sweetspot-web</span>
-        <span>{{ snapshot?.device.appVersion ?? '—' }}</span>
-      </footer>
+      <ConnectDebugPanel v-if="debugLog.length" :entries="debugLog" />
+      <ConnectFooter :version="snapshot?.device.appVersion ?? '—'" />
     </template>
   </div>
 </template>
@@ -331,9 +117,28 @@ import type {
   ProbeDiagnostics,
   StateSnapshot,
 } from '#shared/types/protocol'
-import type { ResponsePoint } from '~/lib/audio/measurement/response'
+import { calculateCorrection, combineChannelAggregates, targetErrorRms, type CorrectionStrength } from '~/lib/audio/correction/optimizer'
+import { mapCorrectionToBands } from '~/lib/audio/correction/bandMapper'
 import { shouldNotifyOffline } from '~/composables/connectionState'
 import { onMounted, onScopeDispose } from 'vue'
+import '~/components/connect/connect.css'
+import ConnectCalibrationSection from '~/components/connect/ConnectCalibrationSection.vue'
+import ConnectDebugPanel from '~/components/connect/ConnectDebugPanel.vue'
+import ConnectDeviceSection from '~/components/connect/ConnectDeviceSection.vue'
+import ConnectDiagnosticsSection from '~/components/connect/ConnectDiagnosticsSection.vue'
+import ConnectEffectChainSection from '~/components/connect/ConnectEffectChainSection.vue'
+import ConnectEqualizerSection from '~/components/connect/ConnectEqualizerSection.vue'
+import ConnectFooter from '~/components/connect/ConnectFooter.vue'
+import ConnectHeaderStatus from '~/components/connect/ConnectHeaderStatus.vue'
+import ConnectStateSection from '~/components/connect/ConnectStateSection.vue'
+import type {
+  AggregateResponse,
+} from '~/lib/audio/measurement/aggregation'
+import type {
+  CalibrationValidationMetrics,
+  CorrectionStrengthOption,
+  RecommendedCorrection,
+} from '~/components/connect/types'
 
 const route = useRoute()
 
@@ -348,15 +153,28 @@ const {
   stage: measurementStage,
   message: measurementMessage,
   analysis: measurementAnalysis,
+  records: measurementRecords,
+  aggregateLeft: measurementAggregateLeft,
+  aggregateRight: measurementAggregateRight,
+  aggregateBoth: measurementAggregateBoth,
+  validationAnalysis: measurementValidationAnalysis,
+  validationAggregateLeft: measurementValidationAggregateLeft,
+  validationAggregateRight: measurementValidationAggregateRight,
+  repeatabilityPassed: measurementRepeatabilityPassed,
+  currentPosition: measurementCurrentPosition,
+  progress: measurementProgress,
   captureInfo: measurementCaptureInfo,
   profiles: measurementProfiles,
   selectedProfileId: measurementSelectedProfileId,
   profileError: measurementProfileError,
   loadProfiles: loadMeasurementProfiles,
   start: startMeasurementSession,
+  startValidation: startValidationSession,
+  confirmLoudness,
+  continuePosition: continueMeasurement,
   cancel: cancelMeasurement,
 } = useCalibrationSession(connection)
-const measurementBusy = computed(() => ['requesting-microphone', 'preparing', 'recording', 'analyzing', 'ending'].includes(measurementStage.value))
+const measurementBusy = computed(() => ['requesting-microphone', 'preparing', 'loudness', 'position-pause', 'recording', 'analyzing', 'ending'].includes(measurementStage.value))
 const toastMessage = ref('')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -367,7 +185,7 @@ const diagPending = ref(false)
 const probe = ref<ProbeDiagnostics | null>(null)
 const probePending = ref(false)
 const persistentState = ref<PersistentProbeState | null>(null)
-const persistBands = ref(64)
+const persistBands = ref<number | string>(64)
 
 const deviceInfo = ref<DeviceInfoPayload | null>(null)
 const devInfoPending = ref(false)
@@ -376,6 +194,71 @@ const calJson = ref('')
 const calStatus = ref('')
 const calIsError = ref(false)
 const profileName = ref('')
+const correctionPending = ref(false)
+const calibrationApplied = ref(false)
+const correctionStrength = ref<CorrectionStrength>('normal')
+const correctionStrengthOptions: readonly CorrectionStrengthOption[] = [
+  { id: 'gentle', label: 'Gentle' },
+  { id: 'normal', label: 'Normal' },
+  { id: 'strong', label: 'Strong' },
+]
+
+const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
+  const currentSnapshot = snapshot.value
+  const profile = measurementProfiles.value.find((candidate) => candidate.id === measurementSelectedProfileId.value)
+  if (!currentSnapshot || !profile) return null
+  const bandCutoffs = currentSnapshot.calibration.frequenciesHz
+  if (bandCutoffs.length !== 64) return null
+  const headroomVerified = currentSnapshot.capabilities.supportsHeadroomCompensation === true
+  const independent = currentSnapshot.capabilities.supportsIndependentCalibration === true
+    && measurementAggregateLeft.value !== null
+    && measurementAggregateRight.value !== null
+  const commonAggregate = measurementAggregateBoth.value
+    ?? (measurementAggregateLeft.value && measurementAggregateRight.value
+      ? combineChannelAggregates(measurementAggregateLeft.value, measurementAggregateRight.value)
+      : null)
+  if (!commonAggregate) return null
+
+  const common = calculateCorrection(commonAggregate, profile, {
+    strength: correctionStrength.value,
+    headroomVerified,
+  })
+  const commonBands = mapCorrectionToBands(common.correction, bandCutoffs)
+  if (!independent || !measurementAggregateLeft.value || !measurementAggregateRight.value) {
+    return {
+      bandsDb: commonBands,
+      independent: false,
+      maxCutDb: common.maxCutDb,
+      maxBoostDb: common.maxBoostDb,
+      headroomDb: common.headroomDb,
+    }
+  }
+  const left = calculateCorrection(measurementAggregateLeft.value, profile, { strength: correctionStrength.value, headroomVerified })
+  const right = calculateCorrection(measurementAggregateRight.value, profile, { strength: correctionStrength.value, headroomVerified })
+  const leftBandsDb = mapCorrectionToBands(left.correction, bandCutoffs)
+  const rightBandsDb = mapCorrectionToBands(right.correction, bandCutoffs)
+  return {
+    bandsDb: commonBands,
+    leftBandsDb,
+    rightBandsDb,
+    independent: true,
+    maxCutDb: Math.min(left.maxCutDb, right.maxCutDb),
+    maxBoostDb: Math.max(left.maxBoostDb, right.maxBoostDb),
+    headroomDb: Math.min(left.headroomDb, right.headroomDb),
+  }
+})
+
+const validationAggregate = computed<AggregateResponse | null>(() => {
+  if (!measurementValidationAggregateLeft.value || !measurementValidationAggregateRight.value) return null
+  return combineChannelAggregates(measurementValidationAggregateLeft.value, measurementValidationAggregateRight.value)
+})
+
+const validationMetrics = computed<CalibrationValidationMetrics | null>(() => {
+  const before = measurementAggregateBoth.value
+  const after = validationAggregate.value
+  if (!before || !after) return null
+  return { before: targetErrorRms(before.points), after: targetErrorRms(after.points) }
+})
 
 onMounted(() => {
   void loadMeasurementProfiles().catch(() => undefined)
@@ -410,6 +293,8 @@ onMessage((env) => {
   snapshot.value = next
 })
 
+const eqDraft = ref<number[]>([])
+
 watch(snapshot, (s) => {
   if (!s) return
   eqDraft.value = [...s.userEq.bandsDb]
@@ -419,13 +304,6 @@ watch(snapshot, (s) => {
 })
 
 const presets = computed<PresetOption[]>(() => snapshot.value?.capabilities.presets ?? [])
-
-function hzLabel(hz?: number): string {
-  if (hz == null) return ''
-  return hz >= 1000 ? `${Math.round(hz / 100) / 10}k` : String(hz)
-}
-
-const eqDraft = ref<number[]>([])
 
 const eqDirty = computed(() => {
   const cur = snapshot.value?.userEq.bandsDb ?? []
@@ -504,8 +382,44 @@ async function applyCalibration() {
   }
   const payload = res.payload as OkReply
   calIsError.value = payload.ok === false
-  calStatus.value = payload.ok === false ? `Device rejected curve: ${payload.error ?? 'unknown'}` : 'Curve applied.'
+  calStatus.value = payload.ok === false ? 'Device rejected curve: ' + (payload.error ?? 'unknown') : 'Curve applied.'
   void request('state.get')
+}
+
+async function applyRecommendedCorrection() {
+  const correction = recommendedCorrection.value
+  if (!correction || !measurementRepeatabilityPassed.value || correctionPending.value) return
+  if (!deviceOnline.value) {
+    showToast('The TV connection is offline. The correction cannot apply.')
+    return
+  }
+  correctionPending.value = true
+  calStatus.value = 'Applying recommended correction…'
+  try {
+    const payload: Record<string, unknown> = { bandsDb: correction.bandsDb }
+    if (correction.independent && correction.leftBandsDb && correction.rightBandsDb) {
+      payload.leftBandsDb = correction.leftBandsDb
+      payload.rightBandsDb = correction.rightBandsDb
+    }
+    const res = await withTimeout(request<OkReply>('calibration.apply', payload), 15_000)
+    if (!res) {
+      calIsError.value = true
+      calStatus.value = 'TV did not answer within 15s.'
+      return
+    }
+    const result = res.payload as OkReply
+    calIsError.value = result.ok === false
+    calStatus.value = result.ok === false
+      ? 'Device rejected correction: ' + (result.error ?? 'unknown')
+      : correction.independent
+        ? 'Independent left/right correction applied.'
+        : 'Common correction applied.'
+    calibrationApplied.value = result.ok !== false
+    calJson.value = JSON.stringify(correction.bandsDb.map((value) => Math.round(value * 10) / 10))
+    void request('state.get')
+  } finally {
+    correctionPending.value = false
+  }
 }
 
 async function resetCalibration() {
@@ -521,33 +435,27 @@ function getState() {
 
 function startMeasurement() {
   if (!snapshot.value?.capabilities.supportsSweep) return
+  if (!deviceOnline.value) {
+    showToast('The TV connection is offline. Calibration cannot start.')
+    return
+  }
+  calibrationApplied.value = false
   void startMeasurementSession()
 }
 
-function settingLabel(value: boolean | null): string {
-  return value == null ? 'not exposed' : value ? 'on' : 'off'
-}
-
-function dbfs(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '−∞ dBFS'
-  return `${(20 * Math.log10(value)).toFixed(1)} dBFS`
-}
-
-function responsePolyline(points: ResponsePoint[]): string {
-  if (points.length === 0) return ''
-  return points.map((point) => {
-    const frequencyPosition = Math.log10(point.frequencyHz / 20) / Math.log10(20_000 / 20)
-    const boundedPosition = Math.max(0, Math.min(1, frequencyPosition))
-    const y = 268 - Math.max(0, Math.min(1, (point.magnitudeDb + 12) / 24)) * 252
-    return `${(boundedPosition * 800).toFixed(1)},${y.toFixed(1)}`
-  }).join(' ')
+function startValidation() {
+  if (!deviceOnline.value) {
+    showToast('The TV connection is offline. Validation cannot start.')
+    return
+  }
+  void startValidationSession()
 }
 
 const virtualizerOn = ref(false)
 
 async function setVirtualizer(on: boolean) {
   virtualizerOn.value = on
-  await withTimeout(request(`virtualizer.${on ? 'on' : 'off'}`), 10_000)
+  await withTimeout(request('virtualizer.' + (on ? 'on' : 'off')), 10_000)
 }
 
 async function runEffectsDiagnostics() {
@@ -589,7 +497,9 @@ async function runCapacityProbe() {
 }
 
 async function createPersistent() {
-  const bands = Math.max(1, Math.min(64, Math.round(persistBands.value || 64)))
+  const input = persistBands.value
+  const numericBands = typeof input === 'number' ? input : input === '' ? 64 : parseFloat(input)
+  const bands = Math.max(1, Math.min(64, Math.round(numericBands || 64)))
   persistBands.value = bands
   await withTimeout(request('probe.persistent.start', { bands }), 30_000)
   await refreshProbeState()
@@ -623,418 +533,7 @@ async function fetchDeviceInfo() {
   }
 }
 
-function fmtBytes(bytes: number): string {
-  if (!Number.isFinite(bytes)) return '?'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let v = bytes
-  let u = 0
-  while (v >= 1024 && u < units.length - 1) {
-    v /= 1024
-    u++
-  }
-  return `${v.toFixed(u === 0 ? 0 : 1)} ${units[u]}`
-}
-
 watchEffect(() => {
   if (codeValid.value && status.value === 'disconnected') connect()
 })
 </script>
-
-<style scoped>
-.page {
-  --bg: #0a0a0b;
-  --ink: #ececea;
-  --dim: #85858a;
-  --faint: #4c4c52;
-  --line: #232327;
-  --line-strong: #3a3a40;
-  max-width: 46rem;
-  margin: 0 auto;
-  padding: 3rem 1.25rem 4rem;
-  background: var(--bg);
-  min-height: 100vh;
-  color: var(--ink);
-  font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.65;
-  letter-spacing: 0.01em;
-}
-
-.masthead {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 1rem;
-  padding-bottom: 1.25rem;
-  border-bottom: 1px solid var(--ink);
-}
-.brand h1 {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 600;
-  letter-spacing: 0.45em;
-}
-.sub {
-  margin: 0.15rem 0 0;
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--dim);
-}
-.conn {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--dim);
-  white-space: nowrap;
-}
-.conn-dot {
-  width: 7px;
-  height: 7px;
-  background: var(--faint);
-}
-.conn[data-state='connected'] .conn-dot {
-  background: var(--ink);
-}
-.conn[data-state='connected'] .conn-label {
-  color: var(--ink);
-}
-.conn[data-state='offline'] .conn-dot {
-  background: var(--ink);
-}
-.conn[data-state='offline'] .conn-label {
-  color: var(--ink);
-}
-.toast {
-  position: fixed;
-  top: 1rem;
-  left: 50%;
-  z-index: 10;
-  width: min(32rem, calc(100vw - 2rem));
-  padding: 0.8rem 1rem;
-  transform: translateX(-50%);
-  border: 1px solid var(--ink);
-  background: var(--bg);
-  color: var(--ink);
-  text-align: center;
-  box-shadow: 0 0.5rem 2rem rgba(0, 0, 0, 0.35);
-}
-.toast-enter-active,
-.toast-leave-active {
-  transition: opacity 160ms ease, transform 160ms ease;
-}
-.toast-enter-from,
-.toast-leave-to {
-  opacity: 0;
-  transform: translate(-50%, -0.5rem);
-}
-
-.block {
-  padding: 1.75rem 0;
-  border-bottom: 1px solid var(--line);
-}
-.label {
-  margin: 0 0 1rem;
-  font-size: 0.68rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.22em;
-  color: var(--dim);
-}
-.sub-label {
-  margin: 1.5rem 0 0.4rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
-}
-.response-graph {
-  margin-top: 1.25rem;
-  border-top: 1px solid var(--line);
-  padding-top: 1rem;
-}
-.response-graph svg {
-  display: block;
-  width: 100%;
-  height: auto;
-  margin: 0.5rem 0 1rem;
-  background: #0d0d0f;
-  border: 1px solid var(--line);
-}
-.graph-zero {
-  stroke: var(--line-strong);
-  stroke-width: 1;
-  stroke-dasharray: 4 5;
-}
-.graph-line {
-  fill: none;
-  stroke: var(--ink);
-  stroke-width: 2;
-  vector-effect: non-scaling-stroke;
-}
-.graph-label {
-  fill: var(--dim);
-  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-.note {
-  margin: 0.35rem 0;
-  font-size: 0.72rem;
-  color: var(--dim);
-}
-.error {
-  margin: 0;
-  color: var(--ink);
-  text-decoration: underline;
-  text-underline-offset: 4px;
-  text-decoration-color: var(--dim);
-}
-.dim {
-  color: var(--faint);
-}
-.mark {
-  color: var(--dim);
-}
-
-.spec {
-  display: grid;
-  grid-template-columns: 11rem 1fr;
-  row-gap: 0.3rem;
-  column-gap: 1rem;
-  margin: 0;
-}
-.spec.wide {
-  grid-template-columns: 8rem 1fr;
-  margin-top: 1rem;
-}
-.spec dt {
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--dim);
-}
-.spec dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-  margin: 0.75rem 0;
-}
-button {
-  padding: 0.42rem 0.95rem;
-  background: transparent;
-  border: 1px solid var(--line-strong);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-button:hover:not(:disabled),
-button:focus-visible {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--bg);
-  outline: none;
-}
-button:active:not(:disabled) {
-  background: var(--dim);
-  border-color: var(--dim);
-}
-button:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-button.active {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--bg);
-}
-
-input[type='text'],
-input[type='number'],
-textarea {
-  padding: 0.42rem 0.6rem;
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.78rem;
-}
-input:focus-visible,
-textarea:focus-visible {
-  outline: none;
-  border-color: var(--dim);
-}
-textarea {
-  width: 100%;
-  box-sizing: border-box;
-  resize: vertical;
-  display: block;
-  margin-bottom: 0.6rem;
-}
-
-.inline-form {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-  margin: 0.75rem 0;
-}
-.inline-form input[type='text'] {
-  flex: 1;
-  min-width: 12rem;
-}
-.inline-form input[type='number'] {
-  width: 5rem;
-}
-
-.band-scroll {
-  display: flex;
-  gap: 0.35rem;
-  overflow-x: auto;
-  padding: 1rem 0 0.5rem;
-}
-.band {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.4rem;
-  min-width: 2.6rem;
-}
-.band-val {
-  font-size: 0.62rem;
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-}
-.band-hz {
-  font-size: 0.6rem;
-  color: var(--faint);
-  font-variant-numeric: tabular-nums;
-}
-input[type='range'] {
-  writing-mode: vertical-lr;
-  direction: rtl;
-  width: 18px;
-  height: 120px;
-  appearance: none;
-  background: transparent;
-  padding: 0;
-}
-input[type='range']::-webkit-slider-runnable-track {
-  width: 1px;
-  background: var(--line-strong);
-}
-input[type='range']::-webkit-slider-thumb {
-  appearance: none;
-  width: 11px;
-  height: 5px;
-  margin-left: -5px;
-  background: var(--ink);
-  border: none;
-  border-radius: 0;
-  cursor: ns-resize;
-}
-input[type='range']::-moz-range-track {
-  width: 1px;
-  background: var(--line-strong);
-}
-input[type='range']::-moz-range-thumb {
-  width: 11px;
-  height: 5px;
-  background: var(--ink);
-  border: none;
-  border-radius: 0;
-  cursor: ns-resize;
-}
-
-.list {
-  list-style: none;
-  margin: 0.5rem 0 0;
-  padding: 0;
-}
-.list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.45rem 0;
-  border-top: 1px solid var(--line);
-}
-.list-actions {
-  display: flex;
-  gap: 0.4rem;
-}
-.list-actions button {
-  padding: 0.25rem 0.6rem;
-}
-
-.grid {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0.75rem 0;
-  font-size: 0.74rem;
-}
-.grid th {
-  text-align: left;
-  font-weight: 500;
-  font-size: 0.62rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--dim);
-  padding: 0.3rem 0.6rem 0.3rem 0;
-  border-bottom: 1px solid var(--ink);
-}
-.grid td {
-  padding: 0.35rem 0.6rem 0.35rem 0;
-  border-bottom: 1px solid var(--line);
-  font-variant-numeric: tabular-nums;
-}
-
-.fold summary {
-  cursor: pointer;
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--dim);
-  user-select: none;
-  padding: 0.3rem 0;
-}
-.fold[open] summary {
-  color: var(--ink);
-}
-.fold textarea {
-  margin-top: 0.6rem;
-}
-
-.log {
-  max-height: 22rem;
-  overflow-y: auto;
-  margin: 0.5rem 0 0;
-  padding: 0.6rem;
-  border: 1px solid var(--line);
-  white-space: pre-wrap;
-  font-size: 0.66rem;
-  line-height: 1.5;
-  color: var(--dim);
-}
-
-.colophon {
-  display: flex;
-  justify-content: space-between;
-  padding-top: 1.25rem;
-  font-size: 0.62rem;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--faint);
-}
-</style>

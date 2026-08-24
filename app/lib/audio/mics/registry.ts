@@ -1,8 +1,8 @@
 import { parseMicCalibrationProfile } from './profile'
 import type { MicCalibrationProfile } from './types'
 
-export interface MicCalibrationManifest {
-  readonly profiles: readonly string[]
+export interface MicCalibrationFileList {
+  readonly files: readonly string[]
 }
 
 const PROFILE_FILENAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/
@@ -11,23 +11,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-export function parseMicCalibrationManifest(input: unknown): MicCalibrationManifest {
-  if (!isRecord(input) || !Array.isArray(input.profiles) || input.profiles.length === 0) {
-    throw new Error('Microphone profile catalog must contain a non-empty profiles array.')
+export function parseMicCalibrationFileList(input: unknown): MicCalibrationFileList {
+  if (!isRecord(input) || !Array.isArray(input.files) || input.files.length === 0) {
+    throw new Error('Microphone profile directory must contain a non-empty files array.')
   }
 
-  const profiles = input.profiles.map((filename) => {
-    if (typeof filename !== 'string' || !PROFILE_FILENAME.test(filename) || filename === 'index.json') {
-      throw new Error('Microphone profile catalog contains an invalid filename.')
+  const files = input.files.map((filename) => {
+    if (typeof filename !== 'string' || !PROFILE_FILENAME.test(filename)) {
+      throw new Error('Microphone profile directory contains an invalid filename.')
     }
     return filename
   })
 
-  if (new Set(profiles).size !== profiles.length) {
-    throw new Error('Microphone profile catalog contains duplicate filenames.')
+  if (new Set(files).size !== files.length) {
+    throw new Error('Microphone profile directory contains duplicate filenames.')
   }
 
-  return { profiles }
+  return { files }
 }
 
 function profileUrl(basePath: string, filename: string): string {
@@ -47,8 +47,8 @@ async function fetchJson(url: string): Promise<unknown> {
 export async function discoverMicCalibrationProfiles(
   basePath = '/calibration/profiles',
 ): Promise<MicCalibrationProfile[]> {
-  const manifest = parseMicCalibrationManifest(await fetchJson(profileUrl(basePath, 'index.json')))
-  return await Promise.all(manifest.profiles.map(async (filename) => {
+  const fileList = parseMicCalibrationFileList(await fetchJson('/api/calibration/profiles'))
+  return await Promise.all(fileList.files.map(async (filename) => {
     try {
       return parseMicCalibrationProfile(await fetchJson(profileUrl(basePath, filename)))
     } catch (error: unknown) {

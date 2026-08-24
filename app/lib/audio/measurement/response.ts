@@ -1,10 +1,16 @@
 import type { MeasurementSweep } from '#shared/types/protocol'
-import { generateSweepReference, sweepSampleParts } from '../sweep-reference'
+import { sweepSampleParts } from '../sweep-reference'
 import {
   micCompensationDbAtHz,
   summarizeMicCalibrationProfile,
 } from '../mics/profile'
 import type { MicCalibrationProfile, MicCalibrationSummary } from '../mics/types'
+import {
+  deconvolveSweep,
+  type ImpulseSummary,
+  type RoomMetrics,
+  windowedImpulseResponse,
+} from './impulse'
 
 export interface ResponsePoint {
   frequencyHz: number
@@ -26,6 +32,7 @@ export interface MeasurementAnalysisDiagnostics {
   detectionConfidence: number
   signalRms: number
   signalPeak: number
+  snrEstimateDb: number | null
   clipped: boolean
   clippedSamples: number
   sampleCount: number
@@ -36,14 +43,10 @@ export interface MeasurementAnalysis {
   status: MeasurementAnalysisStatus
   rawPoints: ResponsePoint[]
   points: ResponsePoint[]
+  room: RoomMetrics | null
+  impulse: ImpulseSummary | null
   micProfile: MicCalibrationSummary
   diagnostics: MeasurementAnalysisDiagnostics
-}
-
-function nextPowerOfTwo(value: number): number {
-  let result = 1
-  while (result < value) result *= 2
-  return result
 }
 
 function calculateSignalStats(samples: Float32Array): {
@@ -67,12 +70,40 @@ function calculateSignalStats(samples: Float32Array): {
   }
 }
 
+function removeDc(samples: Float32Array): Float32Array {
+  if (samples.length === 0) return new Float32Array(0)
+  let sum = 0
+  for (const sample of samples) sum += sample
+  const mean = sum / samples.length
+  if (Math.abs(mean) < 1e-8) return samples
+  const centered = new Float32Array(samples.length)
+  for (let index = 0; index < samples.length; index++) centered[index] = samples[index] - mean
+  return centered
+}
+
 function blockRms(samples: Float32Array, start: number, length: number): number {
   let sumSquares = 0
   const end = Math.min(samples.length, start + length)
   for (let index = start; index < end; index++) sumSquares += samples[index] * samples[index]
   const count = end - start
   return count > 0 ? Math.sqrt(sumSquares / count) : 0
+}
+
+function dbRatio(numerator: number, denominator: number): number | null {
+  if (!(numerator > 0) || !(denominator > 0)) return null
+  return 10 * Math.log10(numerator / denominator)
+}
+
+function estimateSnr(samples: Float32Array, sampleRate: number, sweep: MeasurementSweep, startSample: number): number | null {
+  const parts = sweepSampleParts(sweep, sampleRate)
+  const noiseEnd = Math.min(samples.length, startSample + Math.max(1, Math.min(parts.preRollSamples, Math.round(sampleRate * 0.25))))
+  const signalStart = Math.min(samples.length, startSample + parts.preRollSamples)
+  const signalEnd = Math.min(samples.length, signalStart + parts.sweepSamples)
+  const noise = blockRms(samples, startSample, Math.max(1, noiseEnd - startSample))
+  const signal = blockRms(samples, signalStart, Math.max(1, signalEnd - signalStart))
+  if (!(signal > 0)) return null
+  if (!(noise > 0)) return Number.POSITIVE_INFINITY
+  return dbRatio(signal * signal, noise * noise)
 }
 
 export function detectSweepStart(
@@ -105,9 +136,7 @@ export function detectSweepStart(
       break
     }
   }
-  if (activeBlock < 0) {
-    activeBlock = levels.findIndex((level) => level >= threshold)
-  }
+  if (activeBlock < 0) activeBlock = levels.findIndex((level) => level >= threshold)
   if (activeBlock < 0) return { found: false, startSample: null, offsetMs: null, confidence: 0 }
 
   const preRollSamples = sweepSampleParts(sweep, sampleRate).preRollSamples
@@ -121,63 +150,36 @@ export function detectSweepStart(
   }
 }
 
-function fft(real: Float64Array, imaginary: Float64Array): void {
-  const length = real.length
-  for (let index = 1, reverse = 0; index < length; index++) {
-    let bit = length >> 1
-    for (; reverse & bit; bit >>= 1) reverse ^= bit
-    reverse ^= bit
-    if (index < reverse) {
-      const realValue = real[index]
-      real[index] = real[reverse]
-      real[reverse] = realValue
-      const imaginaryValue = imaginary[index]
-      imaginary[index] = imaginary[reverse]
-      imaginary[reverse] = imaginaryValue
-    }
+function interpolatePointDb(points: readonly ResponsePoint[], frequencyHz: number): number {
+  if (points.length === 0) return 0
+  if (frequencyHz <= points[0].frequencyHz) return points[0].magnitudeDb
+  if (frequencyHz >= points[points.length - 1].frequencyHz) return points[points.length - 1].magnitudeDb
+  let low = 0
+  let high = points.length - 1
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2)
+    if (points[middle].frequencyHz <= frequencyHz) low = middle
+    else high = middle
   }
-
-  for (let width = 2; width <= length; width *= 2) {
-    const angle = -2 * Math.PI / width
-    const sine = Math.sin(angle)
-    const cosine = Math.cos(angle)
-    for (let start = 0; start < length; start += width) {
-      let currentCosine = 1
-      let currentSine = 0
-      const half = width >> 1
-      for (let offset = 0; offset < half; offset++) {
-        const left = start + offset
-        const right = left + half
-        const rightReal = real[right] * currentCosine - imaginary[right] * currentSine
-        const rightImaginary = real[right] * currentSine + imaginary[right] * currentCosine
-        real[right] = real[left] - rightReal
-        imaginary[right] = imaginary[left] - rightImaginary
-        real[left] += rightReal
-        imaginary[left] += rightImaginary
-        const nextCosine = currentCosine * cosine - currentSine * sine
-        currentSine = currentCosine * sine + currentSine * cosine
-        currentCosine = nextCosine
-      }
-    }
-  }
+  const lower = points[low]
+  const upper = points[high]
+  const position = Math.log(frequencyHz / lower.frequencyHz) /
+    Math.log(upper.frequencyHz / lower.frequencyHz)
+  return lower.magnitudeDb + (upper.magnitudeDb - lower.magnitudeDb) * position
 }
 
-function median(values: number[]): number {
-  const sorted = [...values].sort((left, right) => left - right)
-  const middle = Math.floor(sorted.length / 2)
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
-}
-
-function normalizePoints(points: ResponsePoint[]): ResponsePoint[] {
-  const center = median(points.map((point) => point.magnitudeDb))
+function normalizePoints(points: ResponsePoint[], normalizeAtHz = 1_000): ResponsePoint[] {
+  if (points.length === 0) return []
+  const center = interpolatePointDb(points, normalizeAtHz)
   return points.map((point) => ({ ...point, magnitudeDb: point.magnitudeDb - center }))
 }
 
-export function smoothResponsePoints(points: ResponsePoint[]): ResponsePoint[] {
-  if (points.length < 3) return points.map((point) => ({ ...point }))
+/** Display smoothing only; optimizer smoothing is intentionally separate. */
+export function smoothResponsePoints(points: ResponsePoint[], radius = 1): ResponsePoint[] {
+  if (points.length < 3 || radius <= 0) return points.map((point) => ({ ...point }))
   return points.map((point, index) => {
-    const start = Math.max(0, index - 1)
-    const end = Math.min(points.length - 1, index + 1)
+    const start = Math.max(0, index - radius)
+    const end = Math.min(points.length - 1, index + radius)
     let total = 0
     let count = 0
     for (let cursor = start; cursor <= end; cursor++) {
@@ -188,61 +190,20 @@ export function smoothResponsePoints(points: ResponsePoint[]): ResponsePoint[] {
   })
 }
 
-function estimateResponse(
-  samples: Float32Array,
-  sampleRate: number,
-  sweep: MeasurementSweep,
-  startSample: number,
-): ResponsePoint[] {
-  const reference = generateSweepReference(sweep, sampleRate)
-  const fftLength = nextPowerOfTwo(reference.length)
-  const referenceReal = new Float64Array(fftLength)
-  const captureReal = new Float64Array(fftLength)
-  const referenceImaginary = new Float64Array(fftLength)
-  const captureImaginary = new Float64Array(fftLength)
-  const windowDenominator = Math.max(1, reference.length - 1)
-  let maximumReferencePower = 0
-
-  for (let index = 0; index < reference.length; index++) {
-    const window = 0.5 * (1 - Math.cos(2 * Math.PI * index / windowDenominator))
-    referenceReal[index] = reference[index] * window
-    const captureIndex = startSample + index
-    captureReal[index] = (captureIndex < samples.length ? samples[captureIndex] : 0) * window
+function emptyAnalysis(
+  status: MeasurementAnalysisStatus,
+  micProfile: MicCalibrationProfile,
+  diagnostics: MeasurementAnalysisDiagnostics,
+): MeasurementAnalysis {
+  return {
+    status,
+    rawPoints: [],
+    points: [],
+    room: null,
+    impulse: null,
+    micProfile: summarizeMicCalibrationProfile(micProfile),
+    diagnostics,
   }
-  fft(referenceReal, referenceImaginary)
-  fft(captureReal, captureImaginary)
-  for (let index = 1; index < fftLength / 2; index++) {
-    maximumReferencePower = Math.max(
-      maximumReferencePower,
-      referenceReal[index] ** 2 + referenceImaginary[index] ** 2,
-    )
-  }
-  const regularization = Math.max(maximumReferencePower * 1e-6, 1e-12)
-  const lowHz = Math.max(10, sweep.startHz)
-  const highHz = Math.min(sweep.endHz, sampleRate / 2 - sampleRate / fftLength)
-  const pointCount = 48
-  const points: ResponsePoint[] = []
-
-  for (let pointIndex = 0; pointIndex < pointCount; pointIndex++) {
-    const progress = pointCount === 1 ? 0 : pointIndex / (pointCount - 1)
-    const frequencyHz = lowHz * (highHz / lowHz) ** progress
-    const centerBin = Math.max(1, Math.round(frequencyHz * fftLength / sampleRate))
-    const binRadius = Math.max(1, Math.round(centerBin * 0.015))
-    let sum = 0
-    let count = 0
-    for (let bin = Math.max(1, centerBin - binRadius); bin <= Math.min(fftLength / 2 - 1, centerBin + binRadius); bin++) {
-      const referencePower = referenceReal[bin] ** 2 + referenceImaginary[bin] ** 2
-      const transferReal = captureReal[bin] * referenceReal[bin] + captureImaginary[bin] * referenceImaginary[bin]
-      const transferImaginary = captureImaginary[bin] * referenceReal[bin] - captureReal[bin] * referenceImaginary[bin]
-      const magnitude = Math.sqrt(transferReal ** 2 + transferImaginary ** 2) / (referencePower + regularization)
-      if (Number.isFinite(magnitude) && magnitude > 0) {
-        sum += 20 * Math.log10(magnitude)
-        count++
-      }
-    }
-    points.push({ frequencyHz, magnitudeDb: count > 0 ? sum / count : 0 })
-  }
-  return normalizePoints(points)
 }
 
 export function analyzeMeasurement(
@@ -251,40 +212,37 @@ export function analyzeMeasurement(
   sweep: MeasurementSweep,
   micProfile: MicCalibrationProfile,
 ): MeasurementAnalysis {
-  const signal = calculateSignalStats(samples)
-  const detection = detectSweepStart(samples, sweep, sampleRate)
+  const centeredSamples = removeDc(samples)
+  const signal = calculateSignalStats(centeredSamples)
+  const detection = detectSweepStart(centeredSamples, sweep, sampleRate)
   const baseDiagnostics: MeasurementAnalysisDiagnostics = {
     detected: detection.found,
     detectionOffsetMs: detection.offsetMs,
     detectionConfidence: detection.confidence,
     signalRms: signal.rms,
     signalPeak: signal.peak,
+    snrEstimateDb: null,
     clipped: signal.clippedSamples > 0,
     clippedSamples: signal.clippedSamples,
     sampleCount: samples.length,
     frequencyPoints: 0,
   }
 
-  if (signal.rms < 0.0001) {
-    return {
-      status: 'signal_too_low',
-      rawPoints: [],
-      points: [],
-      micProfile: summarizeMicCalibrationProfile(micProfile),
-      diagnostics: baseDiagnostics,
-    }
-  }
-  if (!detection.found || detection.startSample === null) {
-    return {
-      status: 'sweep_not_found',
-      rawPoints: [],
-      points: [],
-      micProfile: summarizeMicCalibrationProfile(micProfile),
-      diagnostics: baseDiagnostics,
-    }
-  }
+  if (signal.rms < 0.0001) return emptyAnalysis('signal_too_low', micProfile, baseDiagnostics)
+  if (!detection.found || detection.startSample === null) return emptyAnalysis('sweep_not_found', micProfile, baseDiagnostics)
 
-  const rawPoints = estimateResponse(samples, sampleRate, sweep, detection.startSample)
+  const snrEstimateDb = estimateSnr(centeredSamples, sampleRate, sweep, detection.startSample)
+  const diagnostics = { ...baseDiagnostics, snrEstimateDb }
+  if (snrEstimateDb !== null && snrEstimateDb < 8) return emptyAnalysis('signal_too_low', micProfile, diagnostics)
+
+  const impulse = deconvolveSweep(centeredSamples, sampleRate, sweep, detection.startSample)
+  const rawPoints = normalizePoints(windowedImpulseResponse(
+    impulse.samples,
+    sampleRate,
+    sweep.startHz,
+    sweep.endHz,
+  ))
+  if (rawPoints.length === 0) return emptyAnalysis('sweep_not_found', micProfile, diagnostics)
   const points = smoothResponsePoints(rawPoints.map((point) => ({
     ...point,
     magnitudeDb: point.magnitudeDb + micCompensationDbAtHz(micProfile, point.frequencyHz),
@@ -293,7 +251,9 @@ export function analyzeMeasurement(
     status: signal.clippedSamples > 0 ? 'capture_clipped' : 'ok',
     rawPoints,
     points,
+    room: impulse.summary.room,
+    impulse: impulse.summary,
     micProfile: summarizeMicCalibrationProfile(micProfile),
-    diagnostics: { ...baseDiagnostics, frequencyPoints: points.length },
+    diagnostics: { ...diagnostics, frequencyPoints: points.length },
   }
 }
