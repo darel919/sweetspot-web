@@ -76,7 +76,7 @@ export class RoomDO extends DurableObject<unknown> {
   }
 
   deviceOnline(): boolean {
-    return Date.now() - this.deviceSeenAt < DEVICE_TTL_MS
+    return this.hasOpenSocket('device') || Date.now() - this.deviceSeenAt < DEVICE_TTL_MS
   }
 
   clientOnline(): boolean {
