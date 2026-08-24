@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   isEnvelope,
+  KNOWN_TYPES,
   isMeasurementContext,
   isMeasurementSweep,
   isRoomSocketServerMessage,
@@ -199,6 +200,26 @@ describe('measurement protocol boundary', () => {
       stage: 'analyzing',
       current: 31,
       total: 30,
+    })).not.toBeNull()
+  })
+
+  test('accepts the device position-continued event with an exact context shape', () => {
+    expect(KNOWN_TYPES.has('calibrationSession.position.continued')).toBe(true)
+    expect(validatePayload('calibrationSession.position.continued', {
+      sessionId: 'cal_test',
+      context: {
+        positionId: 'center',
+        positionIndex: 0,
+        positionCount: 1,
+        channel: 'left',
+        takeIndex: 0,
+        takeCount: 2,
+        phase: 'validation',
+      },
+    })).toBeNull()
+    expect(validatePayload('calibrationSession.position.continued', {
+      sessionId: 'cal_test',
+      context: { ...context, takeIndex: 3 },
     })).not.toBeNull()
   })
 

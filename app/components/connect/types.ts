@@ -24,6 +24,8 @@ export interface CalibrationValidationMetrics {
   after: number
 }
 
+export type CalibrationResultStatus = 'improved' | 'inconclusive' | 'worse' | 'error'
+
 export interface CorrectionStrengthOption {
   id: Exclude<CorrectionStrength, 'off'>
   label: string

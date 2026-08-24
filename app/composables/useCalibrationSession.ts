@@ -11,6 +11,7 @@ import type {
 } from '#shared/types/protocol'
 import {
   CALIBRATION_ERROR_CODES,
+  isCalibrationSessionPositionContinuedPayload,
   isMeasurementContext,
   isMeasurementReadyPayload,
 } from '#shared/types/protocol'
@@ -129,6 +130,8 @@ export function useCalibrationSession(connection: Connection) {
   const progress = ref({ current: 0, total: 0 })
   const estimatedRemainingSeconds = ref<number | null>(null)
   const validationActive = ref(false)
+  const validationFailed = ref(false)
+  const validationCandidateId = ref<string | null>(null)
 
   let disposed = false
   let sessionId: string | null = null
@@ -296,10 +299,14 @@ export function useCalibrationSession(connection: Connection) {
 
   async function fail(code: CalibrationErrorCode, text: string) {
     const currentSessionId = sessionId
+    if (sessionMode === 'validation') validationFailed.value = code !== 'calibration_aborted'
     clearTimeoutTimer()
     clearPositionKeepAlive()
     clearSessionKeepAlive()
-    if (currentSessionId) connection.send('calibrationSession.abort', { sessionId: currentSessionId, code })
+    if (currentSessionId && code !== 'calibration_aborted') {
+      connection.send('calibrationSession.abort', { sessionId: currentSessionId, code })
+    }
+    if (code === 'calibration_aborted' || sessionMode === 'validation') connection.send('state.get')
     await closeCapture()
     sessionId = null
     sweep = null
@@ -375,6 +382,24 @@ export function useCalibrationSession(connection: Connection) {
     })
   }
 
+  function waitForPosition(context: MeasurementContext) {
+    sendPrepare(context)
+    stage.value = 'position-pause'
+    message.value = 'Follow the instructions on the TV, then continue.'
+    sendProgress('position-pause', positionForContext(context).instruction)
+    activeContext.value = context
+    clearPositionKeepAlive()
+    positionKeepAlive = setInterval(() => {
+      if (sessionId && preparedContext) {
+        connection.send('measurement.prepare', {
+          sessionId,
+          channel: preparedContext.channel,
+          context: preparedContext,
+        })
+      }
+    }, 25_000)
+  }
+
   function advanceAfterTake(
     currentContext: MeasurementContext,
     addedThirdTake = false,
@@ -390,21 +415,7 @@ export function useCalibrationSession(connection: Connection) {
       return
     }
     if (next.positionIndex !== currentContext.positionIndex) {
-      sendPrepare(next)
-      stage.value = 'position-pause'
-      message.value = 'Follow the instructions on the TV, then continue.'
-      sendProgress('position-pause', positionForContext(next).instruction)
-      activeContext.value = next
-      clearPositionKeepAlive()
-      positionKeepAlive = setInterval(() => {
-        if (sessionId && preparedContext) {
-          connection.send('measurement.prepare', {
-            sessionId,
-            channel: preparedContext.channel,
-            context: preparedContext,
-          })
-        }
-      }, 25_000)
+      waitForPosition(next)
       return
     }
     sendPrepare(next)
@@ -442,6 +453,10 @@ export function useCalibrationSession(connection: Connection) {
       return
     }
     const previous = activeContext.value
+    if (next.requiresRemoteContinue()) {
+      waitForPosition(next)
+      return
+    }
     activeContext.value = next
     sendPrepare(next)
     if (previous && previous.positionIndex !== next.positionIndex) {
@@ -519,6 +534,8 @@ export function useCalibrationSession(connection: Connection) {
       return
     }
     validationActive.value = mode === 'validation'
+    validationFailed.value = false
+    validationCandidateId.value = mode === 'validation' ? candidateId : null
     if (mode === 'measurement' || mode === 'probe') {
       analysis.value = null
       if (mode === 'measurement' && retryGroups && retryGroups.length > 0) {
@@ -580,6 +597,8 @@ export function useCalibrationSession(connection: Connection) {
       await closeCapture()
       sessionId = null
       profile = null
+      validationActive.value = false
+      if (mode === 'validation') validationFailed.value = true
       stage.value = 'error'
       message.value = error instanceof Error ? error.message : 'Microphone access failed.'
     }
@@ -794,6 +813,16 @@ export function useCalibrationSession(connection: Connection) {
       prepareNextContext()
       return
     }
+    if (env.type === 'calibrationSession.position.continued'
+      && sessionId
+      && isCalibrationSessionPositionContinuedPayload(env.payload)
+      && env.payload.sessionId === sessionId
+      && stage.value === 'position-pause'
+      && preparedContext !== null
+      && isSameContext(env.payload.context, preparedContext)) {
+      continuePosition()
+      return
+    }
     if (env.type === 'measurement.finished') {
       void onFinished(env.payload)
       return
@@ -840,13 +869,19 @@ export function useCalibrationSession(connection: Connection) {
 
   function cancel() {
     if (!sessionId) {
+      validationFailed.value = false
       validationActive.value = false
       stage.value = 'idle'
       message.value = 'Calibration cancelled.'
       return
     }
     const currentSessionId = sessionId
+    const currentCandidateId = sessionMode === 'validation' ? validationCandidateId.value : null
     connection.send('calibrationSession.abort', { sessionId: currentSessionId, code: 'calibration_aborted' })
+    if (currentCandidateId) {
+      connection.send('calibration.rollbackCandidate', { candidateId: currentCandidateId })
+    }
+    connection.send('state.get')
     clearTimeoutTimer()
     clearPositionKeepAlive()
     clearSessionKeepAlive()
@@ -856,6 +891,7 @@ export function useCalibrationSession(connection: Connection) {
     profile = null
     activeContext.value = null
     preparedContext = null
+    validationFailed.value = false
     validationActive.value = false
     estimatedRemainingSeconds.value = null
     stage.value = 'idle'
@@ -875,6 +911,7 @@ export function useCalibrationSession(connection: Connection) {
     profile = null
     activeContext.value = null
     preparedContext = null
+    validationFailed.value = false
     validationActive.value = false
     estimatedRemainingSeconds.value = null
   })
@@ -882,6 +919,8 @@ export function useCalibrationSession(connection: Connection) {
   return {
     stage: readonly(stage),
     validationActive: readonly(validationActive),
+    validationFailed: readonly(validationFailed),
+    validationCandidateId: readonly(validationCandidateId),
     message: readonly(message),
     analysis,
     validationAnalysis,
@@ -915,15 +954,6 @@ export function useCalibrationSession(connection: Connection) {
     startValidation,
     startProbe,
     retryFailedGroups,
-    confirmLoudness: () => {
-      if (stage.value !== 'loudness' || !sessionId || loudnessComplete) return
-      stage.value = 'preparing'
-      message.value = 'Follow the instructions on the TV.'
-      armTimeout()
-      sendProgress('preparing')
-      connection.send('calibrationSession.loudness.stop', { sessionId })
-    },
-    continuePosition,
     cancel,
   }
 }

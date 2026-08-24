@@ -235,6 +235,10 @@ export interface CalibrationLoudnessStartedPayload extends CalibrationSessionPay
 
 export interface CalibrationLoudnessStoppedPayload extends CalibrationSessionPayload {}
 
+export interface CalibrationSessionPositionContinuedPayload extends CalibrationSessionPayload {
+  context: MeasurementContext
+}
+
 export interface MeasurementSweep {
   algorithm: 'exponential-sine-v1'
   sampleRate: number
@@ -617,6 +621,7 @@ export const KNOWN_TYPES = new Set<string>([
   'calibrationSession.ended',
   'calibrationSession.loudness.started',
   'calibrationSession.loudness.stopped',
+  'calibrationSession.position.continued',
   'measurement.ready',
   'measurement.started',
   'measurement.finished',
@@ -1043,6 +1048,10 @@ function isSessionWithOptionalContext(value: unknown): value is Record<string, u
     && (value.context === undefined || isMeasurementContext(value.context))
 }
 
+export function isCalibrationSessionPositionContinuedPayload(value: unknown): value is CalibrationSessionPositionContinuedPayload {
+  return isSessionPayload(value) && isMeasurementContext(value.context)
+}
+
 export function isMeasurementReadyPayload(value: unknown): value is MeasurementReadyPayload {
   return isSessionWithSweep(value)
 }
@@ -1079,6 +1088,10 @@ export function validatePayload(type: string, payload: unknown): string | null {
     case 'calibrationSession.started':
     case 'calibrationSession.ended':
       return isSessionPayload(payload) ? null : `${type} requires sessionId`
+    case 'calibrationSession.position.continued':
+      return isCalibrationSessionPositionContinuedPayload(payload)
+        ? null
+        : `${type} requires sessionId and a valid measurement context`
     case 'measurement.playSweep':
     case 'measurement.finished':
       return isSessionWithOptionalContext(payload) ? null : `${type} requires sessionId and a valid optional context`
