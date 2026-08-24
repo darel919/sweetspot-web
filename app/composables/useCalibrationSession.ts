@@ -75,6 +75,8 @@ function newSessionId(): string {
 function analysisErrorCode(status: MeasurementAnalysis['status']): CalibrationErrorCode {
   if (status === 'capture_clipped') return 'capture_clipped'
   if (status === 'sweep_not_found') return 'sweep_not_found'
+  if (status === 'sync_marker_not_found') return 'sync_marker_not_found'
+  if (status === 'clock_drift_unreliable') return 'clock_drift_unreliable'
   if (status === 'capture_too_short') return 'capture_too_short'
   return 'signal_too_low'
 }
@@ -486,10 +488,10 @@ export function useCalibrationSession(connection: Connection) {
     captureInfo.value = null
     retriedGroups.clear()
     plan = mode === 'validation'
-      ? [
-          { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'left', takeIndex: 0, takeCount: 1, phase: 'validation' },
-          { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'right', takeIndex: 0, takeCount: 1, phase: 'validation' },
-        ]
+      ? createMeasurementPlanForGroups([
+          { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'left' },
+          { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'right' },
+        ], 'validation')
       : retryGroups && retryGroups.length > 0
         ? createMeasurementPlanForGroups(retryGroups)
         : createMeasurementPlan()
@@ -616,6 +618,9 @@ export function useCalibrationSession(connection: Connection) {
         signalPeak: result.diagnostics.signalPeak,
         snrEstimateDb: Number.isFinite(result.diagnostics.snrEstimateDb ?? Number.NaN) ? result.diagnostics.snrEstimateDb : null,
         detectionOffsetMs: Number.isFinite(result.diagnostics.detectionOffsetMs ?? Number.NaN) ? result.diagnostics.detectionOffsetMs : null,
+        syncMarkerConfidence: result.diagnostics.detectionConfidence,
+        endingMarkerConfidence: result.diagnostics.endingMarkerConfidence,
+        clockDriftPpm: Number.isFinite(result.diagnostics.clockDriftPpm ?? Number.NaN) ? result.diagnostics.clockDriftPpm : null,
         clipped: result.diagnostics.clipped,
         clippedSamples: result.diagnostics.clippedSamples,
         directArrivalMs: result.room?.directArrivalMs ?? null,
@@ -668,6 +673,12 @@ export function useCalibrationSession(connection: Connection) {
     }
     if (result.status === 'capture_too_short') {
       return 'Capture rejected because the recording ended before the full sweep. Keep the phone still until the sweep finishes.'
+    }
+    if (result.status === 'sync_marker_not_found') {
+      return 'Capture rejected because the known synchronization marker was not found with sufficient confidence. Keep the phone still and retry.'
+    }
+    if (result.status === 'clock_drift_unreliable') {
+      return 'Capture rejected because the TV/browser clock relationship was unreliable. Keep the phone still and retry.'
     }
     return 'Capture rejected because the sweep was not detected. Keep the phone still and try again.'
   }

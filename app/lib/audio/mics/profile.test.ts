@@ -52,10 +52,22 @@ describe('microphone profile math', () => {
 
   test('uses inverse sign for microphone compensation', () => {
     const syntheticProfile = makeProfile([
-      { frequencyHz: 100, responseDb: 3 },
+      { frequencyHz: 100, responseDb: 5 },
       { frequencyHz: 1_000, responseDb: 3 },
     ])
-    expect(micCompensationDbAtHz(syntheticProfile, 500)).toBeCloseTo(-3, 6)
+    expect(micCompensationDbAtHz(syntheticProfile, 100)).toBeCloseTo(-2, 6)
+  })
+
+  test('removes constant microphone sensitivity from spectral compensation', () => {
+    const constantOffsetProfile = makeProfile([
+      { frequencyHz: 100, responseDb: 3 },
+      { frequencyHz: 1_000, responseDb: 3 },
+      { frequencyHz: 20_000, responseDb: 3 },
+    ])
+
+    expect(micCompensationDbAtHz(constantOffsetProfile, 100)).toBeCloseTo(0, 6)
+    expect(micCompensationDbAtHz(constantOffsetProfile, 500)).toBeCloseTo(0, 6)
+    expect(micCompensationDbAtHz(constantOffsetProfile, 9_000)).toBeCloseTo(0, 6)
   })
 
   test('tapers trust before the extreme treble', () => {

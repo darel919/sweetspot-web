@@ -11,6 +11,7 @@ export interface RoomMetrics {
   /** Arrival index inside the recovered causal impulse response, not the recorder capture. */
   directArrivalMs: number | null
   earlyReflections: EarlyReflection[]
+  /** Custom direct-to-late ratio: 0-2.5 ms energy versus energy after 50 ms. */
   directToLateDb: number | null
   c50Db: number | null
   c80Db: number | null
@@ -57,6 +58,11 @@ interface ReferenceFft {
 // search bounded prevents any later circular/padded artifact from becoming
 // the reported acoustic arrival even if a caller passes an untrimmed buffer.
 const DIRECT_SEARCH_WINDOW_MS = 80
+const DECAY_NOISE_MARGIN_DB = 6
+const DECAY_ENDPOINT_TOLERANCE_DB = 1.5
+const DECAY_MIN_POINTS = 8
+const DECAY_MIN_R_SQUARED = 0.85
+const DECAY_MAX_RESIDUAL_RMS_DB = 2
 let cachedReferenceFft: ReferenceFft | null = null
 
 function rms(samples: Float32Array, start = 0, end = samples.length): number {
@@ -73,12 +79,18 @@ function db(value: number, floor = -120): number {
   return value > 0 && Number.isFinite(value) ? Math.max(floor, 20 * Math.log10(value)) : floor
 }
 
-function dbRatio(numerator: number, denominator: number): number | null {
+function dbRatio(numerator: number | null, denominator: number | null): number | null {
   if (!(numerator > 0) || !(denominator > 0)) return null
   return 10 * Math.log10(numerator / denominator)
 }
 
-function regressionSlope(points: Array<{ x: number; y: number }>): number | null {
+interface RegressionFit {
+  slope: number
+  rSquared: number
+  residualRmsDb: number
+}
+
+function regressionFit(points: Array<{ x: number; y: number }>): RegressionFit | null {
   if (points.length < 3) return null
   const meanX = points.reduce((sum, point) => sum + point.x, 0) / points.length
   const meanY = points.reduce((sum, point) => sum + point.y, 0) / points.length
@@ -89,31 +101,71 @@ function regressionSlope(points: Array<{ x: number; y: number }>): number | null
     denominator += (point.x - meanX) ** 2
   }
   if (denominator <= 0) return null
-  return numerator / denominator
+  const slope = numerator / denominator
+  let totalVariance = 0
+  let residualSumSquares = 0
+  for (const point of points) {
+    const predicted = meanY + slope * (point.x - meanX)
+    totalVariance += (point.y - meanY) ** 2
+    residualSumSquares += (point.y - predicted) ** 2
+  }
+  return {
+    slope,
+    rSquared: totalVariance > 0 ? Math.max(0, 1 - residualSumSquares / totalVariance) : 0,
+    residualRmsDb: Math.sqrt(residualSumSquares / points.length),
+  }
 }
 
-function decayTime(edcDb: Float64Array, sampleRate: number, fromDb: number, toDb: number): number | null {
+export function decayTime(
+  edcDb: Float64Array,
+  sampleRate: number,
+  fromDb: number,
+  toDb: number,
+  noiseFloorDb: number | null = null,
+  noiseMarginDb = DECAY_NOISE_MARGIN_DB,
+): number | null {
+  if (!(sampleRate > 0) || !Number.isFinite(fromDb) || !Number.isFinite(toDb) || fromDb <= toDb) return null
+  if (noiseFloorDb !== null && (!Number.isFinite(noiseFloorDb) || noiseFloorDb + noiseMarginDb > toDb)) return null
+
   const points: Array<{ x: number; y: number }> = []
   for (let index = 0; index < edcDb.length; index += Math.max(1, Math.round(sampleRate / 200))) {
     const value = edcDb[index]
-    if (value <= fromDb && value >= toDb) {
+    if (Number.isFinite(value) && value <= fromDb && value >= toDb) {
       points.push({ x: index / sampleRate, y: value })
     }
   }
-  const slope = regressionSlope(points)
-  if (slope === null || slope >= -0.001) return null
-  const valueRange = Math.max(...points.map((point) => point.y)) - Math.min(...points.map((point) => point.y))
-  if (valueRange < Math.abs(toDb - fromDb) * 0.5) return null
-  const durationMs = ((toDb - fromDb) / slope) * 1000
+  if (points.length < DECAY_MIN_POINTS) return null
+
+  const highestPoint = Math.max(...points.map((point) => point.y))
+  const lowestPoint = Math.min(...points.map((point) => point.y))
+  if (highestPoint < fromDb - DECAY_ENDPOINT_TOLERANCE_DB) return null
+  if (lowestPoint > toDb + DECAY_ENDPOINT_TOLERANCE_DB) return null
+
+  const fit = regressionFit(points)
+  if (fit === null || fit.slope >= -0.001) return null
+  if (fit.rSquared < DECAY_MIN_R_SQUARED || fit.residualRmsDb > DECAY_MAX_RESIDUAL_RMS_DB) return null
+  const durationMs = (-60 / fit.slope) * 1000
   return Number.isFinite(durationMs) && durationMs > 0 && durationMs <= 10_000 ? durationMs : null
 }
 
-function energyBetween(samples: Float32Array, start: number, end: number): number {
+function energyBetween(samples: Float32Array, start: number, end: number, noisePower = 0): number {
   let energy = 0
-  for (let index = Math.max(0, start); index < Math.min(samples.length, end); index++) {
+  const boundedStart = Math.max(0, start)
+  const boundedEnd = Math.min(samples.length, end)
+  for (let index = boundedStart; index < boundedEnd; index++) {
     energy += samples[index] * samples[index]
   }
-  return energy
+  return Math.max(0, energy - Math.max(0, boundedEnd - boundedStart) * noisePower)
+}
+
+function reliableEnergyBetween(samples: Float32Array, start: number, end: number, noisePower: number): number | null {
+  const boundedStart = Math.max(0, start)
+  const boundedEnd = Math.min(samples.length, end)
+  const expectedNoiseEnergy = Math.max(0, boundedEnd - boundedStart) * noisePower
+  const correctedEnergy = energyBetween(samples, boundedStart, boundedEnd, noisePower)
+  if (!(correctedEnergy > 0)) return null
+  if (noisePower > 0 && correctedEnergy < expectedNoiseEnergy * 2) return null
+  return correctedEnergy
 }
 
 function referenceCacheKey(
@@ -137,6 +189,47 @@ function referenceCacheKey(
   ].join('|')
 }
 
+function resampleCapture(
+  samples: Float32Array,
+  startSample: number,
+  captureLength: number,
+  targetLength: number,
+  clockRatio: number,
+): Float32Array {
+  const result = new Float32Array(targetLength)
+  for (let index = 0; index < targetLength; index++) {
+    const sourcePosition = index * clockRatio
+    const lower = Math.floor(sourcePosition)
+    const upper = Math.min(captureLength - 1, lower + 1)
+    const fraction = sourcePosition - lower
+    const lowerValue = samples[Math.min(captureLength - 1, Math.max(0, startSample + lower))] ?? 0
+    const upperValue = samples[Math.min(captureLength - 1, Math.max(0, startSample + upper))] ?? lowerValue
+    result[index] = lowerValue + (upperValue - lowerValue) * fraction
+  }
+  return result
+}
+
+function percentile(values: readonly number[], fraction: number): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((left, right) => left - right)
+  const position = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)))
+  return sorted[position] ?? 0
+}
+
+function estimateTailNoiseRms(samples: Float32Array, start: number, end: number): number {
+  const boundedStart = Math.max(0, Math.min(samples.length, start))
+  const boundedEnd = Math.max(boundedStart, Math.min(samples.length, end))
+  const length = boundedEnd - boundedStart
+  if (length === 0) return 0
+
+  const blockLength = Math.max(1, Math.floor(length / 8))
+  const blockLevels: number[] = []
+  for (let blockStart = boundedStart; blockStart < boundedEnd; blockStart += blockLength) {
+    blockLevels.push(rms(samples, blockStart, Math.min(boundedEnd, blockStart + blockLength)))
+  }
+  return blockLevels.length >= 4 ? percentile(blockLevels, 0.75) : rms(samples, boundedStart, boundedEnd)
+}
+
 function getReferenceFft(
   sweep: MeasurementSweep,
   sampleRate: number,
@@ -158,7 +251,7 @@ function getReferenceFft(
   return cachedReferenceFft
 }
 
-function findDirectArrival(samples: Float32Array, sampleRate: number): {
+function findDirectArrival(samples: Float32Array, sampleRate: number, externalNoiseRms: number | null = null): {
   index: number | null
   peakIndex: number | null
   noiseRms: number
@@ -172,7 +265,10 @@ function findDirectArrival(samples: Float32Array, sampleRate: number): {
         samples.length - Math.round(sampleRate * 0.25),
       )
     : samples.length
-  const noiseFloorRms = rms(samples, noiseStart, samples.length)
+  const tailNoiseRms = estimateTailNoiseRms(samples, noiseStart, samples.length)
+  const noiseFloorRms = Number.isFinite(externalNoiseRms) && externalNoiseRms !== null
+    ? Math.max(0, externalNoiseRms)
+    : tailNoiseRms
   let peak = 0
   let peakIndex = -1
   for (let index = 0; index < samples.length; index++) {
@@ -248,22 +344,33 @@ function findEarlyReflections(
     }))
 }
 
-function buildDecayCurve(samples: Float32Array, directIndex: number): Float64Array {
+interface DecayCurve {
+  valuesDb: Float64Array
+  initialEnergy: number
+  noiseEnergy: number
+}
+
+function buildDecayCurve(samples: Float32Array, directIndex: number, noisePower: number): DecayCurve {
   const energy = new Float64Array(samples.length - directIndex)
   let total = 0
   for (let index = samples.length - 1; index >= directIndex; index--) {
     total += samples[index] * samples[index]
-    energy[index - directIndex] = total
+    const remainingSamples = samples.length - index
+    energy[index - directIndex] = Math.max(0, total - remainingSamples * noisePower)
   }
   const initial = energy[0] || 1
   for (let index = 0; index < energy.length; index++) {
     energy[index] = db(Math.sqrt(Math.max(0, energy[index] / initial)), -120)
   }
-  return energy
+  return {
+    valuesDb: energy,
+    initialEnergy: initial,
+    noiseEnergy: (samples.length - directIndex) * noisePower,
+  }
 }
 
-function summarizeImpulse(samples: Float32Array, sampleRate: number): ImpulseSummary {
-  const arrival = findDirectArrival(samples, sampleRate)
+export function summarizeImpulse(samples: Float32Array, sampleRate: number, externalNoiseRms: number | null = null): ImpulseSummary {
+  const arrival = findDirectArrival(samples, sampleRate, externalNoiseRms)
   if (arrival.index === null) {
     return {
       room: {
@@ -288,15 +395,21 @@ function summarizeImpulse(samples: Float32Array, sampleRate: number): ImpulseSum
   const earlyEnd = directIndex + Math.round(sampleRate * 0.05)
   const clarityEnd = directIndex + Math.round(sampleRate * 0.08)
   const directEnd = directIndex + Math.max(1, Math.round(sampleRate * 0.0025))
-  const directEnergy = energyBetween(samples, directIndex, directEnd)
-  const earlyEnergy = energyBetween(samples, directIndex, earlyEnd)
-  const c80Energy = energyBetween(samples, directIndex, clarityEnd)
-  const lateEnergy = energyBetween(samples, earlyEnd, samples.length)
-  const edc = buildDecayCurve(samples, directIndex)
-  const snrDb = dbRatio(directPeak ** 2, arrival.noiseRms ** 2) ?? -120
-  const decayConfidence = snrDb >= 30 && decayTime(edc, sampleRate, -5, -25) !== null
+  const noiseRms = arrival.noiseRms
+  const noisePower = noiseRms ** 2
+  const directEnergy = energyBetween(samples, directIndex, directEnd, noisePower)
+  const earlyEnergy = energyBetween(samples, directIndex, earlyEnd, noisePower)
+  const c80Energy = energyBetween(samples, directIndex, clarityEnd, noisePower)
+  const lateEnergy = reliableEnergyBetween(samples, earlyEnd, samples.length, noisePower)
+  const lateClarityEnergy = reliableEnergyBetween(samples, clarityEnd, samples.length, noisePower)
+  const decay = buildDecayCurve(samples, directIndex, noisePower)
+  const noiseFloorDb = dbRatio(decay.noiseEnergy, decay.initialEnergy) ?? -120
+  const edtMs = decayTime(decay.valuesDb, sampleRate, 0, -10, noiseFloorDb, 3)
+  const t20Ms = decayTime(decay.valuesDb, sampleRate, -5, -25, noiseFloorDb, 3)
+  const t30Ms = decayTime(decay.valuesDb, sampleRate, -5, -35, noiseFloorDb, DECAY_NOISE_MARGIN_DB)
+  const decayConfidence = t30Ms !== null
     ? 'high'
-    : snrDb >= 18 && decayTime(edc, sampleRate, -5, -20) !== null
+    : t20Ms !== null
       ? 'medium'
       : 'low'
 
@@ -306,14 +419,14 @@ function summarizeImpulse(samples: Float32Array, sampleRate: number): ImpulseSum
       earlyReflections: findEarlyReflections(samples, directIndex, sampleRate, directPeak),
       directToLateDb: dbRatio(directEnergy, lateEnergy),
       c50Db: dbRatio(earlyEnergy, lateEnergy),
-      c80Db: dbRatio(c80Energy, energyBetween(samples, clarityEnd, samples.length)),
-      edtMs: decayTime(edc, sampleRate, 0, -10),
-      t20Ms: decayTime(edc, sampleRate, -5, -25),
-      t30Ms: decayTime(edc, sampleRate, -5, -35),
+      c80Db: dbRatio(c80Energy, lateClarityEnergy),
+      edtMs,
+      t20Ms,
+      t30Ms,
       decayConfidence,
     },
     impulseLengthSamples: samples.length,
-    noiseFloorRms: arrival.noiseRms,
+    noiseFloorRms: noiseRms,
     peak: arrival.peak,
   }
 }
@@ -327,51 +440,66 @@ export function deconvolveSweep(
   sampleRate: number,
   sweep: MeasurementSweep,
   startSample: number,
+  clockRatio = 1,
+  captureNoiseRms: number | null = null,
 ): DeconvolutionResult {
   const parts = sweepSampleParts(sweep, sampleRate)
   const referenceLength = parts.sweepSamples
   // Detection returns the beginning of the TV's complete sweep envelope. The
   // pre-roll is silence, so exclude it from the transfer calculation. This
   // keeps the FFT bounded when the recorder captured a long lead-in.
-  const captureStart = Math.min(samples.length, Math.max(0, startSample + parts.preRollSamples))
+  const captureStart = Math.min(samples.length, Math.max(0, startSample))
   const available = Math.max(0, samples.length - captureStart)
-  if (available < referenceLength) {
+  const safeClockRatio = Number.isFinite(clockRatio) && clockRatio > 0 ? clockRatio : 1
+  const requiredCaptureSamples = Math.ceil(referenceLength * safeClockRatio)
+  if (available < requiredCaptureSamples) {
     return {
       kind: 'capture_too_short',
       availableSamples: available,
-      requiredSamples: referenceLength,
+      requiredSamples: requiredCaptureSamples,
     }
   }
 
   // Only the active sweep and the intentionally captured post-roll belong in
   // the transfer estimate. The causal IR therefore ends at post-roll + 1.
-  const captureLength = Math.min(available, referenceLength + parts.postRollSamples)
+  const nominalCaptureLength = referenceLength + parts.postRollSamples
+  const targetCaptureLength = Math.min(
+    nominalCaptureLength,
+    Math.max(referenceLength, Math.floor(available / safeClockRatio)),
+  )
+  const captureLength = Math.min(available, Math.ceil(targetCaptureLength * safeClockRatio))
   const causalLength = Math.min(
-    captureLength - referenceLength + 1,
+    targetCaptureLength - referenceLength + 1,
     parts.postRollSamples + 1,
   )
   // Zero padding prevents the late room response from wrapping around the
   // start of the recovered causal impulse during frequency-domain division.
-  const fftLength = nextPowerOfTwo(Math.max(1, referenceLength + captureLength - 1))
+  const fftLength = nextPowerOfTwo(Math.max(1, referenceLength + targetCaptureLength - 1))
   const referenceFft = getReferenceFft(sweep, sampleRate, fftLength)
   const captureReal = new Float32Array(fftLength)
   const captureImaginary = new Float32Array(fftLength)
-  for (let index = 0; index < captureLength; index++) captureReal[index] = samples[captureStart + index]
+  const warpedCapture = resampleCapture(samples, captureStart, captureLength, targetCaptureLength, safeClockRatio)
+  for (let index = 0; index < warpedCapture.length; index++) captureReal[index] = warpedCapture[index]
   fftInPlace(captureReal, captureImaginary)
   const regularization = Math.max(referenceFft.maximumPower * 1e-7, 1e-12)
+  let inverseFilterPower = 0
   for (let index = 0; index < fftLength; index++) {
     const xReal = referenceFft.real[index]
     const xImaginary = referenceFft.imaginary[index]
     const denominator = xReal * xReal + xImaginary * xImaginary + regularization
     const yReal = captureReal[index]
     const yImaginary = captureImaginary[index]
+    inverseFilterPower += (xReal * xReal + xImaginary * xImaginary) / denominator ** 2
     captureReal[index] = (yReal * xReal + yImaginary * xImaginary) / denominator
     captureImaginary[index] = (yImaginary * xReal - yReal * xImaginary) / denominator
   }
   fftInPlace(captureReal, captureImaginary, true)
   const impulse = new Float32Array(causalLength)
   for (let index = 0; index < impulse.length; index++) impulse[index] = captureReal[index]
-  return { kind: 'ok', samples: impulse, summary: summarizeImpulse(impulse, sampleRate) }
+  const deconvolvedNoiseRms = Number.isFinite(captureNoiseRms) && captureNoiseRms !== null
+    ? captureNoiseRms * Math.sqrt(inverseFilterPower / fftLength)
+    : null
+  return { kind: 'ok', samples: impulse, summary: summarizeImpulse(impulse, sampleRate, deconvolvedNoiseRms) }
 }
 
 /**
@@ -385,33 +513,42 @@ export function windowedImpulseResponse(
   startHz: number,
   endHz: number,
   pointCount = 48,
+  noiseRms: number | null = null,
 ): ImpulseResponsePoint[] {
   if (impulse.length === 0 || sampleRate <= 0 || pointCount < 1) return []
-  const arrival = findDirectArrival(impulse, sampleRate)
+  const arrival = findDirectArrival(impulse, sampleRate, noiseRms)
   if (arrival.index === null) return []
   const peakIndex = arrival.index
 
   const fftLength = nextPowerOfTwo(Math.max(impulse.length, 256, pointCount * 4))
-  const real = new Float32Array(fftLength)
-  const imaginary = new Float32Array(fftLength)
-  const preSamples = Math.max(1, Math.round(sampleRate * 0.001))
-  const gateSamples = Math.max(preSamples + 1, Math.round(sampleRate * 0.25))
-  const taperSamples = Math.max(1, Math.round(sampleRate * 0.04))
-  const gateEnd = peakIndex + gateSamples
-  const taperEnd = gateEnd + taperSamples
-  for (let index = Math.max(0, peakIndex - preSamples); index < Math.min(impulse.length, taperEnd); index++) {
-    const relative = index - peakIndex
-    let weight = 0
-    if (relative < 0) {
-      weight = (relative + preSamples) / preSamples
-    } else if (relative <= gateSamples) {
-      weight = 1
-    } else {
-      weight = 0.5 * (1 + Math.cos(Math.PI * (relative - gateSamples) / taperSamples))
+  const windowedSpectrum = (gateMs: number, taperMs: number): { real: Float32Array; imaginary: Float32Array } => {
+    const real = new Float32Array(fftLength)
+    const imaginary = new Float32Array(fftLength)
+    const preSamples = Math.max(1, Math.round(sampleRate * 0.001))
+    const gateSamples = Math.max(preSamples + 1, Math.round(sampleRate * gateMs / 1000))
+    const taperSamples = Math.max(1, Math.round(sampleRate * taperMs / 1000))
+    const gateEnd = peakIndex + gateSamples
+    const taperEnd = gateEnd + taperSamples
+    for (let index = Math.max(0, peakIndex - preSamples); index < Math.min(impulse.length, taperEnd); index++) {
+      const relative = index - peakIndex
+      let weight = 0
+      if (relative < 0) {
+        weight = (relative + preSamples) / preSamples
+      } else if (relative <= gateSamples) {
+        weight = 1
+      } else {
+        weight = 0.5 * (1 + Math.cos(Math.PI * (relative - gateSamples) / taperSamples))
+      }
+      real[index] = impulse[index] * Math.max(0, Math.min(1, weight))
     }
-    real[index] = impulse[index] * Math.max(0, Math.min(1, weight))
+    fftInPlace(real, imaginary)
+    return { real, imaginary }
   }
-  fftInPlace(real, imaginary)
+
+  // LF needs the long window for usable modal resolution. The shorter window
+  // prevents late, position-dependent field energy from becoming HF EQ.
+  const longWindow = windowedSpectrum(250, 40)
+  const shortWindow = windowedSpectrum(80, 40)
 
   const lowHz = Math.max(10, startHz)
   const highHz = Math.min(endHz, sampleRate / 2 - sampleRate / fftLength)
@@ -429,7 +566,17 @@ export function windowedImpulseResponse(
       bin <= Math.min(fftLength / 2 - 1, centerBin + binRadius);
       bin++
     ) {
-      const magnitude = Math.hypot(real[bin], imaginary[bin])
+      const longMagnitude = Math.hypot(longWindow.real[bin], longWindow.imaginary[bin])
+      const shortMagnitude = Math.hypot(shortWindow.real[bin], shortWindow.imaginary[bin])
+      const transition = frequencyHz <= 200
+        ? 0
+        : frequencyHz >= 1_000
+          ? 1
+          : (Math.log(frequencyHz / 200) / Math.log(1_000 / 200))
+      const blend = transition * transition * (3 - 2 * transition)
+      const longDb = longMagnitude > 0 ? 20 * Math.log10(longMagnitude) : -120
+      const shortDb = shortMagnitude > 0 ? 20 * Math.log10(shortMagnitude) : -120
+      const magnitude = 10 ** ((longDb * (1 - blend) + shortDb * blend) / 20)
       if (magnitude > 0 && Number.isFinite(magnitude)) {
         totalDb += 20 * Math.log10(magnitude)
         count++

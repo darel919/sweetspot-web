@@ -6,14 +6,50 @@ export function sampleCountForMilliseconds(milliseconds: number, sampleRate: num
 
 export function sweepSampleParts(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): {
   preRollSamples: number
+  syncMarkerSamples: number
+  syncMarkerGapSamples: number
   sweepSamples: number
   postRollSamples: number
+  leadingMarkerStartSamples: number
+  sweepStartSamples: number
+  trailingMarkerStartSamples: number
+  totalSamples: number
 } {
+  const preRollSamples = sampleCountForMilliseconds(sweep.preRollMs, sampleRate)
+  const syncMarkerSamples = Math.max(1, sampleCountForMilliseconds(sweep.syncMarkerDurationMs, sampleRate))
+  const syncMarkerGapSamples = sampleCountForMilliseconds(sweep.syncMarkerGapMs, sampleRate)
+  const sweepSamples = Math.max(1, sampleCountForMilliseconds(sweep.durationMs, sampleRate))
+  const postRollSamples = sampleCountForMilliseconds(sweep.postRollMs, sampleRate)
+  const leadingMarkerStartSamples = Math.max(0, preRollSamples - syncMarkerSamples - syncMarkerGapSamples)
+  const sweepStartSamples = preRollSamples
+  const trailingMarkerStartSamples = sweepStartSamples + sweepSamples + postRollSamples + syncMarkerGapSamples
   return {
-    preRollSamples: sampleCountForMilliseconds(sweep.preRollMs, sampleRate),
-    sweepSamples: Math.max(1, sampleCountForMilliseconds(sweep.durationMs, sampleRate)),
-    postRollSamples: sampleCountForMilliseconds(sweep.postRollMs, sampleRate),
+    preRollSamples,
+    syncMarkerSamples,
+    syncMarkerGapSamples,
+    sweepSamples,
+    postRollSamples,
+    leadingMarkerStartSamples,
+    sweepStartSamples,
+    trailingMarkerStartSamples,
+    totalSamples: trailingMarkerStartSamples + syncMarkerSamples,
   }
+}
+
+export function generateSyncMarker(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
+  const parts = sweepSampleParts(sweep, sampleRate)
+  const marker = new Float32Array(parts.syncMarkerSamples)
+  const amplitude = 10 ** (sweep.levelDbfs / 20)
+  const durationSeconds = sweep.syncMarkerDurationMs / 1000
+  const chirpRate = (sweep.syncMarkerEndHz - sweep.syncMarkerStartHz) / durationSeconds
+  for (let index = 0; index < marker.length; index++) {
+    const progress = marker.length === 1 ? 0 : index / (marker.length - 1)
+    const time = progress * durationSeconds
+    const phase = 2 * Math.PI * (sweep.syncMarkerStartHz * time + 0.5 * chirpRate * time * time)
+    const window = marker.length <= 1 ? 1 : Math.sin(Math.PI * progress)
+    marker[index] = amplitude * window * Math.sin(phase)
+  }
+  return marker
 }
 
 export function generateSweepSignal(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
@@ -41,7 +77,10 @@ export function generateSweepSignal(sweep: MeasurementSweep, sampleRate = sweep.
 
 export function generateSweepReference(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
   const parts = sweepSampleParts(sweep, sampleRate)
-  const reference = new Float32Array(parts.preRollSamples + parts.sweepSamples + parts.postRollSamples)
-  reference.set(generateSweepSignal(sweep, sampleRate), parts.preRollSamples)
+  const reference = new Float32Array(parts.totalSamples)
+  const marker = generateSyncMarker(sweep, sampleRate)
+  reference.set(marker, parts.leadingMarkerStartSamples)
+  reference.set(generateSweepSignal(sweep, sampleRate), parts.sweepStartSamples)
+  reference.set(marker, parts.trailingMarkerStartSamples)
   return reference
 }

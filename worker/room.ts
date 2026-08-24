@@ -13,23 +13,24 @@ import {
 } from '../shared/types/protocol'
 
 const DEVICE_TTL_MS = 15_000
-const CLIENT_TTL_MS = 10_000
+// Only the HTTP fallback uses this TTL. WebSocket presence is derived from
+// the live attached socket and needs no application heartbeat.
+const CLIENT_TTL_MS = 30_000
 const MAX_QUEUE = 32
 const RATE_WINDOW_MS = 10_000
 const RATE_MAX = 60
 
 interface Waiter {
   resolve: (v: string) => void
-  timer: number
+  timer: ReturnType<typeof setTimeout>
 }
 
 interface ConnState {
-  role: 'device' | 'client'
   stamps: number[]
 }
 
 interface SocketAttachment {
-  role: 'client'
+  role: 'client' | 'device'
   connectionId: string
 }
 
@@ -51,7 +52,7 @@ export class RoomDO extends DurableObject<unknown> {
     const now = Date.now()
     let cs = this.connStates.get(key)
     if (!cs) {
-      cs = { role: 'client', stamps: [] }
+      cs = { stamps: [] }
       this.connStates.set(key, cs)
     }
     cs.stamps = cs.stamps.filter((t) => now - t < RATE_WINDOW_MS)
@@ -79,7 +80,14 @@ export class RoomDO extends DurableObject<unknown> {
   }
 
   clientOnline(): boolean {
-    return Date.now() - this.clientSeenAt < CLIENT_TTL_MS
+    return this.hasOpenSocket('client') || Date.now() - this.clientSeenAt < CLIENT_TTL_MS
+  }
+
+  private hasOpenSocket(role: SocketAttachment['role']): boolean {
+    return this.ctx.getWebSockets().some((ws) => {
+      const attachment = this.socketAttachment(ws)
+      return attachment?.role === role && ws.readyState === WebSocket.OPEN
+    })
   }
 
   wake() {
@@ -106,30 +114,60 @@ export class RoomDO extends DurableObject<unknown> {
   private socketAttachment(ws: WebSocket): SocketAttachment | null {
     const attachment = ws.deserializeAttachment()
     if (typeof attachment !== 'object' || attachment === null) return null
-    if (attachment.role !== 'client' || typeof attachment.connectionId !== 'string') return null
+    if (
+      (attachment.role !== 'client' && attachment.role !== 'device')
+      || typeof attachment.connectionId !== 'string'
+    ) return null
     return attachment as SocketAttachment
   }
 
-  private sendSocket(ws: WebSocket, value: unknown) {
-    if (ws.readyState !== WebSocket.OPEN) return
+  private sendSocket(ws: WebSocket, value: unknown): boolean {
+    if (ws.readyState !== WebSocket.OPEN) return false
     try {
       ws.send(JSON.stringify(value))
+      return true
     } catch {
       try { ws.close(1011, 'room send failed') } catch {}
+      return false
     }
   }
 
   private broadcastPresence(deviceOnline: boolean) {
     const value = { kind: 'room.presence', deviceOnline }
     for (const ws of this.ctx.getWebSockets()) {
-      if (this.socketAttachment(ws)) this.sendSocket(ws, value)
+      if (this.socketAttachment(ws)?.role === 'client') this.sendSocket(ws, value)
+    }
+  }
+
+  private broadcastClientPresence(clientOnline: boolean) {
+    const value = { kind: 'room.clientPresence', clientOnline }
+    for (const ws of this.ctx.getWebSockets()) {
+      if (this.socketAttachment(ws)?.role === 'device') this.sendSocket(ws, value)
     }
   }
 
   private broadcastEnvelope(env: Envelope) {
     for (const ws of this.ctx.getWebSockets()) {
-      if (this.socketAttachment(ws)) this.sendSocket(ws, env)
+      if (this.socketAttachment(ws)?.role === 'client') this.sendSocket(ws, env)
     }
+  }
+
+  private queueCommand(env: Envelope) {
+    const device = this.ctx.getWebSockets().find((ws) => {
+      const attachment = this.socketAttachment(ws)
+      return attachment?.role === 'device' && ws.readyState === WebSocket.OPEN
+    })
+    if (device && this.sendSocket(device, env)) return
+
+    this.commands.push(env)
+    if (this.commands.length > MAX_QUEUE) this.commands.splice(0, this.commands.length - MAX_QUEUE)
+    this.wake()
+  }
+
+  private queueClientReplay(env: Envelope) {
+    if (env.type === 'state.snapshot') return
+    this.forClients.push({ env, at: Date.now() })
+    if (this.forClients.length > MAX_QUEUE) this.forClients.splice(0, this.forClients.length - MAX_QUEUE)
   }
 
   private socketError(ws: WebSocket, code: ErrorPayload['code'] | 'bad_json' | 'bad_message', message: string) {
@@ -159,27 +197,49 @@ export class RoomDO extends DurableObject<unknown> {
       return
     }
     if (isRoomSocketPingMessage(value)) {
+      if (attachment.role !== 'client') {
+        this.socketError(ws, 'bad_message', 'Only clients may send room.ping')
+        return
+      }
       this.clientSeenAt = Date.now()
-      await this.restorePresence()
       this.sendSocket(ws, { kind: 'room.presence', deviceOnline: this.deviceOnline() })
       return
     }
     const validated = this.validate(value)
-    if (!validated.ok) {
+    if (validated.ok === false) {
       this.socketError(ws, validated.code, validated.message)
       return
     }
-    if (!isDeviceTargeted(validated.env.type)) {
-      this.socketError(ws, 'unknown_type', 'Clients may only send device-targeted types')
+    if (attachment.role === 'client') {
+      if (!isDeviceTargeted(validated.env.type)) {
+        this.socketError(ws, 'unknown_type', 'Clients may only send device-targeted types')
+        return
+      }
+      this.clientSeenAt = Date.now()
+      this.queueCommand(validated.env)
       return
     }
-    this.clientSeenAt = Date.now()
-    this.commands.push(validated.env)
-    if (this.commands.length > MAX_QUEUE) this.commands.splice(0, this.commands.length - MAX_QUEUE)
-    this.wake()
+
+    this.queueClientReplay(validated.env)
+    this.broadcastEnvelope(validated.env)
   }
 
-  webSocketClose(_ws: WebSocket, _code: number, _reason: string) {}
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string) {
+    const attachment = this.socketAttachment(ws)
+    if (!attachment) return
+
+    this.connStates.delete(attachment.connectionId)
+    if (attachment.role === 'device' && !this.hasOpenSocket('device')) {
+      this.deviceSeenAt = 0
+      await this.state.storage.delete('deviceSeenAt')
+      await this.state.storage.deleteAlarm()
+      this.broadcastPresence(false)
+    }
+    if (attachment.role === 'client' && !this.hasOpenSocket('client')) {
+      this.clientSeenAt = 0
+      this.broadcastClientPresence(false)
+    }
+  }
 
   webSocketError(_ws: WebSocket, error: unknown) {
     console.warn('SweetSpot room WebSocket error', error)
@@ -188,6 +248,7 @@ export class RoomDO extends DurableObject<unknown> {
   async alarm() {
     await this.restorePresence()
     if (this.deviceSeenAt <= 0) return
+    if (this.hasOpenSocket('device')) return
     if (this.deviceOnline()) {
       await this.state.storage.setAlarm(this.deviceSeenAt + DEVICE_TTL_MS)
       return
@@ -195,21 +256,40 @@ export class RoomDO extends DurableObject<unknown> {
     this.broadcastPresence(false)
   }
 
-  private async openClientSocket(request: Request): Promise<Response> {
+  private async openSocket(request: Request, role: SocketAttachment['role']): Promise<Response> {
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
       return new Response('Expected WebSocket upgrade', { status: 426 })
     }
+
+    if (role === 'device') {
+      for (const ws of this.ctx.getWebSockets()) {
+        if (this.socketAttachment(ws)?.role === 'device' && ws.readyState === WebSocket.OPEN) {
+          try { ws.close(1000, 'replaced by newer device connection') } catch {}
+        }
+      }
+      this.deviceSeenAt = 0
+      await this.state.storage.delete('deviceSeenAt')
+      await this.state.storage.deleteAlarm()
+    }
+
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair)
     this.ctx.acceptWebSocket(server)
-    server.serializeAttachment({ role: 'client', connectionId: crypto.randomUUID() } satisfies SocketAttachment)
-    this.clientSeenAt = Date.now()
+    server.serializeAttachment({ role, connectionId: crypto.randomUUID() } satisfies SocketAttachment)
+    if (role === 'client') this.clientSeenAt = Date.now()
     await this.restorePresence()
     this.sendSocket(server, {
       kind: 'room.ready',
+      role,
       deviceOnline: this.deviceOnline(),
-      messages: this.forClients.map(({ env }) => env),
+      messages: role === 'device' ? this.commands.splice(0, this.commands.length) : this.forClients.map(({ env }) => env),
     })
+    if (role === 'device') {
+      this.broadcastPresence(true)
+      this.sendSocket(server, { kind: 'room.clientPresence', clientOnline: this.clientOnline() })
+    } else {
+      this.broadcastClientPresence(true)
+    }
     return new Response(null, { status: 101, webSocket: client })
   }
 
@@ -218,7 +298,11 @@ export class RoomDO extends DurableObject<unknown> {
     const path = url.pathname
 
     if (path === '/ws' && request.method === 'GET') {
-      return this.openClientSocket(request)
+      const role = url.searchParams.get('role')
+      if (role !== 'client' && role !== 'device') {
+        return new Response('Invalid room socket role', { status: 400 })
+      }
+      return this.openSocket(request, role)
     }
 
     if (path === '/register' && request.method === 'POST') {
@@ -262,11 +346,10 @@ export class RoomDO extends DurableObject<unknown> {
         return Response.json({ error: 'bad_json' }, { status: 400 })
       }
       const v = this.validate(env)
-      if (!v.ok) return Response.json({ error: v.code, message: v.message }, { status: 400 })
+      if (v.ok === false) return Response.json({ error: v.code, message: v.message }, { status: 400 })
       await this.restorePresence()
       await this.markDeviceSeen()
-      this.forClients.push({ env: v.env, at: Date.now() })
-      if (this.forClients.length > MAX_QUEUE) this.forClients.splice(0, this.forClients.length - MAX_QUEUE)
+      this.queueClientReplay(v.env)
       this.broadcastEnvelope(v.env)
       return Response.json({ ok: true })
     }
@@ -283,14 +366,12 @@ export class RoomDO extends DurableObject<unknown> {
         return Response.json({ error: 'bad_json' }, { status: 400 })
       }
       const v = this.validate(env)
-      if (!v.ok) return Response.json({ error: v.code, message: v.message }, { status: 400 })
+      if (v.ok === false) return Response.json({ error: v.code, message: v.message }, { status: 400 })
       if (!isDeviceTargeted(v.env.type)) {
         return Response.json({ error: 'unknown_type', message: `clients may only send device-targeted types` }, { status: 400 })
       }
       this.clientSeenAt = Date.now()
-      this.commands.push(v.env)
-      if (this.commands.length > MAX_QUEUE) this.commands.splice(0, this.commands.length - MAX_QUEUE)
-      this.wake()
+      this.queueCommand(v.env)
       return Response.json({ ok: true })
     }
 

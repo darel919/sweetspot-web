@@ -15,6 +15,10 @@ const sweep = {
   durationMs: 8_000,
   preRollMs: 1_000,
   postRollMs: 1_000,
+  syncMarkerStartHz: 1_000,
+  syncMarkerEndHz: 4_000,
+  syncMarkerDurationMs: 40,
+  syncMarkerGapMs: 10,
   levelDbfs: -12,
   fadeInMs: 20,
   fadeOutMs: 20,
@@ -115,6 +119,9 @@ describe('measurement protocol boundary', () => {
         signalPeak: 0.2,
         snrEstimateDb: 24,
         detectionOffsetMs: 1012,
+        syncMarkerConfidence: 0.9,
+        endingMarkerConfidence: 0.88,
+        clockDriftPpm: 25,
         clipped: false,
         clippedSamples: 0,
         directArrivalMs: 4.2,
@@ -168,7 +175,9 @@ describe('measurement protocol boundary', () => {
   test('recognizes room socket control messages separately from envelopes', () => {
     expect(isRoomSocketPingMessage({ kind: 'room.ping' })).toBe(true)
     expect(isRoomSocketServerMessage({ kind: 'room.presence', deviceOnline: false })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', deviceOnline: true, messages: [] })).toBe(true)
+    expect(isRoomSocketServerMessage({ kind: 'room.ready', role: 'client', deviceOnline: true, messages: [] })).toBe(true)
+    expect(isRoomSocketServerMessage({ kind: 'room.ready', role: 'device', deviceOnline: true, messages: [] })).toBe(true)
+    expect(isRoomSocketServerMessage({ kind: 'room.clientPresence', clientOnline: true })).toBe(true)
     expect(isRoomSocketServerMessage({ kind: 'room.ready', deviceOnline: true, messages: [{ type: 'bad' }] })).toBe(false)
   })
 })

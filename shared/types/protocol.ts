@@ -77,11 +77,19 @@ export interface CalibrationState {
   active: boolean
   bandsDb: number[]
   frequenciesHz: number[]
+  requestedBandsDb?: number[]
+  effectiveBandsDb?: number[]
   leftBandsDb?: number[]
   rightBandsDb?: number[]
+  requestedLeftBandsDb?: number[]
+  requestedRightBandsDb?: number[]
+  effectiveLeftBandsDb?: number[]
+  effectiveRightBandsDb?: number[]
   independent?: boolean
   headroomDb?: number
   headroomVerified?: boolean
+  applicationVerified?: boolean
+  applicationError?: string | null
 }
 
 export interface PresetOption {
@@ -160,6 +168,8 @@ export const CALIBRATION_ERROR_CODES = [
   'capture_clipped',
   'capture_too_short',
   'sweep_not_found',
+  'sync_marker_not_found',
+  'clock_drift_unreliable',
   'signal_too_low',
   'measurement_unstable',
   'calibration_aborted',
@@ -209,6 +219,10 @@ export interface MeasurementSweep {
   durationMs: number
   preRollMs: number
   postRollMs: number
+  syncMarkerStartHz: number
+  syncMarkerEndHz: number
+  syncMarkerDurationMs: number
+  syncMarkerGapMs: number
   levelDbfs: number
   fadeInMs: number
   fadeOutMs: number
@@ -249,6 +263,9 @@ export interface MeasurementDiagnosticsValues {
   signalPeak: number
   snrEstimateDb: number | null
   detectionOffsetMs: number | null
+  syncMarkerConfidence: number
+  endingMarkerConfidence: number
+  clockDriftPpm: number | null
   clipped: boolean
   clippedSamples: number
   directArrivalMs: number | null
@@ -458,6 +475,8 @@ export function isDeviceTargeted(type: string): type is DeviceTargetedType {
 
 export interface RoomSocketReadyMessage {
   kind: 'room.ready'
+  /** Omitted by the pre-WebSocket-device Worker during rolling upgrades. */
+  role?: Role
   deviceOnline: boolean
   messages: Envelope[]
 }
@@ -465,6 +484,11 @@ export interface RoomSocketReadyMessage {
 export interface RoomSocketPresenceMessage {
   kind: 'room.presence'
   deviceOnline: boolean
+}
+
+export interface RoomSocketClientPresenceMessage {
+  kind: 'room.clientPresence'
+  clientOnline: boolean
 }
 
 export interface RoomSocketErrorMessage {
@@ -480,6 +504,7 @@ export interface RoomSocketPingMessage {
 export type RoomSocketServerMessage =
   | RoomSocketReadyMessage
   | RoomSocketPresenceMessage
+  | RoomSocketClientPresenceMessage
   | RoomSocketErrorMessage
 
 export function isRoomSocketPingMessage(value: unknown): value is RoomSocketPingMessage {
@@ -489,11 +514,13 @@ export function isRoomSocketPingMessage(value: unknown): value is RoomSocketPing
 export function isRoomSocketServerMessage(value: unknown): value is RoomSocketServerMessage {
   if (!isRecord(value) || typeof value.kind !== 'string') return false
   if (value.kind === 'room.ready') {
-    return typeof value.deviceOnline === 'boolean'
+    return (value.role === undefined || value.role === 'client' || value.role === 'device')
+      && typeof value.deviceOnline === 'boolean'
       && Array.isArray(value.messages)
       && value.messages.every(isEnvelope)
   }
   if (value.kind === 'room.presence') return typeof value.deviceOnline === 'boolean'
+  if (value.kind === 'room.clientPresence') return typeof value.clientOnline === 'boolean'
   if (value.kind === 'room.error') {
     return typeof value.code === 'string'
       && ['bad_json', 'bad_message', 'bad_envelope', 'version_mismatch', 'unknown_type', 'payload_too_large', 'rate_limited', 'not_in_room', 'internal'].includes(value.code)
@@ -617,6 +644,13 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
     && isNullableFiniteNumber(diagnostics.snrEstimateDb)
     && isNullableFiniteNumber(diagnostics.detectionOffsetMs)
     && (diagnostics.detectionOffsetMs === null || diagnostics.detectionOffsetMs >= 0)
+    && isFiniteNumber(diagnostics.syncMarkerConfidence)
+    && diagnostics.syncMarkerConfidence >= 0
+    && diagnostics.syncMarkerConfidence <= 1
+    && isFiniteNumber(diagnostics.endingMarkerConfidence)
+    && diagnostics.endingMarkerConfidence >= 0
+    && diagnostics.endingMarkerConfidence <= 1
+    && isNullableFiniteNumber(diagnostics.clockDriftPpm)
     && typeof diagnostics.clipped === 'boolean'
     && isInteger(diagnostics.clippedSamples)
     && diagnostics.clippedSamples >= 0
@@ -690,6 +724,12 @@ export function isMeasurementSweep(value: unknown): value is MeasurementSweep {
   if (!isFiniteNumber(value.durationMs) || value.durationMs <= 0 || value.durationMs > 120_000) return false
   if (!isFiniteNumber(value.preRollMs) || value.preRollMs < 0 || value.preRollMs > 60_000) return false
   if (!isFiniteNumber(value.postRollMs) || value.postRollMs < 0 || value.postRollMs > 60_000) return false
+  if (!isFiniteNumber(value.syncMarkerStartHz) || value.syncMarkerStartHz <= 0) return false
+  if (!isFiniteNumber(value.syncMarkerEndHz) || value.syncMarkerEndHz <= value.syncMarkerStartHz) return false
+  if (value.syncMarkerEndHz >= value.sampleRate / 2) return false
+  if (!isFiniteNumber(value.syncMarkerDurationMs) || value.syncMarkerDurationMs <= 0 || value.syncMarkerDurationMs > 1_000) return false
+  if (!isFiniteNumber(value.syncMarkerGapMs) || value.syncMarkerGapMs < 0 || value.syncMarkerGapMs > 1_000) return false
+  if (value.preRollMs < value.syncMarkerDurationMs + value.syncMarkerGapMs) return false
   if (!isFiniteNumber(value.levelDbfs) || value.levelDbfs > 0 || value.levelDbfs < -120) return false
   if (!isFiniteNumber(value.fadeInMs) || value.fadeInMs < 0 || value.fadeInMs > value.durationMs) return false
   if (!isFiniteNumber(value.fadeOutMs) || value.fadeOutMs < 0 || value.fadeOutMs > value.durationMs) return false

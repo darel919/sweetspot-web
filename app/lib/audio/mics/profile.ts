@@ -135,6 +135,10 @@ export function interpolateLogResponseDb(profile: MicCalibrationProfile, frequen
   return lower.responseDb + (upper.responseDb - lower.responseDb) * position
 }
 
+function relativeMicResponseDbAtHz(profile: MicCalibrationProfile, frequencyHz: number): number {
+  return interpolateLogResponseDb(profile, frequencyHz) - interpolateLogResponseDb(profile, profile.normalizeAtHz)
+}
+
 export function micTrustWeightAtHz(profile: MicCalibrationProfile, frequencyHz: number): number {
   const { minHz, fullTrustMaxHz, taperToHz } = profile.trust
   if (frequencyHz < minHz || frequencyHz >= taperToHz) return 0
@@ -148,7 +152,7 @@ export function micTrustWeightAtHz(profile: MicCalibrationProfile, frequencyHz: 
 }
 
 export function micCompensationDbAtHz(profile: MicCalibrationProfile, frequencyHz: number): number {
-  const weightedCompensation = -interpolateLogResponseDb(profile, frequencyHz) * micTrustWeightAtHz(profile, frequencyHz)
+  const weightedCompensation = -relativeMicResponseDbAtHz(profile, frequencyHz) * micTrustWeightAtHz(profile, frequencyHz)
   const maximumAbsoluteCompensation = frequencyHz <= profile.trust.fullTrustMaxHz
     ? Number.POSITIVE_INFINITY
     : frequencyHz <= HF_COMPENSATION_CAP_START_HZ

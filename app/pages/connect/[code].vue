@@ -56,6 +56,8 @@
           :correction-strength-options="correctionStrengthOptions"
           :correction-pending="correctionPending"
           :calibration-applied="calibrationApplied"
+          :rollback-available="rollbackState !== null"
+          :validation-worse="validationWorse"
           :cal-json="calJson"
           :cal-status="calStatus"
           :validation-metrics="validationMetrics"
@@ -71,6 +73,7 @@
           @apply-recommended-correction="applyRecommendedCorrection"
           @apply-calibration="applyCalibration"
           @reset-calibration="resetCalibration"
+          @rollback-calibration="rollbackCalibration"
         />
 
         <ConnectDiagnosticsSection
@@ -154,6 +157,8 @@ import { isCalibrationActiveStage } from '~/composables/useCalibrationSession'
 import type {
   AggregateResponse,
 } from '~/lib/audio/measurement/aggregation'
+import { allRepeatabilityPassed } from '~/lib/audio/measurement/aggregation'
+import { EqCommandRevisionGate } from '~/lib/eq-command-revision'
 import type {
   CalibrationValidationMetrics,
   CorrectionStrengthOption,
@@ -202,6 +207,7 @@ const measurementBusy = computed(() => isCalibrationActiveStage(measurementStage
 const calibrationLocked = measurementBusy
 const toastMessage = ref('')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
+let eqRevisionTimer: ReturnType<typeof setTimeout> | null = null
 let restoreScrollLock: (() => void) | null = null
 let beforeUnloadAttached = false
 
@@ -243,6 +249,9 @@ onBeforeRouteUpdate((to, from) => {
 })
 
 const snapshot = ref<StateSnapshot | null>(null)
+const eqCommandRevision = new EqCommandRevisionGate()
+let eqDraftRevision = 0
+let eqSentRevision = 0
 const effectsDiagnostics = ref<EffectsDiagnostics | null>(null)
 const diagPending = ref(false)
 
@@ -260,12 +269,36 @@ const calIsError = ref(false)
 const profileName = ref('')
 const correctionPending = ref(false)
 const calibrationApplied = ref(false)
+const rollbackState = ref<{
+  active: boolean
+  bandsDb: number[]
+  leftBandsDb?: number[]
+  rightBandsDb?: number[]
+} | null>(null)
 const correctionStrength = ref<CorrectionStrength>('normal')
 const correctionStrengthOptions: readonly CorrectionStrengthOption[] = [
   { id: 'gentle', label: 'Gentle' },
   { id: 'normal', label: 'Normal' },
   { id: 'strong', label: 'Strong' },
 ]
+
+type CalibrationApplyReply = OkReply & {
+  calibration?: { applicationError?: string | null }
+}
+
+function mappedCorrectionSummary(curves: readonly number[]): {
+  maxCutDb: number
+  maxBoostDb: number
+  headroomDb: number
+} {
+  const maxCutDb = Math.min(...curves)
+  const maxBoostDb = Math.max(...curves)
+  return {
+    maxCutDb,
+    maxBoostDb,
+    headroomDb: maxBoostDb > 0 ? -(maxBoostDb + 0.5) : 0,
+  }
+}
 
 const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
   const currentSnapshot = snapshot.value
@@ -290,40 +323,45 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
     headroomVerified,
   })
   const commonBands = mapCorrectionToBands(common.correction, bandCutoffs)
+  const commonSummary = mappedCorrectionSummary(commonBands)
   if (!independent || !measurementAggregateLeft.value || !measurementAggregateRight.value) {
     return {
       bandsDb: commonBands,
       independent: false,
-      maxCutDb: common.maxCutDb,
-      maxBoostDb: common.maxBoostDb,
-      headroomDb: common.headroomDb,
+      ...commonSummary,
     }
   }
   const left = calculateCorrection(measurementAggregateLeft.value, profile, { strength: correctionStrength.value, headroomVerified })
   const right = calculateCorrection(measurementAggregateRight.value, profile, { strength: correctionStrength.value, headroomVerified })
   const leftBandsDb = mapCorrectionToBands(left.correction, bandCutoffs)
   const rightBandsDb = mapCorrectionToBands(right.correction, bandCutoffs)
+  const channelSummary = mappedCorrectionSummary([...leftBandsDb, ...rightBandsDb])
   return {
     bandsDb: commonBands,
     leftBandsDb,
     rightBandsDb,
     independent: true,
-    maxCutDb: Math.min(left.maxCutDb, right.maxCutDb),
-    maxBoostDb: Math.max(left.maxBoostDb, right.maxBoostDb),
-    headroomDb: Math.min(left.headroomDb, right.headroomDb),
+    ...channelSummary,
   }
 })
 
 const validationAggregate = computed<AggregateResponse | null>(() => {
   if (!measurementValidationAggregateLeft.value || !measurementValidationAggregateRight.value) return null
+  if (!allRepeatabilityPassed(measurementValidationAggregateLeft.value)
+    || !allRepeatabilityPassed(measurementValidationAggregateRight.value)) return null
   return combineChannelAggregates(measurementValidationAggregateLeft.value, measurementValidationAggregateRight.value)
 })
 
 const validationMetrics = computed<CalibrationValidationMetrics | null>(() => {
-  const before = measurementAggregateBoth.value
-  const after = validationAggregate.value
+  const before = measurementAggregateBoth.value?.positionResponses.find((response) => response.positionId === 'center')
+  const after = validationAggregate.value?.positionResponses.find((response) => response.positionId === 'center')
   if (!before || !after) return null
   return { before: targetErrorRms(before.points), after: targetErrorRms(after.points) }
+})
+
+const validationWorse = computed(() => {
+  const metrics = validationMetrics.value
+  return metrics !== null && metrics.after > metrics.before + 0.5
 })
 
 onMounted(() => {
@@ -350,11 +388,18 @@ watch([status, deviceOnline], ([nextStatus, nextOnline], [previousStatus, previo
 
 onScopeDispose(() => {
   if (toastTimer !== null) clearTimeout(toastTimer)
+  if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)
   syncCalibrationLock(false)
 })
 
 onMessage((env) => {
   if (env.type !== 'state.snapshot') return
+  if (!eqCommandRevision.shouldApply(env.replyTo)) return
+  if (env.replyTo !== undefined) {
+    eqCommandRevision.settle(env.replyTo)
+    if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)
+    eqRevisionTimer = null
+  }
   const next = env.payload as StateSnapshot
   if (JSON.stringify(next) === JSON.stringify(snapshot.value)) return
   snapshot.value = next
@@ -364,7 +409,7 @@ const eqDraft = ref<number[]>([])
 
 watch(snapshot, (s) => {
   if (!s) return
-  eqDraft.value = [...s.userEq.bandsDb]
+  if (eqDraftRevision === eqSentRevision) eqDraft.value = [...s.userEq.bandsDb]
   if (!calJson.value.trim()) {
     calJson.value = JSON.stringify(s.calibration.bandsDb.map((v) => Math.round(v * 10) / 10))
   }
@@ -381,6 +426,7 @@ function onBandInput(i: number, ev: Event) {
   const v = parseFloat((ev.target as HTMLInputElement).value)
   if (Number.isNaN(v)) return
   eqDraft.value[i] = v
+  eqDraftRevision++
 }
 
 function commitBands() {
@@ -390,10 +436,18 @@ function commitBands() {
 function resetBands() {
   const cur = snapshot.value?.userEq.bandsDb ?? []
   eqDraft.value = [...cur]
+  eqDraftRevision = eqSentRevision
 }
 
 function setBands(bandsDb: number[]) {
-  send('engine.setBands', { bandsDb })
+  eqSentRevision = eqDraftRevision
+  const commandId = send('engine.setBands', { bandsDb })
+  eqCommandRevision.track(commandId)
+  if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)
+  eqRevisionTimer = setTimeout(() => {
+    eqCommandRevision.abandonPending()
+    eqRevisionTimer = null
+  }, 15_000)
 }
 
 function setEngine(enabled: boolean) {
@@ -433,6 +487,27 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
   return Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))])
 }
 
+function captureRollbackState() {
+  const calibration = snapshot.value?.calibration
+  const bandsDb = calibration?.requestedBandsDb ?? calibration?.bandsDb
+  if (!calibration || !bandsDb || bandsDb.length !== 64) return null
+  return {
+    active: calibration.active,
+    bandsDb: [...bandsDb],
+    ...(calibration.independent && (calibration.requestedLeftBandsDb ?? calibration.leftBandsDb)?.length === 64 && (calibration.requestedRightBandsDb ?? calibration.rightBandsDb)?.length === 64
+      ? {
+          leftBandsDb: [...(calibration.requestedLeftBandsDb ?? calibration.leftBandsDb ?? [])],
+          rightBandsDb: [...(calibration.requestedRightBandsDb ?? calibration.rightBandsDb ?? [])],
+        }
+      : {}),
+  }
+}
+
+function rememberRollbackState() {
+  const previous = captureRollbackState()
+  if (previous) rollbackState.value = previous
+}
+
 async function applyCalibration() {
   const bandsDb = parseCurve(calJson.value)
   calIsError.value = bandsDb == null
@@ -440,6 +515,7 @@ async function applyCalibration() {
     calStatus.value = 'Need a JSON array of exactly 64 numbers.'
     return
   }
+  rememberRollbackState()
   calStatus.value = 'Applying…'
   const res = await withTimeout(request<OkReply>('calibration.apply', { bandsDb }), 15_000)
   if (!res) {
@@ -447,9 +523,11 @@ async function applyCalibration() {
     calStatus.value = 'TV did not answer within 15s.'
     return
   }
-  const payload = res.payload as OkReply
+  const payload = res.payload as CalibrationApplyReply
   calIsError.value = payload.ok === false
-  calStatus.value = payload.ok === false ? 'Device rejected curve: ' + (payload.error ?? 'unknown') : 'Curve applied.'
+  calStatus.value = payload.ok === false
+    ? 'Device rejected curve: ' + (payload.error ?? payload.calibration?.applicationError ?? 'unknown')
+    : 'Curve applied.'
   void request('state.get')
 }
 
@@ -461,6 +539,7 @@ async function applyRecommendedCorrection() {
     return
   }
   correctionPending.value = true
+  const previous = captureRollbackState()
   calStatus.value = 'Applying recommended correction…'
   try {
     const payload: Record<string, unknown> = { bandsDb: correction.bandsDb }
@@ -474,15 +553,52 @@ async function applyRecommendedCorrection() {
       calStatus.value = 'TV did not answer within 15s.'
       return
     }
-    const result = res.payload as OkReply
+    const result = res.payload as CalibrationApplyReply
     calIsError.value = result.ok === false
     calStatus.value = result.ok === false
-      ? 'Device rejected correction: ' + (result.error ?? 'unknown')
+      ? 'Device rejected correction: ' + (result.error ?? result.calibration?.applicationError ?? 'unknown')
       : correction.independent
         ? 'Independent left/right correction applied.'
         : 'Common correction applied.'
     calibrationApplied.value = result.ok !== false
+    if (result.ok !== false && previous) rollbackState.value = previous
     calJson.value = JSON.stringify(correction.bandsDb.map((value) => Math.round(value * 10) / 10))
+    void request('state.get')
+  } finally {
+    correctionPending.value = false
+  }
+}
+
+async function rollbackCalibration() {
+  const previous = rollbackState.value
+  if (!previous || correctionPending.value) return
+  correctionPending.value = true
+  calStatus.value = 'Rolling back the last calibration…'
+  try {
+    const res = previous.active
+      ? await withTimeout(request<OkReply>('calibration.apply', {
+          bandsDb: previous.bandsDb,
+          ...(previous.leftBandsDb && previous.rightBandsDb
+            ? { leftBandsDb: previous.leftBandsDb, rightBandsDb: previous.rightBandsDb }
+            : {}),
+        }), 15_000)
+      : await withTimeout(request('calibration.reset'), 15_000)
+    if (!res) {
+      calIsError.value = true
+      calStatus.value = 'TV did not answer within 15s.'
+      return
+    }
+    const result = res.payload as CalibrationApplyReply
+    if (result.ok === false) {
+      calIsError.value = true
+      calStatus.value = 'TV rejected the rollback: ' + (result.error ?? result.calibration?.applicationError ?? 'unknown')
+      return
+    }
+    rollbackState.value = null
+    calibrationApplied.value = previous.active
+    calJson.value = JSON.stringify(previous.bandsDb.map((value) => Math.round(value * 10) / 10))
+    calIsError.value = false
+    calStatus.value = 'Previous calibration restored.'
     void request('state.get')
   } finally {
     correctionPending.value = false
@@ -492,6 +608,8 @@ async function applyRecommendedCorrection() {
 async function resetCalibration() {
   calStatus.value = 'Resetting…'
   await withTimeout(request('calibration.reset'), 15_000)
+  rollbackState.value = null
+  calibrationApplied.value = false
   calStatus.value = 'Calibration reset.'
   void request('state.get')
 }
@@ -507,6 +625,7 @@ function startMeasurement() {
     return
   }
   calibrationApplied.value = false
+  rollbackState.value = null
   void startMeasurementSession()
 }
 

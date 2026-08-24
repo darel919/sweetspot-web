@@ -45,7 +45,7 @@ function responsePolyline(points: ResponsePoint[]): string {
       <line x1="0" y1="140" x2="800" y2="140" class="graph-zero" />
       <polyline
         v-if="!aggregateLeft && !aggregateRight"
-        :points="responsePolyline(analysis.points)"
+        :points="responsePolyline(analysis.displayPoints)"
         class="graph-line"
       />
       <polyline v-if="aggregateLeft" :points="responsePolyline(aggregateLeft.points)" class="graph-line graph-left" />
@@ -61,6 +61,8 @@ function responsePolyline(points: ResponsePoint[]): string {
       <dt>peak</dt><dd>{{ dbfs(analysis.diagnostics.signalPeak) }}</dd>
       <dt>SNR</dt><dd>{{ analysis.diagnostics.snrEstimateDb == null ? 'unknown' : `${analysis.diagnostics.snrEstimateDb.toFixed(1)} dB` }}</dd>
       <dt>detected offset</dt><dd>{{ analysis.diagnostics.detectionOffsetMs?.toFixed(1) ?? 'unknown' }} ms</dd>
+      <dt>sync marker</dt><dd>{{ (analysis.diagnostics.detectionConfidence * 100).toFixed(0) }}% / {{ (analysis.diagnostics.endingMarkerConfidence * 100).toFixed(0) }}%</dd>
+      <dt>clock drift</dt><dd>{{ analysis.diagnostics.clockDriftPpm == null ? 'unknown' : `${analysis.diagnostics.clockDriftPpm.toFixed(1)} ppm` }}</dd>
       <dt>clipping</dt><dd>{{ analysis.diagnostics.clipped ? 'yes' : 'no' }}</dd>
       <dt>mic profile</dt><dd>{{ analysis.micProfile.name }}</dd>
       <dt>profile author</dt><dd>{{ analysis.micProfile.author }}</dd>

@@ -37,6 +37,8 @@ defineProps<{
   correctionStrengthOptions: readonly CorrectionStrengthOption[]
   correctionPending: boolean
   calibrationApplied: boolean
+  rollbackAvailable: boolean
+  validationWorse: boolean
   calJson: string
   calStatus: string
   validationMetrics: CalibrationValidationMetrics | null
@@ -55,6 +57,7 @@ const emit = defineEmits<{
   (event: 'apply-recommended-correction'): void
   (event: 'apply-calibration'): void
   (event: 'reset-calibration'): void
+  (event: 'rollback-calibration'): void
 }>()
 
 function selectProfile(event: Event) {
@@ -188,11 +191,17 @@ function settingLabel(value: boolean | null): string {
         TV headroom could not be verified, so positive correction is disabled.
       </p>
       <dl v-if="measurementValidationAnalysis" class="spec">
-        <dt>validation</dt><dd>center position, independent left/right sweeps</dd>
+        <dt>validation</dt><dd>center position, two repeated left/right sweeps</dd>
         <dt>target error before</dt><dd>{{ validationMetrics?.before.toFixed(2) ?? 'unknown' }} dB RMS</dd>
         <dt>target error after</dt><dd>{{ validationMetrics?.after.toFixed(2) ?? 'unknown' }} dB RMS</dd>
         <dt>validation SNR</dt><dd>{{ measurementValidationAnalysis.diagnostics.snrEstimateDb == null ? 'unknown' : measurementValidationAnalysis.diagnostics.snrEstimateDb.toFixed(1) + ' dB' }}</dd>
+        <template v-if="validationWorse && rollbackAvailable">
+          <dt>validation decision</dt><dd class="error">Worse than the center-position baseline</dd>
+        </template>
       </dl>
+      <button v-if="validationWorse && rollbackAvailable" :disabled="correctionPending" @click="emit('rollback-calibration')">
+        Restore previous calibration
+      </button>
     </div>
 
     <dl class="spec">

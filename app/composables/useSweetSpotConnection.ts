@@ -16,7 +16,10 @@ interface RoomStateResponse {
   messages: Envelope[]
 }
 
-const CLIENT_POLL_MS = 1200
+// WebSocket is the realtime path. HTTP fallback is deliberately slow because
+// it exists only for older browsers or networks that cannot upgrade.
+const CLIENT_POLL_MS = 10_000
+const LEGACY_HEARTBEAT_MS = 5_000
 const SOCKET_RECONNECT_MIN_MS = 800
 const SOCKET_RECONNECT_MAX_MS = 10_000
 const SOCKET_FALLBACK_ATTEMPTS = 2
@@ -32,7 +35,7 @@ function roomUrl(code: string, action: string): string {
 }
 
 function roomSocketUrl(code: string): string {
-  const url = new URL(roomUrl(code, 'ws'), window.location.href)
+  const url = new URL(roomUrl(code, 'ws?role=client'), window.location.href)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
 }
@@ -53,7 +56,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   let disposed = false
   let pollTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  let legacyHeartbeatTimer: ReturnType<typeof setInterval> | null = null
   let socket: WebSocket | null = null
   let socketReady = false
   let socketAttempts = 0
@@ -155,21 +158,21 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     fallbackPolling = false
   }
 
-  function stopHeartbeat() {
-    if (heartbeatTimer !== null) clearInterval(heartbeatTimer)
-    heartbeatTimer = null
+  function stopLegacyHeartbeat() {
+    if (legacyHeartbeatTimer !== null) clearInterval(legacyHeartbeatTimer)
+    legacyHeartbeatTimer = null
   }
 
-  function startHeartbeat() {
-    stopHeartbeat()
-    heartbeatTimer = setInterval(() => {
+  function startLegacyHeartbeat() {
+    stopLegacyHeartbeat()
+    legacyHeartbeatTimer = setInterval(() => {
       if (!socketReady || socket?.readyState !== WebSocket.OPEN) return
       try {
         socket.send(JSON.stringify({ kind: 'room.ping' }))
       } catch {
         socket?.close()
       }
-    }, 5000)
+    }, LEGACY_HEARTBEAT_MS)
   }
 
   function applySocketMessage(value: unknown) {
@@ -179,6 +182,8 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     }
     if (!isRoomSocketServerMessage(value)) return
     if (value.kind === 'room.ready') {
+      if (value.role === undefined) startLegacyHeartbeat()
+      else stopLegacyHeartbeat()
       const wasOnline = deviceOnline.value
       deviceOnline.value = value.deviceOnline
       status.value = connectionStateForDevice(value.deviceOnline)
@@ -258,7 +263,6 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       socketReady = true
       socketAttempts = 0
       stopPolling()
-      startHeartbeat()
       status.value = 'connecting'
     }
     next.onmessage = (event) => {
@@ -278,7 +282,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       if (socket !== next) return
       socket = null
       socketReady = false
-      stopHeartbeat()
+      stopLegacyHeartbeat()
       if (disposed) return
       markConnectionInterrupted()
       scheduleReconnect()
@@ -301,7 +305,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   function disconnect() {
     disposed = true
     stopPolling()
-    stopHeartbeat()
+    stopLegacyHeartbeat()
     if (reconnectTimer !== null) clearTimeout(reconnectTimer)
     reconnectTimer = null
     socket?.close()
