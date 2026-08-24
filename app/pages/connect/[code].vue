@@ -1,96 +1,257 @@
 <template>
   <div class="page">
-    <header>
-      <h1>SweetSpot</h1>
-      <span :class="['badge', status]">{{ status }}</span>
+    <header class="masthead">
+      <div class="brand">
+        <h1>SWEETSPOT</h1>
+        <p class="sub">remote equalizer console</p>
+      </div>
+      <div class="conn" :data-state="status">
+        <span class="conn-dot"></span>
+        <span class="conn-label">{{ status }}</span>
+      </div>
     </header>
 
-    <section v-if="codeError" class="card error">
-      Invalid pair code format. Scan the QR code on your TV again.
+    <section v-if="codeError" class="block">
+      <p class="error">INVALID PAIR CODE. Scan the QR code on your TV again.</p>
     </section>
 
     <template v-else>
-      <section class="card">
-        <h2>Device</h2>
-        <dl>
-          <dt>Room</dt>
+      <section class="block">
+        <h2 class="label">01 · Device</h2>
+        <dl class="spec">
+          <dt>room</dt>
           <dd>{{ room }}</dd>
-          <dt>TV status</dt>
+          <dt>television</dt>
           <dd>{{ deviceOnline ? 'online' : 'offline' }}</dd>
-          <dt>Last message</dt>
-          <dd><pre class="last-message">{{ lastMessageText }}</pre></dd>
+          <dt>engine</dt>
+          <dd>
+            <template v-if="snapshot">
+              {{ snapshot.engine.enabled ? (snapshot.engine.hasControl ? 'active' : 'no control') : 'bypassed' }}
+              <span class="dim">/</span> {{ snapshot.engine.presetName }}
+            </template>
+            <template v-else>unknown</template>
+          </dd>
         </dl>
       </section>
 
-      <section v-if="snapshot" class="card">
-        <h2>State snapshot</h2>
-        <pre>{{ JSON.stringify(snapshot, null, 2) }}</pre>
-      </section>
+      <section v-if="snapshot" class="block">
+        <h2 class="label">02 · Equalizer</h2>
 
-      <section v-else class="card">
-        <h2>State snapshot</h2>
-        <p v-if="status === 'connected' && !deviceOnline">Waiting for the TV. Open SweetSpot on the TV.</p>
-        <p v-else-if="status === 'connected'">
-          TV is online.
-          <button @click="getState">Request state</button>
-          <button class="secondary" :disabled="diagPending" @click="runEffectsDiagnostics">
-            {{ diagPending ? 'Diagnosing...' : 'Run effect diagnostics' }}
+        <div class="actions">
+          <button @click="setEngine(true)" :disabled="snapshot.engine.enabled">Enable</button>
+          <button :disabled="!snapshot.engine.enabled" @click="setEngine(false)">Bypass</button>
+        </div>
+
+        <div v-if="presets.length" class="actions">
+          <span class="mini-label">preset</span>
+          <button
+            v-for="p in presets"
+            :key="p.id"
+            :class="{ active: snapshot.engine.activePreset === p.id }"
+            @click="applyPreset(p.id)"
+          >
+            {{ p.name }}
           </button>
-        </p>
-        <p v-else>Connecting...</p>
+        </div>
+
+        <div class="band-scroll">
+          <div v-for="(lvl, i) in eqDraft" :key="i" class="band">
+            <span class="band-val">{{ lvl.toFixed(1) }}</span>
+            <input
+              type="range"
+              :min="snapshot.userEq.minDb"
+              :max="snapshot.userEq.maxDb"
+              step="0.5"
+              :value="lvl"
+              @input="onBandInput(i, $event)"
+              @change="commitBands"
+            />
+            <span class="band-hz">{{ hzLabel(snapshot.userEq.frequenciesHz[i]) }}</span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button :disabled="!eqDirty" @click="resetBands">Discard changes</button>
+        </div>
+
+        <form class="inline-form" @submit.prevent="saveProfile">
+          <input v-model="profileName" type="text" placeholder="new profile name" />
+          <button type="submit" :disabled="!profileName.trim()">Save</button>
+        </form>
+
+        <ul v-if="snapshot.profiles.length" class="list">
+          <li v-for="p in snapshot.profiles" :key="p.id">
+            <span>{{ p.name }}</span>
+            <span class="list-actions">
+              <button @click="loadProfile(p.name)">Load</button>
+              <button @click="deleteProfile(p.name)">Delete</button>
+            </span>
+          </li>
+        </ul>
+        <p v-else class="note">No saved profiles.</p>
       </section>
 
-      <section v-if="effectsDiagnostics" class="card">
-        <h2>Effect diagnostics</h2>
-        <p v-if="effectsDiagnostics.error" class="error">Device error: {{ effectsDiagnostics.error }}</p>
-        <template v-else>
-          <h3>Platform effects ({{ effectsDiagnostics.inventory.length }})</h3>
-          <table v-if="effectsDiagnostics.inventory.length" class="fx-table">
+      <section v-if="snapshot" class="block">
+        <h2 class="label">03 · Calibration</h2>
+        <dl class="spec">
+          <dt>status</dt>
+          <dd>{{ snapshot.calibration.active ? 'active' : 'inactive' }}</dd>
+          <dt>bands</dt>
+          <dd>{{ snapshot.calibration.bandsDb.length }}</dd>
+        </dl>
+        <details class="fold">
+          <summary>Curve JSON</summary>
+          <textarea v-model="calJson" rows="4" spellcheck="false"></textarea>
+          <div class="actions">
+            <button @click="applyCalibration">Apply curve</button>
+            <button @click="resetCalibration">Reset to flat</button>
+          </div>
+          <p v-if="calStatus" class="note">{{ calStatus }}</p>
+        </details>
+      </section>
+
+      <section v-if="snapshot" class="block">
+        <h2 class="label">04 · Diagnostics</h2>
+        <p class="note">Upmix experiments. Effect-chain inventory, DynamicsProcessing capacity, persistent test instances.</p>
+
+        <div class="actions">
+          <button :disabled="diagPending" @click="runEffectsDiagnostics">
+            {{ diagPending ? 'Working…' : 'Effect chain' }}
+          </button>
+          <button :disabled="probePending" @click="runCapacityProbe">
+            {{ probePending ? 'Probing…' : 'Capacity probe' }}
+          </button>
+        </div>
+
+        <template v-if="probe">
+          <dl class="spec">
+            <dt>highest reliable</dt><dd>{{ probe.highest }} bands</dd>
+            <dt>recommended</dt><dd>{{ probe.recommended }} bands</dd>
+          </dl>
+          <table v-if="probe.results.length" class="grid">
             <thead>
-              <tr><th>Type</th><th>Name</th><th>Mode</th><th>Vendor</th></tr>
+              <tr><th>bands</th><th>result</th><th>actual</th><th>control</th><th>enabled</th></tr>
             </thead>
             <tbody>
-              <tr v-for="(e, i) in effectsDiagnostics.inventory" :key="i"
-                  :class="{ vendor: e.isVendor, known: !e.isVendor }">
-                <td>{{ e.typeName }}</td>
+              <tr v-for="r in probe.results" :key="r.requested">
+                <td>{{ r.requested }}</td>
+                <td>{{ r.pass ? 'PASS' : 'FAIL' }}</td>
+                <td>{{ r.actualBands }}</td>
+                <td>{{ r.hasControl }}</td>
+                <td>{{ r.enabled }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+
+        <h3 class="sub-label">Persistent instance</h3>
+        <form class="inline-form" @submit.prevent="createPersistent">
+          <input v-model.number="persistBands" type="number" min="1" max="64" />
+          <button type="submit">Create enabled</button>
+          <button type="button" @click="releasePersistent">Release</button>
+        </form>
+        <p v-if="persistentState" class="note">
+          {{ persistentState.active ? `ACTIVE at ${persistentState.bands} bands` : 'none' }}
+          <template v-if="persistentState.active && persistentState.curve"> · curve {{ persistentState.curve }}</template>
+          <template v-if="persistentState.curveSummary">
+            · {{ persistentState.curveSummary.bandsCut }} cut / {{ persistentState.curveSummary.bandsFlat }} flat
+          </template>
+        </p>
+
+        <h3 class="sub-label">Audible test curves</h3>
+        <p class="note">Dramatic EQ through the persistent instance. Proof it sits on the live path.</p>
+        <div class="actions">
+          <button @click="applyTestCurve('hollow')">Hollow mids</button>
+          <button @click="applyTestCurve('flat')">Flat</button>
+          <button v-for="n in [16, 32, 64]" :key="n" @click="quickAudible(n)">Hollow @ {{ n }}</button>
+        </div>
+
+        <h3 class="sub-label">Device info</h3>
+        <div class="actions">
+          <button :disabled="devInfoPending" @click="fetchDeviceInfo">
+            {{ devInfoPending ? 'Sampling…' : 'Sample CPU / memory' }}
+          </button>
+        </div>
+        <dl v-if="deviceInfo" class="spec">
+          <dt>app cpu</dt><dd>{{ deviceInfo.cpuPercent.toFixed(1) }}%</dd>
+          <dt>audioserver cpu</dt>
+          <dd>{{ deviceInfo.audioserverPid != null ? deviceInfo.audioserverCpuPercent.toFixed(1) + '%' : 'n/a' }}</dd>
+          <dt>native heap</dt><dd>{{ fmtBytes(deviceInfo.nativeHeapAllocated) }} / {{ fmtBytes(deviceInfo.nativeHeapSize) }}</dd>
+          <dt>java heap</dt><dd>{{ fmtBytes(deviceInfo.javaHeapTotal - deviceInfo.javaHeapFree) }} / {{ fmtBytes(deviceInfo.javaHeapMax) }}</dd>
+          <dt>pss</dt><dd>{{ fmtBytes(deviceInfo.pssTotalKb * 1024) }}</dd>
+        </dl>
+      </section>
+
+      <section v-if="effectsDiagnostics" class="block">
+        <h2 class="label">05 · Effect chain</h2>
+        <p v-if="effectsDiagnostics.error" class="error">{{ effectsDiagnostics.error }}</p>
+        <template v-else>
+          <table v-if="effectsDiagnostics.inventory.length" class="grid">
+            <thead>
+              <tr><th>type</th><th>name</th><th>mode</th><th>vendor</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="(e, i) in effectsDiagnostics.inventory" :key="i">
+                <td>{{ e.typeName }}<span v-if="e.isVendor" class="mark">*</span></td>
                 <td>{{ e.name }}</td>
                 <td>{{ e.connectMode }}</td>
                 <td>{{ e.isVendor ? 'yes' : '' }}</td>
               </tr>
             </tbody>
           </table>
-          <p v-else>No effects reported.</p>
+          <p v-else class="note">No effects reported.</p>
 
-          <h3>Session-0 probes</h3>
-          <dl>
+          <dl class="spec wide">
             <template v-for="p in effectsDiagnostics.sessionProbes" :key="p.effectType">
               <dt>{{ p.effectType }}</dt>
               <dd>
-                <span v-if="!p.constructed" class="error">failed: {{ p.exception }}</span>
-                <span v-else>
-                  constructed, control={{ p.hasControl }}, enabled={{ p.enabled }}
+                <template v-if="!p.constructed">failed: {{ p.exception }}</template>
+                <template v-else>
+                  constructed · control {{ p.hasControl }} · enabled {{ p.enabled }}
                   <code>{{ p.parameters }}</code>
-                </span>
+                </template>
               </dd>
             </template>
           </dl>
-          <details>
+          <details class="fold">
             <summary>Raw JSON</summary>
-            <pre class="debug-log">{{ JSON.stringify(effectsDiagnostics, null, 2) }}</pre>
+            <pre class="log">{{ JSON.stringify(effectsDiagnostics, null, 2) }}</pre>
           </details>
         </template>
       </section>
 
-      <details v-if="debugLog.length" class="card">
-        <summary>Debug log ({{ debugLog.length }})</summary>
-        <pre class="debug-log">{{ debugLog.map(l => `${new Date(l.at).toISOString()} ${l.direction.padEnd(3)} ${l.text}`).join('\n') }}</pre>
+      <section v-else class="block">
+        <h2 class="label">05 · State</h2>
+        <p v-if="status === 'connected' && !deviceOnline" class="note">Waiting for the TV. Open SweetSpot on the TV.</p>
+        <div v-else-if="status === 'connected'" class="actions">
+          <button @click="getState">Request state</button>
+        </div>
+        <p v-else class="note">Connecting…</p>
+      </section>
+
+      <details v-if="debugLog.length" class="block fold">
+        <summary>Debug log · {{ debugLog.length }}</summary>
+        <pre class="log">{{ debugLog.map(l => `${new Date(l.at).toISOString()} ${l.direction.toUpperCase()} ${l.text}`).join('\n') }}</pre>
       </details>
+
+      <footer class="colophon">
+        <span>sweetspot-web</span>
+        <span>{{ snapshot?.device.appVersion ?? '—' }}</span>
+      </footer>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import type { EffectsDiagnostics, StateSnapshot } from '#shared/types/protocol'
+import type {
+  DeviceInfoPayload,
+  EffectsDiagnostics,
+  OkReply,
+  PersistentProbeState,
+  PresetOption,
+  ProbeDiagnostics,
+  StateSnapshot,
+} from '#shared/types/protocol'
 
 const route = useRoute()
 
@@ -100,17 +261,136 @@ const codeError = computed(() => !codeValid.value)
 const room = computed(() => rawCode.value.toUpperCase())
 
 const connection = useSweetSpotConnection('client', () => rawCode.value)
-
-const { status, deviceOnline, lastMessage, debugLog, connect, request, onMessage } = connection
+const { status, deviceOnline, debugLog, connect, send, request, onMessage } = connection
 
 const snapshot = ref<StateSnapshot | null>(null)
 const effectsDiagnostics = ref<EffectsDiagnostics | null>(null)
 const diagPending = ref(false)
-const lastMessageText = computed(() => (lastMessage.value ? JSON.stringify(lastMessage.value) : ''))
+
+const probe = ref<ProbeDiagnostics | null>(null)
+const probePending = ref(false)
+const persistentState = ref<PersistentProbeState | null>(null)
+const persistBands = ref(64)
+
+const deviceInfo = ref<DeviceInfoPayload | null>(null)
+const devInfoPending = ref(false)
+
+const calJson = ref('')
+const calStatus = ref('')
+const calIsError = ref(false)
+const profileName = ref('')
 
 onMessage((env) => {
-  if (env.type === 'state.snapshot') snapshot.value = env.payload as StateSnapshot
+  if (env.type !== 'state.snapshot') return
+  const next = env.payload as StateSnapshot
+  if (JSON.stringify(next) === JSON.stringify(snapshot.value)) return
+  snapshot.value = next
 })
+
+watch(snapshot, (s) => {
+  if (!s) return
+  eqDraft.value = [...s.userEq.bandsDb]
+  if (!calJson.value.trim()) {
+    calJson.value = JSON.stringify(s.calibration.bandsDb.map((v) => Math.round(v * 10) / 10))
+  }
+})
+
+const presets = computed<PresetOption[]>(() => snapshot.value?.capabilities.presets ?? [])
+
+function hzLabel(hz?: number): string {
+  if (hz == null) return ''
+  return hz >= 1000 ? `${Math.round(hz / 100) / 10}k` : String(hz)
+}
+
+const eqDraft = ref<number[]>([])
+
+const eqDirty = computed(() => {
+  const cur = snapshot.value?.userEq.bandsDb ?? []
+  return eqDraft.value.some((v, i) => Math.abs(v - (cur[i] ?? v)) > 1e-6)
+})
+
+function onBandInput(i: number, ev: Event) {
+  const v = parseFloat((ev.target as HTMLInputElement).value)
+  if (Number.isNaN(v)) return
+  eqDraft.value[i] = v
+}
+
+function commitBands() {
+  setBands(eqDraft.value)
+}
+
+function resetBands() {
+  const cur = snapshot.value?.userEq.bandsDb ?? []
+  eqDraft.value = [...cur]
+}
+
+function setBands(bandsDb: number[]) {
+  send('engine.setBands', { bandsDb })
+}
+
+function setEngine(enabled: boolean) {
+  send(enabled ? 'engine.enable' : 'engine.bypass')
+}
+
+function applyPreset(preset: number) {
+  send('engine.applyPreset', { preset })
+}
+
+function saveProfile() {
+  const name = profileName.value.trim()
+  if (!name) return
+  send('profile.save', { name })
+  profileName.value = ''
+}
+
+function loadProfile(name: string) {
+  send('profile.load', { name })
+}
+
+function deleteProfile(name: string) {
+  send('profile.delete', { name })
+}
+
+function parseCurve(text: string): number[] | null {
+  try {
+    const arr = JSON.parse(text)
+    if (!Array.isArray(arr) || arr.length !== 64) return null
+    return arr.map((v) => Number(v))
+  } catch {
+    return null
+  }
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  return Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))])
+}
+
+async function applyCalibration() {
+  const bandsDb = parseCurve(calJson.value)
+  calIsError.value = bandsDb == null
+  if (bandsDb == null) {
+    calStatus.value = 'Need a JSON array of exactly 64 numbers.'
+    return
+  }
+  calStatus.value = 'Applying…'
+  const res = await withTimeout(request<OkReply>('calibration.apply', { bandsDb }), 15_000)
+  if (!res) {
+    calIsError.value = true
+    calStatus.value = 'TV did not answer within 15s.'
+    return
+  }
+  const payload = res.payload as OkReply
+  calIsError.value = payload.ok === false
+  calStatus.value = payload.ok === false ? `Device rejected curve: ${payload.error ?? 'unknown'}` : 'Curve applied.'
+  void request('state.get')
+}
+
+async function resetCalibration() {
+  calStatus.value = 'Resetting…'
+  await withTimeout(request('calibration.reset'), 15_000)
+  calStatus.value = 'Calibration reset.'
+  void request('state.get')
+}
 
 function getState() {
   request('state.get')
@@ -128,6 +408,79 @@ async function runEffectsDiagnostics() {
   }
 }
 
+async function refreshProbeState() {
+  const res = await withTimeout(request<ProbeDiagnostics>('probe.status'), 20_000)
+  if (res) {
+    const p = res.payload as ProbeDiagnostics
+    probe.value = { ...p }
+    if (p.persistent) persistentState.value = p.persistent
+  }
+}
+
+async function runCapacityProbe() {
+  if (probePending.value) return
+  probePending.value = true
+  try {
+    const res = await withTimeout(
+      request<ProbeDiagnostics>('probe.run', { bands: 128 }),
+      45_000,
+    )
+    if (res) {
+      probe.value = res.payload as ProbeDiagnostics
+      await refreshProbeState()
+    }
+  } finally {
+    probePending.value = false
+  }
+}
+
+async function createPersistent() {
+  const bands = Math.max(1, Math.min(64, Math.round(persistBands.value || 64)))
+  persistBands.value = bands
+  await withTimeout(request('probe.persistent.start', { bands }), 30_000)
+  await refreshProbeState()
+}
+
+async function releasePersistent() {
+  await withTimeout(request('probe.persistent.release'), 20_000)
+  persistentState.value = { active: false, bands: 0, curve: null, curveSummary: null }
+  await refreshProbeState()
+}
+
+async function applyTestCurve(curve: 'hollow' | 'flat') {
+  await withTimeout(request('probe.curve.apply', { curve }), 20_000)
+  await refreshProbeState()
+}
+
+async function quickAudible(bands: number) {
+  await withTimeout(request('probe.persistent.start', { bands }), 30_000)
+  await withTimeout(request('probe.curve.apply', { curve: 'hollow' }), 20_000)
+  await refreshProbeState()
+}
+
+async function fetchDeviceInfo() {
+  if (devInfoPending.value) return
+  devInfoPending.value = true
+  try {
+    const res = await withTimeout(request<DeviceInfoPayload>('diagnostics.deviceInfo'), 20_000)
+    if (res) deviceInfo.value = res.payload as DeviceInfoPayload
+  } finally {
+    devInfoPending.value = false
+  }
+}
+
+function fmtBytes(bytes: number): string {
+  if (!Number.isFinite(bytes)) return '?'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let v = bytes
+  let u = 0
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024
+    u++
+  }
+  return `${v.toFixed(u === 0 ? 0 : 1)} ${units[u]}`
+}
+
 watchEffect(() => {
   if (codeValid.value && status.value === 'disconnected') connect()
 })
@@ -135,101 +488,342 @@ watchEffect(() => {
 
 <style scoped>
 .page {
-  max-width: 560px;
-  margin: 2rem auto;
-  padding: 0 1rem;
-  font-family: system-ui, sans-serif;
+  --bg: #0a0a0b;
+  --ink: #ececea;
+  --dim: #85858a;
+  --faint: #4c4c52;
+  --line: #232327;
+  --line-strong: #3a3a40;
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 4rem;
+  background: var(--bg);
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  letter-spacing: 0.01em;
 }
-header {
+
+.masthead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--ink);
+}
+.brand h1 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.45em;
+}
+.sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--dim);
+}
+.conn {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 0.45rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--dim);
+  white-space: nowrap;
 }
-.badge {
-  padding: 0.2rem 0.7rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  background: #8883;
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--faint);
 }
-.badge.connected {
-  background: #16a34a;
-  color: white;
+.conn[data-state='connected'] .conn-dot {
+  background: var(--ink);
 }
-.badge.connecting {
-  background: #d97706;
-  color: white;
+.conn[data-state='connected'] .conn-label {
+  color: var(--ink);
 }
-.badge.disconnected {
-  background: #dc2626;
-  color: white;
+
+.block {
+  padding: 1.75rem 0;
+  border-bottom: 1px solid var(--line);
 }
-.card {
-  border: 1px solid #8884;
-  border-radius: 10px;
-  padding: 1rem;
-  margin-top: 1rem;
+.label {
+  margin: 0 0 1rem;
+  font-size: 0.68rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--dim);
+}
+.sub-label {
+  margin: 1.5rem 0 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+.note {
+  margin: 0.35rem 0;
+  font-size: 0.72rem;
+  color: var(--dim);
 }
 .error {
-  color: #dc2626;
+  margin: 0;
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  text-decoration-color: var(--dim);
 }
-dl {
+.dim {
+  color: var(--faint);
+}
+.mark {
+  color: var(--dim);
+}
+
+.spec {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0.35rem 1rem;
+  grid-template-columns: 11rem 1fr;
+  row-gap: 0.3rem;
+  column-gap: 1rem;
   margin: 0;
 }
-dt {
-  font-weight: 600;
+.spec.wide {
+  grid-template-columns: 8rem 1fr;
+  margin-top: 1rem;
 }
-dd {
+.spec dt {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--dim);
+}
+.spec dd {
   margin: 0;
   overflow-wrap: anywhere;
 }
-pre {
-  margin: 0;
-  white-space: pre-wrap;
-  font-size: 0.8rem;
-}
-.debug-log {
-  max-height: 320px;
-  overflow-y: auto;
-}
-.last-message {
-  max-height: 120px;
-  overflow-y: auto;
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
 }
 button {
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
-  border: none;
-  background: #2563eb;
-  color: white;
+  padding: 0.42rem 0.95rem;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
-button.secondary {
-  background: #64748b;
-  margin-left: 0.5rem;
+button:hover:not(:disabled),
+button:focus-visible {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+  outline: none;
+}
+button:active:not(:disabled) {
+  background: var(--dim);
+  border-color: var(--dim);
 }
 button:disabled {
-  opacity: 0.6;
+  opacity: 0.35;
+  cursor: default;
 }
-.fx-table {
+button.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+}
+
+input[type='text'],
+input[type='number'],
+textarea {
+  padding: 0.42rem 0.6rem;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.78rem;
+}
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--dim);
+}
+textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  display: block;
+  margin-bottom: 0.6rem;
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.75rem 0;
+}
+.inline-form input[type='text'] {
+  flex: 1;
+  min-width: 12rem;
+}
+.inline-form input[type='number'] {
+  width: 5rem;
+}
+
+.band-scroll {
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  padding: 1rem 0 0.5rem;
+}
+.band {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 2.6rem;
+}
+.band-val {
+  font-size: 0.62rem;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.band-hz {
+  font-size: 0.6rem;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+input[type='range'] {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 18px;
+  height: 120px;
+  appearance: none;
+  background: transparent;
+  padding: 0;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  width: 1px;
+  background: var(--line-strong);
+}
+input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 11px;
+  height: 5px;
+  margin-left: -5px;
+  background: var(--ink);
+  border: none;
+  border-radius: 0;
+  cursor: ns-resize;
+}
+input[type='range']::-moz-range-track {
+  width: 1px;
+  background: var(--line-strong);
+}
+input[type='range']::-moz-range-thumb {
+  width: 11px;
+  height: 5px;
+  background: var(--ink);
+  border: none;
+  border-radius: 0;
+  cursor: ns-resize;
+}
+
+.list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+.list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0;
+  border-top: 1px solid var(--line);
+}
+.list-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+.list-actions button {
+  padding: 0.25rem 0.6rem;
+}
+
+.grid {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
+  margin: 0.75rem 0;
+  font-size: 0.74rem;
 }
-.fx-table th,
-.fx-table td {
+.grid th {
   text-align: left;
-  padding: 0.25rem 0.5rem;
-  border-bottom: 1px solid #8883;
+  font-weight: 500;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--dim);
+  padding: 0.3rem 0.6rem 0.3rem 0;
+  border-bottom: 1px solid var(--ink);
 }
-.fx-table tr.vendor td:first-child::after {
-  content: ' *';
-  color: #d97706;
-  font-weight: bold;
+.grid td {
+  padding: 0.35rem 0.6rem 0.35rem 0;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
 }
-h3 {
-  margin: 1rem 0 0.5rem;
-  font-size: 0.9rem;
+
+.fold summary {
+  cursor: pointer;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--dim);
+  user-select: none;
+  padding: 0.3rem 0;
+}
+.fold[open] summary {
+  color: var(--ink);
+}
+.fold textarea {
+  margin-top: 0.6rem;
+}
+
+.log {
+  max-height: 22rem;
+  overflow-y: auto;
+  margin: 0.5rem 0 0;
+  padding: 0.6rem;
+  border: 1px solid var(--line);
+  white-space: pre-wrap;
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.colophon {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 1.25rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--faint);
 }
 </style>

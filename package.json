@@ -11,5 +11,9 @@
     "generate": "nuxt generate",
     "deploy": "nuxt generate && bunx wrangler deploy"
   },
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vue-tsc": "^3.3.11"
+  }
 }

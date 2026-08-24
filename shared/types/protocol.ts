@@ -79,11 +79,77 @@ export interface CalibrationState {
   frequenciesHz: number[]
 }
 
+export interface PresetOption {
+  id: number
+  name: string
+}
+
+export interface OkReply {
+  ok: boolean
+  error?: string
+}
+
+export interface ProfileListPayload {
+  profiles: Array<{ id: string; name: string }>
+}
+
+export interface CalibrationCurvePayload extends CalibrationState {}
+
+export interface ProbeResultEntry {
+  requested: number
+  constructed: boolean
+  hasControl: boolean
+  enabled: boolean
+  actualBands: number
+  pass: boolean
+  exception?: string | null
+}
+
+export interface CurveSummary {
+  bandsTotal: number
+  bandsCut: number
+  bandsFlat: number
+}
+
+export interface PersistentProbeState {
+  active: boolean
+  bands: number
+  curve?: string | null
+  curveSummary?: CurveSummary | null
+}
+
+/** Reply to probe.run / probe.status: DynamicsProcessing capacity + persistent instance state. */
+export interface ProbeDiagnostics {
+  running: boolean
+  available: boolean
+  results: ProbeResultEntry[]
+  highest: number
+  recommended: number
+  persistent?: PersistentProbeState
+}
+
+export interface DeviceInfoPayload {
+  javaHeapMax: number
+  javaHeapTotal: number
+  javaHeapFree: number
+  nativeHeapAllocated: number
+  nativeHeapSize: number
+  pssTotalKb: number
+  privateDirtyKb: number
+  cpuPercent: number
+  audioserverCpuPercent: number
+  audioserverPid: number | null
+  persistentProbeActive: boolean
+  persistentProbeBands: number
+}
+
 export interface DeviceCapabilities {
   channels: number
   calibrationBandCount: number
   userBandCount: number
   supportsSweep: boolean
+  /** Available engine presets, reported by the device. Empty on older builds. */
+  presets?: PresetOption[]
 }
 
 export interface EffectInventoryEntry {
@@ -121,6 +187,36 @@ export interface StateSnapshot {
 
 export interface StateGetPayload {}
 
+/** Command payloads (client to device). */
+
+export interface SetBandsPayload {
+  bandsDb: number[]
+}
+
+export interface ApplyPresetPayload {
+  preset: number
+}
+
+export interface ProfileNamePayload {
+  name: string
+}
+
+export interface CalibrationApplyPayload {
+  bandsDb: number[]
+}
+
+export interface ProbeRunPayload {
+  bands: number
+}
+
+export interface PersistentProbePayload {
+  bands: number
+}
+
+export interface CurveApplyPayload {
+  curve: 'hollow' | 'flat'
+}
+
 const DEVICE_TARGETED_TYPES = [
   'state.get',
   'engine.enable',
@@ -137,6 +233,12 @@ const DEVICE_TARGETED_TYPES = [
   'measurement.prepare',
   'measurement.playSweep',
   'measurement.abort',
+  'probe.run',
+  'probe.status',
+  'probe.persistent.start',
+  'probe.persistent.release',
+  'probe.curve.apply',
+  'diagnostics.deviceInfo',
 ] as const
 
 export type DeviceTargetedType = (typeof DEVICE_TARGETED_TYPES)[number]
@@ -156,11 +258,12 @@ export const KNOWN_TYPES = new Set<string>([
   'measurement.started',
   'measurement.finished',
   'measurement.error',
+  'probe.status',
+  'probe.result',
   'diagnostics.deviceInfo',
   'diagnostics.probe',
   'diagnostics.effects',
 ])
-
 export const SESSION_ONLY_TYPES = new Set<string>([
   'session.hello',
   'session.welcome',
