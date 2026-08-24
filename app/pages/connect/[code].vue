@@ -166,6 +166,14 @@
           <button v-for="n in [16, 32, 64]" :key="n" @click="quickAudible(n)">Hollow @ {{ n }}</button>
         </div>
 
+        <h3 class="sub-label">Virtualizer A/B</h3>
+        <p class="note">Persistent session-0 Virtualizer at max strength. Toggle while playing stereo through AUX.</p>
+        <div class="actions">
+          <button :class="{ active: virtualizerOn }" @click="setVirtualizer(true)">Virtualizer ON</button>
+          <button :class="{ active: !virtualizerOn }" @click="setVirtualizer(false)">Virtualizer OFF</button>
+        </div>
+        <p class="note">{{ virtualizerOn ? 'Widening active' : 'Bypassed' }}</p>
+
         <h3 class="sub-label">Device info</h3>
         <div class="actions">
           <button :disabled="devInfoPending" @click="fetchDeviceInfo">
@@ -394,6 +402,13 @@ async function resetCalibration() {
 
 function getState() {
   request('state.get')
+}
+
+const virtualizerOn = ref(false)
+
+async function setVirtualizer(on: boolean) {
+  virtualizerOn.value = on
+  await withTimeout(request(`virtualizer.${on ? 'on' : 'off'}`), 10_000)
 }
 
 async function runEffectsDiagnostics() {
