@@ -103,18 +103,18 @@
         <p class="note">
           Follow the instructions shown on the TV. The browser captures the microphone and analyzes the sweep locally. Raw microphone audio never leaves this browser.
         </p>
-        <div v-if="measurement.profiles.length" class="actions">
+        <div v-if="measurementProfiles.length" class="actions">
           <label class="inline-form">
             <span class="mini-label">microphone profile</span>
-            <select v-model="measurement.selectedProfileId" :disabled="measurementBusy">
-              <option v-for="profile in measurement.profiles" :key="profile.id" :value="profile.id">
+            <select v-model="measurementSelectedProfileId" :disabled="measurementBusy">
+              <option v-for="profile in measurementProfiles" :key="profile.id" :value="profile.id">
                 {{ profile.name }}
               </option>
             </select>
           </label>
         </div>
-        <p v-if="measurement.profileError" class="error">{{ measurement.profileError }}</p>
-        <p v-else-if="!measurement.profiles.length" class="note">Loading microphone profiles…</p>
+        <p v-if="measurementProfileError" class="error">{{ measurementProfileError }}</p>
+        <p v-else-if="!measurementProfiles.length" class="note">Loading microphone profiles…</p>
         <p v-if="!snapshot.capabilities.supportsSweep" class="note">
           This TV build does not advertise a target-validated sweep yet. Calibration is unavailable until the real TV output path has been tested.
         </p>
@@ -123,25 +123,25 @@
             :disabled="!snapshot.capabilities.supportsSweep || measurementBusy"
             @click="startMeasurement"
           >
-            {{ measurementBusy ? measurement.message : 'Start measurement' }}
+            {{ measurementBusy ? measurementMessage : 'Start measurement' }}
           </button>
-          <button v-if="measurementBusy" @click="measurement.cancel">Cancel</button>
+          <button v-if="measurementBusy" @click="cancelMeasurement">Cancel</button>
         </div>
-        <p v-if="measurement.message" class="note">{{ measurement.message }}</p>
+        <p v-if="measurementMessage" class="note">{{ measurementMessage }}</p>
 
-        <dl v-if="measurement.captureInfo" class="spec">
-          <dt>sample rate</dt><dd>{{ measurement.captureInfo.settings.sampleRate ?? 'unknown' }} Hz</dd>
-          <dt>channels</dt><dd>{{ measurement.captureInfo.settings.channelCount ?? 'unknown' }}</dd>
-          <dt>echo cancellation</dt><dd>{{ settingLabel(measurement.captureInfo.settings.echoCancellation) }}</dd>
-          <dt>noise suppression</dt><dd>{{ settingLabel(measurement.captureInfo.settings.noiseSuppression) }}</dd>
-          <dt>auto gain</dt><dd>{{ settingLabel(measurement.captureInfo.settings.autoGainControl) }}</dd>
+        <dl v-if="measurementCaptureInfo" class="spec">
+          <dt>sample rate</dt><dd>{{ measurementCaptureInfo.settings.sampleRate ?? 'unknown' }} Hz</dd>
+          <dt>channels</dt><dd>{{ measurementCaptureInfo.settings.channelCount ?? 'unknown' }}</dd>
+          <dt>echo cancellation</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.echoCancellation) }}</dd>
+          <dt>noise suppression</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.noiseSuppression) }}</dd>
+          <dt>auto gain</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.autoGainControl) }}</dd>
         </dl>
 
-        <div v-if="measurement.analysis" class="response-graph">
+        <div v-if="measurementAnalysis" class="response-graph">
           <p class="mini-label">Measured response, mic-compensated relative display</p>
           <svg viewBox="0 0 800 280" role="img" aria-label="Measured speaker response">
             <line x1="0" y1="140" x2="800" y2="140" class="graph-zero" />
-            <polyline :points="responsePolyline(measurement.analysis.points)" class="graph-line" />
+            <polyline :points="responsePolyline(measurementAnalysis.points)" class="graph-line" />
             <text x="0" y="268" class="graph-label">20 Hz</text>
             <text x="760" y="268" class="graph-label">20 kHz</text>
             <text x="8" y="16" class="graph-label">+12 dB</text>
@@ -149,18 +149,18 @@
             <text x="8" y="276" class="graph-label">−12 dB</text>
           </svg>
           <dl class="spec">
-            <dt>signal RMS</dt><dd>{{ dbfs(measurement.analysis.diagnostics.signalRms) }}</dd>
-            <dt>peak</dt><dd>{{ dbfs(measurement.analysis.diagnostics.signalPeak) }}</dd>
-            <dt>detected offset</dt><dd>{{ measurement.analysis.diagnostics.detectionOffsetMs?.toFixed(1) ?? 'unknown' }} ms</dd>
-            <dt>clipping</dt><dd>{{ measurement.analysis.diagnostics.clipped ? 'yes' : 'no' }}</dd>
-            <dt>mic profile</dt><dd>{{ measurement.analysis.micProfile.name }}</dd>
+            <dt>signal RMS</dt><dd>{{ dbfs(measurementAnalysis.diagnostics.signalRms) }}</dd>
+            <dt>peak</dt><dd>{{ dbfs(measurementAnalysis.diagnostics.signalPeak) }}</dd>
+            <dt>detected offset</dt><dd>{{ measurementAnalysis.diagnostics.detectionOffsetMs?.toFixed(1) ?? 'unknown' }} ms</dd>
+            <dt>clipping</dt><dd>{{ measurementAnalysis.diagnostics.clipped ? 'yes' : 'no' }}</dd>
+            <dt>mic profile</dt><dd>{{ measurementAnalysis.micProfile.name }}</dd>
             <dt>profile source</dt>
             <dd>
-              <a :href="measurement.analysis.micProfile.sourceUrl" target="_blank" rel="noreferrer">
-                {{ measurement.analysis.micProfile.dataMethod }}, {{ measurement.analysis.micProfile.sourceDate }}
+              <a :href="measurementAnalysis.micProfile.sourceUrl" target="_blank" rel="noreferrer">
+                {{ measurementAnalysis.micProfile.dataMethod }}, {{ measurementAnalysis.micProfile.sourceDate }}
               </a>
             </dd>
-            <dt>capture path</dt><dd>{{ measurement.analysis.micProfile.capturePath }}</dd>
+            <dt>capture path</dt><dd>{{ measurementAnalysis.micProfile.capturePath }}</dd>
           </dl>
         </div>
 
@@ -344,8 +344,19 @@ const room = computed(() => rawCode.value.toUpperCase())
 
 const connection = useSweetSpotConnection('client', () => rawCode.value)
 const { status, deviceOnline, debugLog, connect, send, request, onMessage } = connection
-const measurement = useCalibrationSession(connection)
-const measurementBusy = computed(() => ['requesting-microphone', 'preparing', 'recording', 'analyzing', 'ending'].includes(measurement.stage.value))
+const {
+  stage: measurementStage,
+  message: measurementMessage,
+  analysis: measurementAnalysis,
+  captureInfo: measurementCaptureInfo,
+  profiles: measurementProfiles,
+  selectedProfileId: measurementSelectedProfileId,
+  profileError: measurementProfileError,
+  loadProfiles: loadMeasurementProfiles,
+  start: startMeasurementSession,
+  cancel: cancelMeasurement,
+} = useCalibrationSession(connection)
+const measurementBusy = computed(() => ['requesting-microphone', 'preparing', 'recording', 'analyzing', 'ending'].includes(measurementStage.value))
 const toastMessage = ref('')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -367,7 +378,7 @@ const calIsError = ref(false)
 const profileName = ref('')
 
 onMounted(() => {
-  void measurement.loadProfiles().catch(() => undefined)
+  void loadMeasurementProfiles().catch(() => undefined)
 })
 
 function showToast(message: string) {
@@ -510,7 +521,7 @@ function getState() {
 
 function startMeasurement() {
   if (!snapshot.value?.capabilities.supportsSweep) return
-  void measurement.start()
+  void startMeasurementSession()
 }
 
 function settingLabel(value: boolean | null): string {
