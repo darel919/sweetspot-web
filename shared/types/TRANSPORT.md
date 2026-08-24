@@ -1,81 +1,71 @@
-# SweetSpot transport: WebSocket-first mailbox over Cloudflare
+# SweetSpot room transport
 
-The SPA (static) and the room API live on one Cloudflare Worker.
-Room state lives in a Durable Object, in memory only. No database.
+The static dashboard and room API run on one Cloudflare Worker. Room state is
+owned by a Durable Object and is delivered through WebSockets.
 
 ## Roles
 
-- `device` = the Android TV. Keeps one hibernatable WebSocket and uses HTTP
-  long-polling only while an older Worker is being upgraded.
-- `client` = the phone/laptop dashboard. Sends commands and receives device-originated messages.
+- `device` is the Android TV. It keeps one room WebSocket open.
+- `client` is the phone or laptop dashboard. It sends commands and receives
+  device messages.
 
-## Pair code → room
+## Room connection
 
-Pair codes normalize exactly like before: strip dashes, uppercase, 6-10 chars
-of `[A-Z0-9]`. Room id = normalized code. One DO instance per room via
-`idFromName(code)`.
-
-## Endpoints
-
-All JSON. Errors: `{ "error": "reason" }` with 4xx status.
-
-### Device
-
-```
-GET  /api/room/{code}/ws?role=device  WebSocket      -> room.ready, Envelope, or room.clientPresence
-GET  /api/room/{code}/commands?wait=9 -> { commands: [Envelope,...] }
-POST /api/room/{code}/device          Envelope       -> { ok: true }   // snapshot etc. to clients
-POST /api/room/{code}/register        { }            -> { ok: true }   // legacy fallback only
+```text
+GET /api/room/{code}/ws?role=device  WebSocket
+GET /api/room/{code}/ws?role=client   WebSocket
 ```
 
-The device WebSocket receives commands directly and sends replies on the same
-connection. OkHttp protocol pings keep the connection healthy; the app sends no
-heartbeat messages. The Durable Object can hibernate while the socket stays
-connected.
+The Worker validates the pair code, routes the request to the room Durable
+Object, and forwards the WebSocket upgrade. Every connection receives a
+`room.ready` frame with its `role`, current `deviceOnline` state, and queued
+messages for that role.
 
-The HTTP fallback uses `commands` long-polling up to `wait` seconds (default 9,
-max 25). `commands` also refreshes device presence, so a separate `register`
-request is unnecessary. The legacy endpoints remain during rolling upgrades.
+The device receives commands on its socket and sends replies on the same
+socket. The dashboard sends commands on its socket and receives device
+messages on that socket. OkHttp protocol pings keep the device connection
+healthy. The dashboard uses the socket's open state as its connection state.
 
-### Client
+## Presence
 
+The Durable Object derives presence from attached sockets whose
+`readyState === WebSocket.OPEN`. A device connection broadcasts
+`room.presence` to clients. A client connection broadcasts
+`room.clientPresence` to the device.
+
+The Durable Object does not persist presence timestamps or schedule presence
+alarms. Closing the last socket for a role immediately broadcasts that role's
+offline state.
+
+## Envelope delivery
+
+Room messages use the v1 envelope from `protocol.ts`.
+
+```json
+{ "v": 1, "id": "msg_01J...", "type": "state.get", "ts": 1787520000000, "payload": {}, "replyTo": "msg_01J..." }
 ```
-GET  /api/room/{code}/state           -> { deviceOnline: bool, messages: [Envelope,...] }
-POST /api/room/{code}/client          Envelope       -> { ok: true }
-GET  /api/room/{code}/ws?role=client  WebSocket      -> room.ready, Envelope, or room.presence
-```
 
-The dashboard opens `/ws?role=client` first. The room sends `room.ready` with
-current presence and queued device messages. It then sends each new device
-Envelope immediately. Presence comes from the open socket, so the dashboard
-sends no application heartbeat. During a rolling upgrade, an unlabeled legacy
-`room.ready` enables a temporary compatibility heartbeat only for that old
-Worker.
+The room validates known types, rejects session-only types, enforces the
+payload limit, and rate-limits each socket. Commands go directly to an open
+device socket or stay in the room's bounded in-memory queue until the device
+connects. Queued commands carry a short expiry and are discarded after it.
+Device messages are broadcast to open client sockets and retained in the same
+bounded in-memory replay queue for the next client connection. State snapshots
+are not replayed.
 
-The dashboard falls back to `state?since=...` at a deliberately low rate when
-the WebSocket cannot open.
-The HTTP endpoints remain part of the transport so older browsers and device
-builds keep working.
-
-## Envelope
-
-Unchanged protocol v1 (`shared/types/protocol.ts`): `{v,id,type,ts,payload,replyTo?}`.
-Validation rules identical to the previous relay: known types only, size cap,
-rate limiting per connection.
-
-## Delivery semantics
-
-At-most-once. A command is removed from the queue when handed to the device's
-poll. A command sent through the WebSocket enters the same queue as a command
-sent to `/client`. Live state snapshots are not retained for reconnect replay.
-The dashboard requests a fresh snapshot after reconnect. The dashboard treats
-missing `replyTo` responses as retryable. All calibration flows are user-driven,
-so nothing depends on guaranteed delivery.
+Delivery is at-most-once. The dashboard requests a fresh state snapshot after
+it connects or the device becomes available. Calibration flows remain
+user-driven and handle missing replies with their existing timeouts.
 
 ## Lifecycle
 
-A room with no recent activity holds no resources: DOs hibernate between
-requests and in-memory state is discarded after eviction. The WebSocket peers
-can remain connected while the DO hibernates. Legacy HTTP fallback clients
-re-poll automatically, so eviction is invisible except that undelivered
-queued commands are dropped.
+Cloudflare may hibernate or restart the Durable Object while sockets remain
+attached. Socket attachments restore the role and connection identity when the
+object resumes, but the in-memory command and replay queues are not durable.
+The browser must request a fresh state snapshot after reconnect. Safety-critical
+calibration candidate and rollback state is persisted by the TV, not by this
+transport queue.
+
+During rollback the TV publishes the candidate with `validationStatus:
+"rolling_back"`. Clients must treat that state as pending recovery, disable
+validation and acceptance, and continue to rely on the next TV snapshot.

@@ -9,6 +9,8 @@ export interface MicCalibrationTrust {
   readonly taperToHz: number
 }
 
+export type MicCapturePathStatus = 'validated' | 'provisional' | 'unvalidated'
+
 export interface MicCalibrationProfile {
   readonly id: string
   readonly name: string
@@ -20,6 +22,7 @@ export interface MicCalibrationProfile {
   readonly referenceType: 'free-field' | 'pressure' | 'unknown'
   readonly sourceSmoothing: string
   readonly capturePath: string
+  readonly capturePathStatus: MicCapturePathStatus
   readonly dataMethod: 'published-data' | 'digitized-figure'
   readonly normalizeAtHz: number
   readonly referenceMicrophone: string
@@ -43,5 +46,6 @@ export interface MicCalibrationSummary {
   readonly sourceDate: string
   readonly referenceType: MicCalibrationProfile['referenceType']
   readonly capturePath: string
+  readonly capturePathStatus: MicCapturePathStatus
   readonly dataMethod: MicCalibrationProfile['dataMethod']
 }

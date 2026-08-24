@@ -22,11 +22,10 @@ export interface MeasurementGroup {
   positionId: CalibrationPositionId
   positionIndex: number
   positionCount: number
-  channel: Exclude<CalibrationChannel, 'both'>
+  channel: CalibrationChannel
 }
 
-export function measurementGroupForContext(context: MeasurementContext): MeasurementGroup | null {
-  if (context.channel === 'both') return null
+export function measurementGroupForContext(context: MeasurementContext): MeasurementGroup {
   return {
     positionId: context.positionId,
     positionIndex: context.positionIndex,
@@ -75,6 +74,30 @@ export function createMeasurementPlanForGroups(
   phase: MeasurementContext['phase'] = 'measurement',
 ): MeasurementContext[] {
   return contextsForGroups(groups, REPEAT_COUNT, phase)
+}
+
+export type ProbePlanKind = 'transfer' | 'routing'
+
+/**
+ * Diagnostic probe plans always play both output channels. The transfer plan
+ * keeps one microphone at center; the routing plan moves that same microphone
+ * between fixed left and right positions so it does not depend on a stereo
+ * capture device or browser channel labeling.
+ */
+export function createProbeMeasurementPlan(
+  kind: ProbePlanKind,
+  repeats = REPEAT_COUNT,
+): MeasurementContext[] {
+  const positions = kind === 'transfer'
+    ? [{ id: 'center' as const, positionIndex: 0 }]
+    : [{ id: 'left' as const, positionIndex: 0 }, { id: 'right' as const, positionIndex: 1 }]
+  const groups: MeasurementGroup[] = positions.map(({ id, positionIndex }) => ({
+    positionId: id,
+    positionIndex,
+    positionCount: positions.length,
+    channel: 'both',
+  }))
+  return contextsForGroups(groups, repeats, 'measurement')
 }
 
 export function createThirdTakeContext(context: MeasurementContext): MeasurementContext {

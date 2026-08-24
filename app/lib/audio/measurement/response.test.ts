@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import type { MeasurementSweep } from '#shared/types/protocol'
-import { analyzeMeasurement, detectSweepStart, normalizeResponsePoints } from './response'
+import { analyzeMeasurement, detectSweepStart, normalizeResponsePoints, CLOCK_DRIFT_HARD_REJECT_PPM } from './response'
 import { windowedImpulseResponse } from './impulse'
 import { generateSweepReference, sweepSampleParts } from '../sweep-reference'
 import { parseMicCalibrationProfile } from '../mics/profile'
 import type { MicCalibrationProfile } from '../mics/types'
+import { calculateCorrection, targetErrorRms, type AggregateResponse } from '../correction/optimizer'
+import { mapCorrectionToBandsConservative } from '../correction/bandMapper'
+import type { ResponsePoint } from './response'
 
 const sweep: MeasurementSweep = {
   algorithm: 'exponential-sine-v1',
@@ -25,6 +28,40 @@ const sweep: MeasurementSweep = {
 
 function generateMeasurementReference(measurementSweep: MeasurementSweep): Float32Array {
   return generateSweepReference(measurementSweep)
+}
+
+function convolve(samples: Float32Array, impulse: Float32Array): Float32Array {
+  const result = new Float32Array(samples.length + impulse.length - 1)
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex++) {
+    for (let impulseIndex = 0; impulseIndex < impulse.length; impulseIndex++) {
+      result[sampleIndex + impulseIndex] += (samples[sampleIndex] ?? 0) * (impulse[impulseIndex] ?? 0)
+    }
+  }
+  return result
+}
+
+function lowShelfImpulse(sampleRate: number): Float32Array {
+  const impulse = new Float32Array(Math.round(sampleRate * 0.02))
+  const decay = 0.96
+  const lowFrequencyGain = 1.2
+  const tailGain = lowFrequencyGain * (1 - decay)
+  impulse[0] = 1 + tailGain
+  for (let index = 1; index < impulse.length; index++) impulse[index] = tailGain * decay ** index
+  return impulse
+}
+
+function aggregateForCorrection(points: readonly ResponsePoint[]): AggregateResponse {
+  return {
+    channel: 'left',
+    points: points.map((point) => ({ ...point })),
+    positionResponses: [],
+    spreadDb: points.map((point) => ({ ...point, magnitudeDb: 0.5 })),
+    records: [],
+    repeatability: [],
+    failedGroups: [],
+    broadbandLevelDb: null,
+    relativeChannelLevelDb: null,
+  }
 }
 
 function stretchCapture(samples: Float32Array, ratio: number): Float32Array {
@@ -55,6 +92,7 @@ function makeProfile(points: MicCalibrationProfile['points'] = [
     referenceType: 'unknown',
     sourceSmoothing: 'none',
     capturePath: 'test capture path',
+    capturePathStatus: 'validated',
     dataMethod: 'published-data',
     normalizeAtHz: 1_000,
     referenceMicrophone: 'test reference',
@@ -107,6 +145,18 @@ describe('measurement response analysis', () => {
     }
   })
 
+  test('rejects an implausibly large marker-derived clock mismatch', () => {
+    const detection = detectSweepStart(
+      stretchCapture(generateMeasurementReference(sweep), 1.002),
+      sweep,
+      sweep.sampleRate,
+    )
+
+    expect(detection.found).toBe(false)
+    expect(detection.failureReason).toBe('clock_drift_unreliable')
+    expect(Math.abs(detection.driftPpm ?? 0)).toBeGreaterThan(CLOCK_DRIFT_HARD_REJECT_PPM)
+  })
+
   test('finds a delayed local sweep and separates analysis and display curves', () => {
     const reference = generateMeasurementReference(sweep)
     const delay = 160
@@ -122,6 +172,76 @@ describe('measurement response analysis', () => {
     expect(result.diagnostics.detected).toBe(true)
     expect(result.diagnostics.detectionOffsetMs).toBeGreaterThanOrEqual(0)
     expect(result.diagnostics.failureReason).toBeNull()
+  })
+
+  test('recovers a known synthetic transfer function through the full analyzer', () => {
+    const reference = generateMeasurementReference(sweep)
+    const transfer = new Float32Array(32)
+    transfer[0] = 1
+    transfer[11] = 0.3
+    const capture = new Float32Array(reference.length + transfer.length - 1)
+    for (let sampleIndex = 0; sampleIndex < reference.length; sampleIndex++) {
+      for (let transferIndex = 0; transferIndex < transfer.length; transferIndex++) {
+        capture[sampleIndex + transferIndex] += reference[sampleIndex] * transfer[transferIndex]
+      }
+    }
+
+    const result = analyzeMeasurement(capture, sweep.sampleRate, sweep, profile)
+
+    expect(result.status).toBe('ok')
+    expect(result.diagnostics.detected).toBe(true)
+    expect(result.rawPoints).toHaveLength(48)
+    const expected = result.rawPoints.map((point) => {
+      let real = 0
+      let imaginary = 0
+      for (let index = 0; index < transfer.length; index++) {
+        const phase = -2 * Math.PI * point.frequencyHz * index / sweep.sampleRate
+        real += (transfer[index] ?? 0) * Math.cos(phase)
+        imaginary += (transfer[index] ?? 0) * Math.sin(phase)
+      }
+      return 20 * Math.log10(Math.hypot(real, imaginary))
+    })
+    const referenceValues = expected.filter((_, index) => {
+      const frequencyHz = result.rawPoints[index]?.frequencyHz ?? 0
+      return frequencyHz >= 500 && frequencyHz <= 2_000
+    }).sort((left, right) => left - right)
+    const normalization = referenceValues[Math.floor(referenceValues.length / 2)] ?? 0
+    const maximumError = result.rawPoints.reduce((maximum, point, index) =>
+      Math.max(maximum, Math.abs(point.magnitudeDb - ((expected[index] ?? 0) - normalization))), 0)
+
+    expect(maximumError).toBeLessThan(0.75)
+  })
+
+  test('runs a synthetic system through analysis, drift correction, optimization, and band mapping', () => {
+    const reference = generateMeasurementReference(sweep)
+    const stretchedCapture = stretchCapture(
+      convolve(reference, lowShelfImpulse(sweep.sampleRate)),
+      1.0005,
+    )
+    const measured = analyzeMeasurement(stretchedCapture, sweep.sampleRate, sweep, profile)
+
+    expect(measured.status).toBe('ok')
+    expect(measured.diagnostics.clockDriftPpm).toBeGreaterThan(200)
+    expect(measured.diagnostics.clockDriftPpm).toBeLessThan(600)
+
+    const aggregate = aggregateForCorrection(measured.correctedPoints)
+    const correction = calculateCorrection(aggregate, profile, { headroomVerified: true })
+    const bandGains = mapCorrectionToBandsConservative(
+      correction.correction,
+      Array.from({ length: 64 }, (_, index) => 20 * (20_000 / 20) ** ((index + 1) / 64)),
+    )
+    const corrected = measured.correctedPoints.map((point) => {
+      const bandIndex = bandGains.findIndex((_, index) => point.frequencyHz <= 20 * (20_000 / 20) ** ((index + 1) / 64))
+      return {
+        ...point,
+        magnitudeDb: point.magnitudeDb + (bandGains[bandIndex < 0 ? bandGains.length - 1 : bandIndex] ?? 0),
+      }
+    })
+
+    expect(targetErrorRms(corrected, correction.target)).toBeLessThan(
+      targetErrorRms(measured.correctedPoints, correction.target),
+    )
+    expect(bandGains.every(Number.isFinite)).toBe(true)
   })
 
   test('rejects silence before trying to estimate a response', () => {
@@ -188,6 +308,24 @@ describe('measurement response analysis', () => {
     expect(result.status).toBe('sync_marker_not_found')
     expect(result.diagnostics.detected).toBe(false)
     expect(result.diagnostics.endingMarkerConfidence).toBe(0)
+    expect(result.correctedPoints).toHaveLength(0)
+  })
+
+  test('keeps an envelope estimate diagnostic when markers fail without accepting the sweep', () => {
+    const reference = generateMeasurementReference(sweep)
+    const parts = sweepSampleParts(sweep)
+    const markerless = reference.slice()
+    markerless.fill(0, parts.leadingMarkerStartSamples, parts.sweepStartSamples)
+    markerless.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.syncMarkerSamples)
+
+    const detection = detectSweepStart(markerless, sweep, sweep.sampleRate)
+    const result = analyzeMeasurement(markerless, sweep.sampleRate, sweep, profile)
+
+    expect(detection.found).toBe(false)
+    expect(detection.offsetMs).toBeNull()
+    expect(detection.envelopeOnlyOffsetMs).not.toBeNull()
+    expect(result.status).toBe('sync_marker_not_found')
+    expect(result.diagnostics.envelopeOnlyOffsetMs).not.toBeNull()
     expect(result.correctedPoints).toHaveLength(0)
   })
 

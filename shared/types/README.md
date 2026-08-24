@@ -2,7 +2,7 @@
 
 Transport-agnostic message contract between the browser dashboard (`client`)
 and the Android TV (`device`). Transport details live in
-[TRANSPORT.md](./TRANSPORT.md) (WebSocket-first mailbox on Cloudflare).
+[TRANSPORT.md](./TRANSPORT.md) (WebSocket mailbox on Cloudflare).
 
 ## Envelope
 
@@ -23,17 +23,21 @@ Rules:
 - Unknown `type` values are rejected by the mailbox with `unknown_type`.
 - Payloads above `MAX_PAYLOAD_BYTES` (16 KiB) are rejected.
 - `ping`/`pong` carry no payload. Either side may ping; the receiver must pong.
+- The room transport has no `room.ping` control frame.
 
 ## Message types
 
 Session-scoped types (`session.hello`, `session.welcome`, `session.peerJoined/Left`,
-`session.error`) are not routed. Room WebSocket presence uses `room.ready` and
-`room.presence` control frames.
+`session.error`) are not routed. Room WebSocket presence uses `room.ready`,
+`room.presence`, and `room.clientPresence` control frames. Every `room.ready`
+frame includes the connected socket's `role`.
 
 Device-targeted (client -> device): `state.get`, `engine.enable`,
 `engine.bypass`, `engine.setBands`, `engine.applyPreset`, `profile.list`,
 `profile.save`, `profile.load`, `profile.delete`, `calibration.get`,
-`calibration.apply`, `calibration.reset`, `calibrationSession.begin`,
+`calibration.applyCandidate`, `calibration.acceptCandidate`,
+`calibration.rollbackCandidate`, `calibration.validation.result`,
+`calibration.reset`, `calibrationSession.begin`,
 `calibrationSession.end`, `calibrationSession.abort`,
 `calibrationSession.loudness.start`, `calibrationSession.loudness.stop`,
 `calibrationSession.progress`, `measurement.prepare`,
@@ -45,7 +49,17 @@ Device-published (device -> clients): `state.snapshot`, `state.changed`,
 `measurement.ready`, `measurement.started`, `measurement.finished`,
 `measurement.error`.
 
-Diagnostics (dev builds only): `diagnostics.deviceInfo`, `diagnostics.probe`.
+Diagnostics (dev builds only): `diagnostics.deviceInfo`, `diagnostics.probe`,
+`diagnostics.effects`, `probe.run`, `probe.status`,
+`probe.persistent.start`, `probe.persistent.release`, and
+`probe.curve.apply`. The persistent probe is a temporary 64-band overlay on
+the production session-0 DynamicsProcessing effect; it is not a second global
+effect and it is never persisted. `probe.curve.apply` accepts either a named
+diagnostic curve or `bandsDb` with optional paired `leftBandsDb` and
+`rightBandsDb` arrays. The browser's routing lab uses one microphone and
+repeated left/right physical positions; exported captures remain diagnostic
+evidence until the real-device transfer and routing gates are explicitly
+reviewed.
 
 ## State snapshot
 

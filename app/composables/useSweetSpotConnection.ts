@@ -11,18 +11,8 @@ import {
   type ConnectionState,
 } from './connectionState'
 
-interface RoomStateResponse {
-  deviceOnline: boolean
-  messages: Envelope[]
-}
-
-// WebSocket is the realtime path. HTTP fallback is deliberately slow because
-// it exists only for older browsers or networks that cannot upgrade.
-const CLIENT_POLL_MS = 10_000
-const LEGACY_HEARTBEAT_MS = 5_000
 const SOCKET_RECONNECT_MIN_MS = 800
 const SOCKET_RECONNECT_MAX_MS = 10_000
-const SOCKET_FALLBACK_ATTEMPTS = 2
 
 let messageCounter = 0
 
@@ -34,17 +24,10 @@ function roomUrl(code: string, action: string): string {
   return `/api/room/${encodeURIComponent(code)}/${action}`
 }
 
-function roomSocketUrl(code: string): string {
-  const url = new URL(roomUrl(code, 'ws?role=client'), window.location.href)
+function roomSocketUrl(code: string, role: Role): string {
+  const url = new URL(roomUrl(code, `ws?role=${encodeURIComponent(role)}`), window.location.href)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
-}
-
-function isRoomStateResponse(value: unknown): value is RoomStateResponse {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  if (!('deviceOnline' in value) || typeof value.deviceOnline !== 'boolean') return false
-  if (!('messages' in value) || !Array.isArray(value.messages)) return false
-  return value.messages.every(isEnvelope)
 }
 
 export function useSweetSpotConnection(role: Role, pairCode: () => string) {
@@ -54,14 +37,10 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   const debugLog = shallowRef<Array<{ at: number; direction: 'in' | 'out'; text: string }>>([])
 
   let disposed = false
-  let pollTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let legacyHeartbeatTimer: ReturnType<typeof setInterval> | null = null
   let socket: WebSocket | null = null
   let socketReady = false
   let socketAttempts = 0
-  let fallbackPolling = false
-  let since = 0
 
   const handlers = new Set<(env: Envelope) => void>()
   const seenMessageIds = new Set<string>()
@@ -71,12 +50,14 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   }
 
   function makeEnvelope(type: string, payload: unknown, replyTo?: string): Envelope {
+    const timestamp = Date.now()
     return {
       v: PROTOCOL_VERSION,
       id: nextMessageId(),
       type,
-      ts: Date.now(),
+      ts: timestamp,
       payload,
+      ...(role === 'client' ? { expiresAt: timestamp + 30_000 } : {}),
       ...(replyTo ? { replyTo } : {}),
     }
   }
@@ -100,31 +81,14 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     for (const handler of handlers) handler(env)
   }
 
-  async function post(env: Envelope): Promise<boolean> {
+  function dispatch(env: Envelope) {
+    if (!socketReady || socket?.readyState !== WebSocket.OPEN) return
     try {
-      const res = await fetch(roomUrl(pairCode(), role === 'client' ? 'client' : 'device'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(env),
-      })
-      if (!res.ok) markConnectionInterrupted()
-      return res.ok
+      socket.send(JSON.stringify(env))
     } catch {
       markConnectionInterrupted()
-      return false
+      socket?.close()
     }
-  }
-
-  function dispatch(env: Envelope) {
-    if (role === 'client' && socketReady && socket?.readyState === WebSocket.OPEN) {
-      try {
-        socket.send(JSON.stringify(env))
-        return
-      } catch {
-        markConnectionInterrupted()
-      }
-    }
-    void post(env)
   }
 
   function send(type: string, payload: unknown = {}, replyTo?: string): string {
@@ -152,29 +116,6 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     return () => handlers.delete(handler)
   }
 
-  function stopPolling() {
-    if (pollTimer !== null) clearTimeout(pollTimer)
-    pollTimer = null
-    fallbackPolling = false
-  }
-
-  function stopLegacyHeartbeat() {
-    if (legacyHeartbeatTimer !== null) clearInterval(legacyHeartbeatTimer)
-    legacyHeartbeatTimer = null
-  }
-
-  function startLegacyHeartbeat() {
-    stopLegacyHeartbeat()
-    legacyHeartbeatTimer = setInterval(() => {
-      if (!socketReady || socket?.readyState !== WebSocket.OPEN) return
-      try {
-        socket.send(JSON.stringify({ kind: 'room.ping' }))
-      } catch {
-        socket?.close()
-      }
-    }, LEGACY_HEARTBEAT_MS)
-  }
-
   function applySocketMessage(value: unknown) {
     if (isEnvelope(value)) {
       deliver(value)
@@ -182,8 +123,6 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     }
     if (!isRoomSocketServerMessage(value)) return
     if (value.kind === 'room.ready') {
-      if (value.role === undefined) startLegacyHeartbeat()
-      else stopLegacyHeartbeat()
       const wasOnline = deviceOnline.value
       deviceOnline.value = value.deviceOnline
       status.value = connectionStateForDevice(value.deviceOnline)
@@ -201,42 +140,9 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     log('in', JSON.stringify(value))
   }
 
-  function startPolling() {
-    if (disposed || pollTimer !== null || socketReady) return
-    fallbackPolling = true
-    void pollOnce()
-  }
-
-  async function pollOnce() {
-    if (disposed || socketReady || !fallbackPolling) return
-    try {
-      const res = await fetch(roomUrl(pairCode(), `state?since=${since}`))
-      if (!res.ok) throw new Error(`state request failed with HTTP ${res.status}`)
-      const raw: unknown = await res.json()
-      if (!isRoomStateResponse(raw)) throw new Error('state response was malformed')
-      if (disposed || socketReady) return
-
-      const wasOnline = deviceOnline.value
-      deviceOnline.value = raw.deviceOnline
-      status.value = connectionStateForDevice(raw.deviceOnline)
-      for (const env of raw.messages) deliver(env)
-      if (raw.messages.length > 0) since = Date.now()
-      if (!wasOnline && deviceOnline.value) send('state.get')
-    } catch {
-      markConnectionInterrupted()
-    }
-    if (!disposed && fallbackPolling && !socketReady) {
-      pollTimer = setTimeout(() => {
-        pollTimer = null
-        void pollOnce()
-      }, CLIENT_POLL_MS)
-    }
-  }
-
   function scheduleReconnect() {
     if (disposed || reconnectTimer !== null) return
     socketAttempts++
-    if (socketAttempts >= SOCKET_FALLBACK_ATTEMPTS) startPolling()
     const delay = Math.min(
       SOCKET_RECONNECT_MIN_MS * (2 ** Math.max(0, socketAttempts - 1)),
       SOCKET_RECONNECT_MAX_MS,
@@ -248,10 +154,10 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   }
 
   function openSocket() {
-    if (disposed || role !== 'client' || socket !== null) return
+    if (disposed || socket !== null) return
     let next: WebSocket
     try {
-      next = new WebSocket(roomSocketUrl(pairCode()))
+      next = new WebSocket(roomSocketUrl(pairCode(), role))
     } catch {
       markConnectionInterrupted()
       scheduleReconnect()
@@ -262,7 +168,6 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       if (socket !== next || disposed) return
       socketReady = true
       socketAttempts = 0
-      stopPolling()
       status.value = 'connecting'
     }
     next.onmessage = (event) => {
@@ -282,7 +187,6 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       if (socket !== next) return
       socket = null
       socketReady = false
-      stopLegacyHeartbeat()
       if (disposed) return
       markConnectionInterrupted()
       scheduleReconnect()
@@ -291,21 +195,13 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
 
   function connect() {
     if (disposed || !pairCode()) return
-    if (role === 'client') {
-      if (socket !== null || reconnectTimer !== null) return
-      status.value = 'connecting'
-      openSocket()
-      return
-    }
-    if (pollTimer !== null) return
+    if (socket !== null || reconnectTimer !== null) return
     status.value = 'connecting'
-    startPolling()
+    openSocket()
   }
 
   function disconnect() {
     disposed = true
-    stopPolling()
-    stopLegacyHeartbeat()
     if (reconnectTimer !== null) clearTimeout(reconnectTimer)
     reconnectTimer = null
     socket?.close()

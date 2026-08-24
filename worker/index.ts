@@ -25,14 +25,14 @@ export default {
       return env.ASSETS.fetch(request)
     }
 
-    const m = path.match(/^\/api\/room\/([A-Za-z0-9-]{6,14})\/(register|commands|device|client|state|ws)$/)
+    const m = path.match(/^\/api\/room\/([A-Za-z0-9-]{6,14})\/ws$/)
     if (!m) return json('{"error":"not_found"}', 404)
-    const [, rawCode, action] = m
+    const [, rawCode] = m
     if (!isValidPairCode(rawCode)) return invalidCode()
 
     const id = env.ROOM.idFromName(rawCode.replace(/-/g, '').toUpperCase())
     const stub = env.ROOM.get(id)
-    const target = `https://room/${action}${url.search}`
+    const target = `https://room/ws${url.search}`
     const body = request.method === 'GET' ? undefined : await request.text()
     const forwarded = new Request(target, {
       method: request.method,

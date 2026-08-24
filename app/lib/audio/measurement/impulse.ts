@@ -33,6 +33,12 @@ export interface ImpulseResponsePoint {
   magnitudeDb: number
 }
 
+export interface ResponseWindowOptions {
+  lfWindowMs?: number
+  hfWindowMs?: number
+  taperMs?: number
+}
+
 export interface ImpulseResult {
   kind: 'ok'
   samples: Float32Array
@@ -63,7 +69,23 @@ const DECAY_ENDPOINT_TOLERANCE_DB = 1.5
 const DECAY_MIN_POINTS = 8
 const DECAY_MIN_R_SQUARED = 0.85
 const DECAY_MAX_RESIDUAL_RMS_DB = 2
+const RESAMPLER_PASSBAND_HZ = 20_000
+const RESAMPLER_STOPBAND_HZ = 22_000
+const RESAMPLER_PASSBAND_MAX_ERROR_DB = 0.1
+const RESAMPLER_STOPBAND_MAX_ERROR_DB = -80
+const RESAMPLER_MAX_CLOCK_DRIFT_PPM = 1_000
+const RESAMPLER_DEFAULT_SAMPLE_RATE = 48_000
+const RESAMPLER_TAP_COUNT = 127
+const RESAMPLER_HALF_TAP_COUNT = Math.floor(RESAMPLER_TAP_COUNT / 2)
+const RESAMPLER_PHASE_COUNT = 512
 let cachedReferenceFft: ReferenceFft | null = null
+
+interface ResamplerKernel {
+  sampleRate: number
+  coefficients: Float32Array
+}
+
+let cachedResamplerKernel: ResamplerKernel | null = null
 
 function rms(samples: Float32Array, start = 0, end = samples.length): number {
   let sum = 0
@@ -128,7 +150,7 @@ export function decayTime(
   if (noiseFloorDb !== null && (!Number.isFinite(noiseFloorDb) || noiseFloorDb + noiseMarginDb > toDb)) return null
 
   const points: Array<{ x: number; y: number }> = []
-  for (let index = 0; index < edcDb.length; index += Math.max(1, Math.round(sampleRate / 200))) {
+  for (let index = 0; index < edcDb.length; index += Math.max(1, Math.round(sampleRate / 500))) {
     const value = edcDb[index]
     if (Number.isFinite(value) && value <= fromDb && value >= toDb) {
       points.push({ x: index / sampleRate, y: value })
@@ -189,24 +211,135 @@ function referenceCacheKey(
   ].join('|')
 }
 
+function normalizedSinc(value: number): number {
+  return Math.abs(value) < 1e-12 ? 1 : Math.sin(Math.PI * value) / (Math.PI * value)
+}
+
+function modifiedBesselI0(value: number): number {
+  let sum = 1
+  let term = 1
+  for (let order = 1; order < 30; order++) {
+    term *= value * value / (4 * order * order)
+    sum += term
+    if (term < sum * 1e-14) break
+  }
+  return sum
+}
+
+function kaiserBeta(attenuationDb: number): number {
+  if (attenuationDb > 50) return 0.1102 * (attenuationDb - 8.7)
+  if (attenuationDb >= 21) return 0.5842 * (attenuationDb - 21) ** 0.4 + 0.07886 * (attenuationDb - 21)
+  return 0
+}
+
+const resamplerPassbandRipple = 10 ** (RESAMPLER_PASSBAND_MAX_ERROR_DB / 20) - 1
+const RESAMPLER_KAISER_BETA = kaiserBeta(Math.max(
+  -20 * Math.log10(resamplerPassbandRipple),
+  -RESAMPLER_STOPBAND_MAX_ERROR_DB,
+))
+const RESAMPLER_BESSEL_DENOMINATOR = modifiedBesselI0(RESAMPLER_KAISER_BETA)
+
+function createResamplerKernel(sampleRate: number): Float32Array {
+  const worstCaseSourceRate = sampleRate * (1 - RESAMPLER_MAX_CLOCK_DRIFT_PPM / 1_000_000)
+  const passbandFraction = Math.min(0.499, RESAMPLER_PASSBAND_HZ / worstCaseSourceRate)
+  const stopbandFraction = Math.min(0.4999, RESAMPLER_STOPBAND_HZ / worstCaseSourceRate)
+  const cutoffFraction = Math.min(0.4995, Math.max(0.05, (passbandFraction + stopbandFraction) / 2))
+  const kernels = new Float32Array(RESAMPLER_PHASE_COUNT * RESAMPLER_TAP_COUNT)
+  for (let phaseIndex = 0; phaseIndex < RESAMPLER_PHASE_COUNT; phaseIndex++) {
+    const fraction = phaseIndex / RESAMPLER_PHASE_COUNT
+    const kernelOffset = phaseIndex * RESAMPLER_TAP_COUNT
+    let sum = 0
+    for (let tapIndex = 0; tapIndex < RESAMPLER_TAP_COUNT; tapIndex++) {
+      const offset = tapIndex - RESAMPLER_HALF_TAP_COUNT
+      const distance = offset - fraction
+      const windowCoordinate = 2 * tapIndex / (RESAMPLER_TAP_COUNT - 1) - 1
+      const kaiser = modifiedBesselI0(RESAMPLER_KAISER_BETA * Math.sqrt(Math.max(0, 1 - windowCoordinate * windowCoordinate))) / RESAMPLER_BESSEL_DENOMINATOR
+      const coefficient = 2 * cutoffFraction * normalizedSinc(2 * cutoffFraction * distance) * kaiser
+      kernels[kernelOffset + tapIndex] = coefficient
+      sum += coefficient
+    }
+    if (sum !== 0) {
+      for (let tapIndex = 0; tapIndex < RESAMPLER_TAP_COUNT; tapIndex++) {
+        kernels[kernelOffset + tapIndex] /= sum
+      }
+    }
+  }
+  return kernels
+}
+
+function getResamplerKernel(sampleRate: number): Float32Array {
+  const safeSampleRate = Number.isFinite(sampleRate) && sampleRate > 0
+    ? sampleRate
+    : RESAMPLER_DEFAULT_SAMPLE_RATE
+  if (cachedResamplerKernel?.sampleRate === safeSampleRate) return cachedResamplerKernel.coefficients
+  const coefficients = createResamplerKernel(safeSampleRate)
+  cachedResamplerKernel = { sampleRate: safeSampleRate, coefficients }
+  return coefficients
+}
+
 function resampleCapture(
   samples: Float32Array,
   startSample: number,
   captureLength: number,
   targetLength: number,
   clockRatio: number,
+  sampleRate: number,
 ): Float32Array {
   const result = new Float32Array(targetLength)
+  const captureStart = Math.min(samples.length, Math.max(0, Math.floor(startSample)))
+  const boundedCaptureLength = Math.max(0, Math.floor(captureLength))
+  const captureEnd = Math.min(samples.length, captureStart + boundedCaptureLength)
+  const sourceLength = captureEnd - captureStart
+  if (sourceLength <= 0) return result
+
+  const safeClockRatio = Number.isFinite(clockRatio) && clockRatio > 0 ? clockRatio : 1
+  if (safeClockRatio === 1) {
+    for (let index = 0; index < targetLength; index++) {
+      result[index] = samples[captureStart + Math.min(sourceLength - 1, index)] ?? 0
+    }
+    return result
+  }
+
+  const kernels = getResamplerKernel(sampleRate)
   for (let index = 0; index < targetLength; index++) {
-    const sourcePosition = index * clockRatio
+    const sourcePosition = Math.min(sourceLength - 1, index * safeClockRatio)
     const lower = Math.floor(sourcePosition)
-    const upper = Math.min(captureLength - 1, lower + 1)
     const fraction = sourcePosition - lower
-    const lowerValue = samples[Math.min(captureLength - 1, Math.max(0, startSample + lower))] ?? 0
-    const upperValue = samples[Math.min(captureLength - 1, Math.max(0, startSample + upper))] ?? lowerValue
-    result[index] = lowerValue + (upperValue - lowerValue) * fraction
+    let phase = Math.round(fraction * RESAMPLER_PHASE_COUNT)
+    let base = lower
+    if (phase === RESAMPLER_PHASE_COUNT) {
+      phase = 0
+      base++
+    }
+
+    const kernelOffset = phase * RESAMPLER_TAP_COUNT
+    const firstSourceIndex = base - RESAMPLER_HALF_TAP_COUNT
+    const firstAbsoluteIndex = captureStart + firstSourceIndex
+    let value = 0
+    if (firstSourceIndex >= 0 && firstSourceIndex + RESAMPLER_TAP_COUNT <= sourceLength && firstAbsoluteIndex >= 0 && firstAbsoluteIndex + RESAMPLER_TAP_COUNT <= samples.length) {
+      for (let tapIndex = 0; tapIndex < RESAMPLER_TAP_COUNT; tapIndex++) {
+        value += samples[firstAbsoluteIndex + tapIndex] * kernels[kernelOffset + tapIndex]
+      }
+    } else {
+      for (let tapIndex = 0; tapIndex < RESAMPLER_TAP_COUNT; tapIndex++) {
+        const sourceIndex = Math.max(
+          captureStart,
+          Math.min(captureEnd - 1, firstAbsoluteIndex + tapIndex),
+        )
+        value += samples[sourceIndex] * kernels[kernelOffset + tapIndex]
+      }
+    }
+    result[index] = value
   }
   return result
+}
+
+export function resampleCaptureForTest(
+  samples: Float32Array,
+  clockRatio: number,
+  sampleRate = RESAMPLER_DEFAULT_SAMPLE_RATE,
+): Float32Array {
+  return resampleCapture(samples, 0, samples.length, samples.length, clockRatio, sampleRate)
 }
 
 function percentile(values: readonly number[], fraction: number): number {
@@ -451,7 +584,7 @@ export function deconvolveSweep(
   const captureStart = Math.min(samples.length, Math.max(0, startSample))
   const available = Math.max(0, samples.length - captureStart)
   const safeClockRatio = Number.isFinite(clockRatio) && clockRatio > 0 ? clockRatio : 1
-  const requiredCaptureSamples = Math.ceil(referenceLength * safeClockRatio)
+  const requiredCaptureSamples = Math.ceil((referenceLength + parts.postRollSamples) * safeClockRatio)
   if (available < requiredCaptureSamples) {
     return {
       kind: 'capture_too_short',
@@ -478,7 +611,7 @@ export function deconvolveSweep(
   const referenceFft = getReferenceFft(sweep, sampleRate, fftLength)
   const captureReal = new Float32Array(fftLength)
   const captureImaginary = new Float32Array(fftLength)
-  const warpedCapture = resampleCapture(samples, captureStart, captureLength, targetCaptureLength, safeClockRatio)
+  const warpedCapture = resampleCapture(samples, captureStart, captureLength, targetCaptureLength, safeClockRatio, sampleRate)
   for (let index = 0; index < warpedCapture.length; index++) captureReal[index] = warpedCapture[index]
   fftInPlace(captureReal, captureImaginary)
   const regularization = Math.max(referenceFft.maximumPower * 1e-7, 1e-12)
@@ -514,6 +647,7 @@ export function windowedImpulseResponse(
   endHz: number,
   pointCount = 48,
   noiseRms: number | null = null,
+  options: ResponseWindowOptions = {},
 ): ImpulseResponsePoint[] {
   if (impulse.length === 0 || sampleRate <= 0 || pointCount < 1) return []
   const arrival = findDirectArrival(impulse, sampleRate, noiseRms)
@@ -547,8 +681,11 @@ export function windowedImpulseResponse(
 
   // LF needs the long window for usable modal resolution. The shorter window
   // prevents late, position-dependent field energy from becoming HF EQ.
-  const longWindow = windowedSpectrum(250, 40)
-  const shortWindow = windowedSpectrum(80, 40)
+  const lfWindowMs = Number.isFinite(options.lfWindowMs) && (options.lfWindowMs ?? 0) > 0 ? options.lfWindowMs ?? 250 : 250
+  const hfWindowMs = Number.isFinite(options.hfWindowMs) && (options.hfWindowMs ?? 0) > 0 ? options.hfWindowMs ?? 80 : 80
+  const taperMs = Number.isFinite(options.taperMs) && (options.taperMs ?? 0) > 0 ? options.taperMs ?? 40 : 40
+  const longWindow = windowedSpectrum(lfWindowMs, taperMs)
+  const shortWindow = windowedSpectrum(hfWindowMs, taperMs)
 
   const lowHz = Math.max(10, startHz)
   const highHz = Math.min(endHz, sampleRate / 2 - sampleRate / fftLength)

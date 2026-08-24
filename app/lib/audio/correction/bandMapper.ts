@@ -42,3 +42,26 @@ export function mapCorrectionToBands(
     return total / samples
   })
 }
+
+/**
+ * Maps the curve while refusing a positive interval gain when any measured
+ * correction sample inside that interval is non-positive. A narrow null must
+ * not become a boost merely because an interval average includes its
+ * neighbors.
+ */
+export function mapCorrectionToBandsConservative(
+  correction: readonly ResponsePoint[],
+  bandCutoffsHz: readonly number[],
+  minHz = 20,
+  maxHz = 20_000,
+): number[] {
+  return bandCutoffsHz.map((cutoff, index) => {
+    const lower = Math.max(minHz, index === 0 ? minHz : bandCutoffsHz[index - 1])
+    const upper = Math.min(maxHz, cutoff)
+    const mapped = mapCorrectionToBands(correction, [cutoff], lower, upper)[0] ?? 0
+    const hasNonPositiveSample = correction.some((point) =>
+      point.frequencyHz >= lower && point.frequencyHz <= upper && point.magnitudeDb <= 0,
+    )
+    return mapped > 0 && hasNonPositiveSample ? 0 : mapped
+  })
+}

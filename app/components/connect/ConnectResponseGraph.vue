@@ -2,6 +2,7 @@
 import type { AggregateResponse } from '~/lib/audio/measurement/aggregation'
 import type { RoomMetrics } from '~/lib/audio/measurement/impulse'
 import type { MeasurementAnalysis, ResponsePoint } from '~/lib/audio/measurement/response'
+import { CLOCK_DRIFT_WARNING_PPM } from '~/lib/audio/measurement/response'
 
 defineProps<{
   analysis: MeasurementAnalysis
@@ -23,6 +24,11 @@ function decayLabel(room: RoomMetrics | null | undefined): string {
 function dbfs(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '−∞ dBFS'
   return `${(20 * Math.log10(value)).toFixed(1)} dBFS`
+}
+
+function driftLabel(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return 'unknown'
+  return `${value.toFixed(1)} ppm${Math.abs(value) > CLOCK_DRIFT_WARNING_PPM ? ' · warning' : ''}`
 }
 
 function responsePolyline(points: ResponsePoint[]): string {
@@ -61,8 +67,9 @@ function responsePolyline(points: ResponsePoint[]): string {
       <dt>peak</dt><dd>{{ dbfs(analysis.diagnostics.signalPeak) }}</dd>
       <dt>SNR</dt><dd>{{ analysis.diagnostics.snrEstimateDb == null ? 'unknown' : `${analysis.diagnostics.snrEstimateDb.toFixed(1)} dB` }}</dd>
       <dt>detected offset</dt><dd>{{ analysis.diagnostics.detectionOffsetMs?.toFixed(1) ?? 'unknown' }} ms</dd>
+      <dt v-if="analysis.diagnostics.envelopeOnlyOffsetMs != null">envelope-only offset</dt><dd v-if="analysis.diagnostics.envelopeOnlyOffsetMs != null">{{ analysis.diagnostics.envelopeOnlyOffsetMs.toFixed(1) }} ms (diagnostic only)</dd>
       <dt>sync marker</dt><dd>{{ (analysis.diagnostics.detectionConfidence * 100).toFixed(0) }}% / {{ (analysis.diagnostics.endingMarkerConfidence * 100).toFixed(0) }}%</dd>
-      <dt>clock drift</dt><dd>{{ analysis.diagnostics.clockDriftPpm == null ? 'unknown' : `${analysis.diagnostics.clockDriftPpm.toFixed(1)} ppm` }}</dd>
+      <dt>clock drift</dt><dd>{{ driftLabel(analysis.diagnostics.clockDriftPpm) }}</dd>
       <dt>clipping</dt><dd>{{ analysis.diagnostics.clipped ? 'yes' : 'no' }}</dd>
       <dt>mic profile</dt><dd>{{ analysis.micProfile.name }}</dd>
       <dt>profile author</dt><dd>{{ analysis.micProfile.author }}</dd>
@@ -73,9 +80,10 @@ function responsePolyline(points: ResponsePoint[]): string {
         </a>
       </dd>
       <dt>capture path</dt><dd>{{ analysis.micProfile.capturePath }}</dd>
+      <dt>capture validation</dt><dd>{{ analysis.micProfile.capturePathStatus }}</dd>
       <dt>direct arrival</dt><dd>{{ analysis.room?.directArrivalMs == null ? 'unknown' : `${analysis.room.directArrivalMs.toFixed(1)} ms` }}</dd>
       <dt>early reflections</dt><dd>{{ analysis.room?.earlyReflections.length ?? 0 }}</dd>
-      <dt>direct / late</dt><dd>{{ metricDb(analysis.room?.directToLateDb) }}</dd>
+      <dt>direct / late (custom)</dt><dd>{{ metricDb(analysis.room?.directToLateDb) }} <span class="note">0–2.5 ms vs after 50 ms energy; not standards-defined DRR</span></dd>
       <dt>C50 / C80</dt><dd>{{ metricDb(analysis.room?.c50Db) }} / {{ metricDb(analysis.room?.c80Db) }}</dd>
       <dt>decay</dt><dd>{{ decayLabel(analysis.room) }}</dd>
     </dl>

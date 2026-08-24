@@ -4,13 +4,18 @@ import type {
   PersistentProbeState,
   ProbeDiagnostics,
 } from '#shared/types/protocol'
+import type { ProbeCaptureEvidence } from './types'
 
 defineProps<{
   diagPending: boolean
   probe: ProbeDiagnostics | null
   probePending: boolean
   persistentState: PersistentProbeState | null
-  persistBands: number | string
+  probeBand: number | string
+  probeGainDb: number | string
+  probeLabPending: boolean
+  probeLabMessage: string
+  probeEvidence: readonly ProbeCaptureEvidence[]
   virtualizerOn: boolean
   deviceInfo: DeviceInfoPayload | null
   devInfoPending: boolean
@@ -19,18 +24,22 @@ defineProps<{
 const emit = defineEmits<{
   (event: 'run-effects-diagnostics'): void
   (event: 'run-capacity-probe'): void
-  (event: 'set-persist-bands', value: number | string): void
+  (event: 'set-probe-band', value: number | string): void
+  (event: 'set-probe-gain-db', value: number | string): void
   (event: 'create-persistent'): void
   (event: 'release-persistent'): void
   (event: 'apply-test-curve', curve: 'hollow' | 'flat'): void
-  (event: 'quick-audible', bands: number): void
+  (event: 'capture-transfer-probe'): void
+  (event: 'run-routing-probe'): void
+  (event: 'clear-probe-evidence'): void
+  (event: 'export-probe-evidence'): void
   (event: 'set-virtualizer', enabled: boolean): void
   (event: 'fetch-device-info'): void
 }>()
 
-function readPersistBands(event: Event) {
+function readNumber(event: Event, emitName: 'set-probe-band' | 'set-probe-gain-db') {
   if (!(event.target instanceof HTMLInputElement)) return
-  emit('set-persist-bands', Number.isNaN(event.target.valueAsNumber) ? event.target.value : event.target.valueAsNumber)
+  emit(emitName, Number.isNaN(event.target.valueAsNumber) ? event.target.value : event.target.valueAsNumber)
 }
 
 function fmtBytes(bytes: number): string {
@@ -49,7 +58,7 @@ function fmtBytes(bytes: number): string {
 <template>
   <section class="block">
     <h2 class="label">04 · Diagnostics</h2>
-    <p class="note">Upmix experiments. Effect-chain inventory, DynamicsProcessing capacity, persistent test instances.</p>
+    <p class="note">Effect-chain inventory, DynamicsProcessing capacity, and a temporary diagnostic overlay on the production session-0 effect.</p>
 
     <div class="actions">
       <button :disabled="diagPending" @click="emit('run-effects-diagnostics')">
@@ -81,10 +90,10 @@ function fmtBytes(bytes: number): string {
       </table>
     </template>
 
-    <h3 class="sub-label">Persistent instance</h3>
+    <h3 class="sub-label">64-band diagnostic overlay</h3>
     <form class="inline-form" @submit.prevent="emit('create-persistent')">
-      <input :value="persistBands" type="number" min="1" max="64" @input="readPersistBands" />
-      <button type="submit">Create enabled</button>
+      <input :value="64" type="number" min="64" max="64" disabled />
+      <button type="submit">Create 64-band diagnostic</button>
       <button type="button" @click="emit('release-persistent')">Release</button>
     </form>
     <p v-if="persistentState" class="note">
@@ -96,12 +105,35 @@ function fmtBytes(bytes: number): string {
     </p>
 
     <h3 class="sub-label">Audible test curves</h3>
-    <p class="note">Dramatic EQ through the persistent instance. Proof it sits on the live path.</p>
+    <p class="note">Dramatic temporary EQ through the same live production effect. Release it after the experiment.</p>
     <div class="actions">
       <button @click="emit('apply-test-curve', 'hollow')">Hollow mids</button>
       <button @click="emit('apply-test-curve', 'flat')">Flat</button>
-      <button v-for="n in [16, 32, 64]" :key="n" @click="emit('quick-audible', n)">Hollow @ {{ n }}</button>
     </div>
+
+    <h3 class="sub-label">Acoustic transfer / routing probe</h3>
+    <p class="note">
+      Diagnostic only. This applies a temporary 64-band curve, then uses the existing sweep analyzer.
+      Routing uses one microphone: it captures a flat baseline, then left-only and right-only cuts at four LF/mid/HF bands while you move the same mic between fixed left/right positions.
+    </p>
+    <form class="inline-form" @submit.prevent="emit('capture-transfer-probe')">
+      <label>band <input :value="probeBand" type="number" min="1" max="64" @input="readNumber($event, 'set-probe-band')" /></label>
+      <label>gain dB <input :value="probeGainDb" type="number" min="-6" max="6" step="0.5" @input="readNumber($event, 'set-probe-gain-db')" /></label>
+      <button type="submit" :disabled="probeLabPending">Capture transfer</button>
+      <button type="button" :disabled="probeLabPending" @click="emit('run-routing-probe')">Run L/R routing set</button>
+    </form>
+    <p v-if="probeLabMessage" class="note">{{ probeLabMessage }}</p>
+    <div v-if="probeEvidence.length" class="actions">
+      <button type="button" @click="emit('export-probe-evidence')">Export {{ probeEvidence.length }} captures</button>
+      <button type="button" :disabled="probeLabPending" @click="emit('clear-probe-evidence')">Clear evidence</button>
+    </div>
+    <ul v-if="probeEvidence.length" class="probe-evidence">
+      <li v-for="capture in probeEvidence" :key="capture.id">
+        {{ capture.mode }} · {{ capture.cutChannel }} · band {{ capture.bandIndex }} · {{ capture.gainDb.toFixed(1) }} dB ·
+        {{ capture.positionResponses.map((position) => position.positionId).join(', ') }} ·
+        {{ capture.repeatabilityPassed ? 'repeatable' : 'inconclusive' }}
+      </li>
+    </ul>
 
     <h3 class="sub-label">Virtualizer A/B</h3>
     <p class="note">Persistent session-0 Virtualizer at max strength. Toggle while playing stereo through AUX.</p>

@@ -5,6 +5,7 @@ import type {
   Envelope,
   MeasurementContext,
   MeasurementDiagnosticsValues,
+  MeasurementCaptureMetadata,
   MeasurementResponsePayload,
   MeasurementSweep,
 } from '#shared/types/protocol'
@@ -20,6 +21,8 @@ import {
   aggregateResponse,
   allRepeatabilityPassed,
   calculateRepeatability,
+  decideAdaptiveTake,
+  decideInvalidTake,
   type AggregateResponse,
   type MeasurementRecord,
   type RepeatabilitySummary,
@@ -28,11 +31,14 @@ import type { MeasurementAnalysis } from '../lib/audio/measurement/response'
 import {
   createMeasurementPlan,
   createMeasurementPlanForGroups,
+  createProbeMeasurementPlan,
   createThirdTakeContext,
   measurementGroupKey,
   positionForContext,
   type MeasurementGroup,
+  type ProbePlanKind,
 } from '../lib/audio/measurement/plan'
+import { sweepSampleParts } from '../lib/audio/sweep-reference'
 import { discoverMicCalibrationProfiles } from '../lib/audio/mics/registry'
 import type { MicCalibrationProfile } from '../lib/audio/mics/types'
 
@@ -111,6 +117,7 @@ export function useCalibrationSession(connection: Connection) {
   const validationAggregateLeft = shallowRef<AggregateResponse | null>(null)
   const validationAggregateRight = shallowRef<AggregateResponse | null>(null)
   const captureDiagnostics = shallowRef<CaptureSignalDiagnostics | null>(null)
+  const failedTakeDiagnostics = shallowRef<Array<{ context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues }>>([])
   const profiles = shallowRef<MicCalibrationProfile[]>([])
   const selectedProfileId = ref('')
   const profileError = ref('')
@@ -118,8 +125,10 @@ export function useCalibrationSession(connection: Connection) {
     settings: MicrophoneCapture['settings']
     capabilities: MicrophoneCapture['capabilities']
   } | null>(null)
+  const captureMetadata = shallowRef<MeasurementCaptureMetadata | null>(null)
   const progress = ref({ current: 0, total: 0 })
   const estimatedRemainingSeconds = ref<number | null>(null)
+  const validationActive = ref(false)
 
   let disposed = false
   let sessionId: string | null = null
@@ -133,8 +142,8 @@ export function useCalibrationSession(connection: Connection) {
   let sessionKeepAlive: ReturnType<typeof setInterval> | null = null
   let plan: MeasurementContext[] = []
   let planIndex = 0
-  let sessionMode: 'measurement' | 'validation' = 'measurement'
-  const retriedGroups = new Set<string>()
+  let sessionMode: 'measurement' | 'validation' | 'probe' = 'measurement'
+  let probePlanKind: ProbePlanKind | null = null
   const activeContext = shallowRef<MeasurementContext | null>(null)
   let preparedContext: MeasurementContext | null = null
   let invalidAttempts = 0
@@ -149,10 +158,25 @@ export function useCalibrationSession(connection: Connection) {
   ])
   const failedRepeatabilityGroups = computed(() =>
     repeatabilitySummaries.value.filter((summary) => !summary.passed))
+  const probeRepeatabilitySummaries = computed<RepeatabilitySummary[]>(() =>
+    aggregateBoth.value?.repeatability ?? [])
+  const probeRepeatabilityPassed = computed(() => allRepeatabilityPassed(aggregateBoth.value))
+  const probeFailedRepeatabilityGroups = computed(() =>
+    probeRepeatabilitySummaries.value.filter((summary) => !summary.passed))
   const currentPosition = computed(() => activeContext.value ? positionForContext(activeContext.value) : null)
   const currentChannel = computed(() => {
     const channel = activeContext.value?.channel
-    return channel === 'left' || channel === 'right' ? channel : null
+    return channel === 'left' || channel === 'right' || channel === 'both' ? channel : null
+  })
+  const currentInstruction = computed(() => {
+    const context = activeContext.value
+    if (!context) return null
+    if (sessionMode === 'probe' && context.channel === 'both') {
+      if (context.positionId === 'left') return 'Place the single microphone at the fixed left-speaker position and keep its orientation unchanged.'
+      if (context.positionId === 'right') return 'Move the same microphone to the fixed right-speaker position and keep its orientation unchanged.'
+      return 'Place the single microphone at the fixed center listening position and keep its orientation unchanged.'
+    }
+    return positionForContext(context).instruction
   })
 
   async function loadProfiles(): Promise<MicCalibrationProfile[]> {
@@ -242,18 +266,18 @@ export function useCalibrationSession(connection: Connection) {
     connection.send('measurement.response', { sessionId, current, total, left, right })
   }
 
+  function sessionRecords(): readonly MeasurementRecord[] {
+    return sessionMode === 'validation' ? validationRecords.value : records.value
+  }
+
   function groupRecords(group: Pick<MeasurementContext, 'positionId' | 'channel'>): MeasurementRecord[] {
     const key = measurementGroupKey(group)
-    return records.value.filter((record) => measurementGroupKey(record.context) === key)
+    return sessionRecords().filter((record) => measurementGroupKey(record.context) === key)
   }
 
   function maybeScheduleThirdTake(context: MeasurementContext): boolean {
-    if (sessionMode !== 'measurement' || context.takeIndex !== 1) return false
-    const key = measurementGroupKey(context)
-    if (retriedGroups.has(key)) return false
-    const summary = calculateRepeatability(groupRecords(context))
-    if (!summary || summary.passed) return false
-    retriedGroups.add(key)
+    const decision = decideAdaptiveTake(sessionRecords(), context)
+    if (decision.kind !== 'schedule-third') return false
     plan.splice(planIndex + 1, 0, createThirdTakeContext(context))
     progress.value = { ...progress.value, total: progress.value.total + 1 }
     return true
@@ -282,6 +306,7 @@ export function useCalibrationSession(connection: Connection) {
     profile = null
     activeContext.value = null
     preparedContext = null
+    validationActive.value = false
     estimatedRemainingSeconds.value = null
     stage.value = 'error'
     message.value = text
@@ -300,7 +325,7 @@ export function useCalibrationSession(connection: Connection) {
   function estimateRemainingSeconds(stageName: CalibrationProgressStage): number | undefined {
     if (stageName === 'loudness' || !sweep) return undefined
     const remainingSweeps = Math.max(0, progress.value.total - progress.value.current)
-    const sweepSeconds = (sweep.preRollMs + sweep.durationMs + sweep.postRollMs) / 1000 + 2
+    const sweepSeconds = sweepSampleParts(sweep).totalSamples / sweep.sampleRate + 2
     const contexts = plan.slice(planIndex)
     let positionPauses = 0
     let previousPosition = activeContext.value?.positionIndex ?? null
@@ -434,7 +459,11 @@ export function useCalibrationSession(connection: Connection) {
     if (sessionMode === 'validation') rebuildValidationAggregates()
     else rebuildAggregates()
     stage.value = 'ending'
-    const failures = sessionMode === 'measurement' ? failedRepeatabilityGroups.value : []
+    const failures = sessionMode === 'measurement'
+      ? failedRepeatabilityGroups.value
+      : sessionMode === 'probe'
+        ? probeFailedRepeatabilityGroups.value
+        : []
     message.value = sessionMode === 'validation'
       ? 'Follow the instructions on the TV.'
       : failures.length > 0
@@ -451,6 +480,18 @@ export function useCalibrationSession(connection: Connection) {
     profile = selectedProfile
     capture = await openMicrophone()
     captureInfo.value = { settings: capture.settings, capabilities: capture.capabilities }
+    captureMetadata.value = {
+      ...capture.settings,
+      sampleRateRange: capture.capabilities.sampleRate,
+      channelCountRange: capture.capabilities.channelCount,
+      echoCancellationCapabilities: [...capture.capabilities.echoCancellation],
+      noiseSuppressionCapabilities: [...capture.capabilities.noiseSuppression],
+      autoGainControlCapabilities: [...capture.capabilities.autoGainControl],
+      ...(typeof navigator !== 'undefined' ? { browserUserAgent: navigator.userAgent } : {}),
+      ...(profile.id ? { micProfileId: profile.id } : {}),
+      ...(profile.sourceDate ? { micProfileSourceDate: profile.sourceDate } : {}),
+      micProfileCapturePathStatus: profile.capturePathStatus,
+    }
     recorder = createPcmRecorder(capture, {
       onTrackEnded: () => {
         void fail('signal_too_low', 'The microphone ended during calibration.')
@@ -459,20 +500,34 @@ export function useCalibrationSession(connection: Connection) {
   }
 
   async function startMode(
-    mode: 'measurement' | 'validation',
+    mode: 'measurement' | 'validation' | 'probe',
     retryGroups: readonly MeasurementGroup[] | null = null,
+    candidateId: string | null = null,
+    nextProbePlanKind: ProbePlanKind | null = null,
   ) {
     if (disposed || ['requesting-microphone', 'preparing', 'loudness', 'position-pause', 'recording', 'analyzing', 'ending'].includes(stage.value)) return
+    if (mode === 'validation' && !candidateId) {
+      stage.value = 'error'
+      message.value = 'Validation requires a pending calibration candidate.'
+      return
+    }
     sessionMode = mode
-    if (mode === 'measurement') {
+    probePlanKind = mode === 'probe' ? nextProbePlanKind : null
+    if (mode === 'probe' && !probePlanKind) {
+      stage.value = 'error'
+      message.value = 'A diagnostic probe plan is required.'
+      return
+    }
+    validationActive.value = mode === 'validation'
+    if (mode === 'measurement' || mode === 'probe') {
       analysis.value = null
-      if (retryGroups && retryGroups.length > 0) {
+      if (mode === 'measurement' && retryGroups && retryGroups.length > 0) {
         const retryKeys = new Set(retryGroups.map((group) => measurementGroupKey(group)))
         records.value = records.value.filter((record) => !retryKeys.has(measurementGroupKey(record.context)))
       } else {
         records.value = []
       }
-      if (retryGroups && retryGroups.length > 0) rebuildAggregates()
+      if (mode === 'measurement' && retryGroups && retryGroups.length > 0) rebuildAggregates()
       else {
         aggregateLeft.value = null
         aggregateRight.value = null
@@ -485,16 +540,19 @@ export function useCalibrationSession(connection: Connection) {
       validationAggregateRight.value = null
     }
     captureDiagnostics.value = null
+    failedTakeDiagnostics.value = []
     captureInfo.value = null
-    retriedGroups.clear()
+    captureMetadata.value = null
     plan = mode === 'validation'
       ? createMeasurementPlanForGroups([
           { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'left' },
           { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'right' },
         ], 'validation')
-      : retryGroups && retryGroups.length > 0
-        ? createMeasurementPlanForGroups(retryGroups)
-        : createMeasurementPlan()
+      : mode === 'probe'
+        ? createProbeMeasurementPlan(probePlanKind as ProbePlanKind)
+        : retryGroups && retryGroups.length > 0
+          ? createMeasurementPlanForGroups(retryGroups)
+          : createMeasurementPlan()
     progress.value = { current: 0, total: plan.length }
     estimatedRemainingSeconds.value = null
     planIndex = 0
@@ -514,7 +572,8 @@ export function useCalibrationSession(connection: Connection) {
       connection.send('calibrationSession.begin', {
         sessionId,
         channel: 'both',
-        phase: mode,
+        phase: mode === 'validation' ? 'validation' : 'measurement',
+        ...(mode === 'validation' && candidateId ? { candidateId } : {}),
       })
       armSessionKeepAlive()
     } catch (error: unknown) {
@@ -530,8 +589,12 @@ export function useCalibrationSession(connection: Connection) {
     void startMode('measurement')
   }
 
-  function startValidation() {
-    void startMode('validation')
+  function startValidation(candidateId: string) {
+    void startMode('validation', null, candidateId)
+  }
+
+  function startProbe(kind: ProbePlanKind) {
+    void startMode('probe', null, null, kind)
   }
 
   function retryFailedGroups() {
@@ -556,7 +619,7 @@ export function useCalibrationSession(connection: Connection) {
         connection.send('calibrationSession.loudness.start', { sessionId })
         return
       }
-      if (loudnessComplete || sessionMode === 'validation') prepareNextContext()
+      if (loudnessComplete || sessionMode === 'validation' || sessionMode === 'probe') prepareNextContext()
       return
     }
     const wanted = plan[planIndex]
@@ -588,12 +651,58 @@ export function useCalibrationSession(connection: Connection) {
       const sampleRate = recording.diagnostics.sampleRate > 0
         ? recording.diagnostics.sampleRate
         : currentSweep.sampleRate
+      if (captureMetadata.value) {
+        captureMetadata.value = {
+          ...captureMetadata.value,
+          sampleRate,
+          channelCount: recording.diagnostics.channelCount,
+          trackSampleRate: captureMetadata.value.trackSampleRate ?? captureMetadata.value.sampleRate,
+          trackChannelCount: captureMetadata.value.trackChannelCount ?? captureMetadata.value.channelCount,
+        }
+      }
       if (!currentProfile) throw new Error('Microphone calibration profile is unavailable.')
       const result = await analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile)
       if (sessionId !== operationSessionId || disposed || stage.value !== 'analyzing') return
+      const nextProgress = { current: progress.value.current + 1, total: progress.value.total }
+      const diagnostics: MeasurementDiagnosticsValues = {
+        analysisStatus: result.status,
+        failureReason: result.diagnostics.failureReason,
+        signalRms: result.diagnostics.signalRms,
+        signalPeak: result.diagnostics.signalPeak,
+        snrEstimateDb: Number.isFinite(result.diagnostics.snrEstimateDb ?? Number.NaN) ? result.diagnostics.snrEstimateDb : null,
+        detectionOffsetMs: Number.isFinite(result.diagnostics.detectionOffsetMs ?? Number.NaN) ? result.diagnostics.detectionOffsetMs : null,
+        envelopeOnlyOffsetMs: Number.isFinite(result.diagnostics.envelopeOnlyOffsetMs ?? Number.NaN) ? result.diagnostics.envelopeOnlyOffsetMs : null,
+        syncMarkerConfidence: result.diagnostics.detectionConfidence,
+        endingMarkerConfidence: result.diagnostics.endingMarkerConfidence,
+        clockDriftPpm: Number.isFinite(result.diagnostics.clockDriftPpm ?? Number.NaN) ? result.diagnostics.clockDriftPpm : null,
+        clipped: result.diagnostics.clipped,
+        clippedSamples: result.diagnostics.clippedSamples,
+        directArrivalMs: result.room?.directArrivalMs ?? null,
+        directToLateDb: result.room?.directToLateDb ?? null,
+        c50Db: result.room?.c50Db ?? null,
+        c80Db: result.room?.c80Db ?? null,
+        edtMs: result.room?.edtMs ?? null,
+        t20Ms: result.room?.t20Ms ?? null,
+        t30Ms: result.room?.t30Ms ?? null,
+        earlyReflections: result.room?.earlyReflections.length ?? 0,
+        decayConfidence: result.room?.decayConfidence ?? 'low',
+        ...(captureMetadata.value ? { captureMetadata: captureMetadata.value } : {}),
+      }
+      connection.send('measurement.diagnostics', {
+        sessionId: operationSessionId,
+        context: currentContext,
+        current: nextProgress.current,
+        total: nextProgress.total,
+        diagnostics,
+      })
       if (result.status !== 'ok') {
-        if (invalidAttempts < 2) {
-          invalidAttempts++
+        failedTakeDiagnostics.value = [
+          ...failedTakeDiagnostics.value,
+          { context: currentContext, diagnostics },
+        ]
+        const invalidDecision = decideInvalidTake(invalidAttempts)
+        if (invalidDecision.kind === 'retry') {
+          invalidAttempts = invalidDecision.nextAttempts
           message.value = `This sweep was rejected (${result.status.replaceAll('_', ' ')}). Repeating it…`
           sendPrepare(currentContext)
           return
@@ -612,34 +721,6 @@ export function useCalibrationSession(connection: Connection) {
         return
       }
       invalidAttempts = 0
-      const nextProgress = { current: progress.value.current + 1, total: progress.value.total }
-      const diagnostics: MeasurementDiagnosticsValues = {
-        signalRms: result.diagnostics.signalRms,
-        signalPeak: result.diagnostics.signalPeak,
-        snrEstimateDb: Number.isFinite(result.diagnostics.snrEstimateDb ?? Number.NaN) ? result.diagnostics.snrEstimateDb : null,
-        detectionOffsetMs: Number.isFinite(result.diagnostics.detectionOffsetMs ?? Number.NaN) ? result.diagnostics.detectionOffsetMs : null,
-        syncMarkerConfidence: result.diagnostics.detectionConfidence,
-        endingMarkerConfidence: result.diagnostics.endingMarkerConfidence,
-        clockDriftPpm: Number.isFinite(result.diagnostics.clockDriftPpm ?? Number.NaN) ? result.diagnostics.clockDriftPpm : null,
-        clipped: result.diagnostics.clipped,
-        clippedSamples: result.diagnostics.clippedSamples,
-        directArrivalMs: result.room?.directArrivalMs ?? null,
-        directToLateDb: result.room?.directToLateDb ?? null,
-        c50Db: result.room?.c50Db ?? null,
-        c80Db: result.room?.c80Db ?? null,
-        edtMs: result.room?.edtMs ?? null,
-        t20Ms: result.room?.t20Ms ?? null,
-        t30Ms: result.room?.t30Ms ?? null,
-        earlyReflections: result.room?.earlyReflections.length ?? 0,
-        decayConfidence: result.room?.decayConfidence ?? 'low',
-      }
-      connection.send('measurement.diagnostics', {
-        sessionId: operationSessionId,
-        context: currentContext,
-        current: nextProgress.current,
-        total: nextProgress.total,
-        diagnostics,
-      })
       if (sessionMode === 'validation') {
         validationAnalysis.value = result
         validationRecords.value = [...validationRecords.value, { context: currentContext, analysis: result }]
@@ -649,7 +730,7 @@ export function useCalibrationSession(connection: Connection) {
       }
       progress.value = nextProgress
       const addedThirdTake = maybeScheduleThirdTake(currentContext)
-      const finalGroupSummary = sessionMode === 'measurement' && currentContext.takeIndex === 2
+      const finalGroupSummary = (sessionMode === 'measurement' || sessionMode === 'probe') && currentContext.takeIndex === 2
         ? calculateRepeatability(groupRecords(currentContext))
         : null
       const finalGroupNotice = finalGroupSummary && !finalGroupSummary.passed
@@ -738,14 +819,19 @@ export function useCalibrationSession(connection: Connection) {
       profile = null
       activeContext.value = null
       preparedContext = null
+      validationActive.value = false
       estimatedRemainingSeconds.value = null
       stage.value = hadAnalysis ? 'complete' : 'idle'
       message.value = hadAnalysis
         ? sessionMode === 'validation'
           ? 'Validation complete. Compare the measured result with the original response.'
-          : repeatabilityPassed.value
-            ? 'Advanced measurement complete. Review the response and room metrics below.'
-            : `Calibration failed. Measurements were not repeatable at ${repeatabilityFailureMessage(failedRepeatabilityGroups.value)}.`
+          : sessionMode === 'probe'
+            ? probeRepeatabilityPassed.value
+              ? 'Diagnostic probe complete. Export the captured response before changing the curve.'
+              : `Diagnostic probe repeatability is inconclusive at ${repeatabilityFailureMessage(probeFailedRepeatabilityGroups.value)}.`
+            : repeatabilityPassed.value
+              ? 'Advanced measurement complete. Review the response and room metrics below.'
+              : `Calibration failed. Measurements were not repeatable at ${repeatabilityFailureMessage(failedRepeatabilityGroups.value)}.`
         : 'Calibration cancelled.'
     }
   }
@@ -754,6 +840,7 @@ export function useCalibrationSession(connection: Connection) {
 
   function cancel() {
     if (!sessionId) {
+      validationActive.value = false
       stage.value = 'idle'
       message.value = 'Calibration cancelled.'
       return
@@ -769,6 +856,7 @@ export function useCalibrationSession(connection: Connection) {
     profile = null
     activeContext.value = null
     preparedContext = null
+    validationActive.value = false
     estimatedRemainingSeconds.value = null
     stage.value = 'idle'
     message.value = 'Calibration cancelled.'
@@ -787,11 +875,13 @@ export function useCalibrationSession(connection: Connection) {
     profile = null
     activeContext.value = null
     preparedContext = null
+    validationActive.value = false
     estimatedRemainingSeconds.value = null
   })
 
   return {
     stage: readonly(stage),
+    validationActive: readonly(validationActive),
     message: readonly(message),
     analysis,
     validationAnalysis,
@@ -805,18 +895,25 @@ export function useCalibrationSession(connection: Connection) {
     repeatabilityPassed,
     repeatabilitySummaries: readonly(repeatabilitySummaries),
     failedRepeatabilityGroups: readonly(failedRepeatabilityGroups),
+    probeRepeatabilityPassed,
+    probeRepeatabilitySummaries: readonly(probeRepeatabilitySummaries),
+    probeFailedRepeatabilityGroups: readonly(probeFailedRepeatabilityGroups),
     currentPosition,
     currentChannel,
+    currentInstruction,
     progress: readonly(progress),
     estimatedRemainingSeconds: readonly(estimatedRemainingSeconds),
     captureDiagnostics,
+    failedTakeDiagnostics: readonly(failedTakeDiagnostics),
     captureInfo,
+    captureMetadata: readonly(captureMetadata),
     profiles: readonly(profiles),
     selectedProfileId,
     profileError: readonly(profileError),
     loadProfiles,
     start,
     startValidation,
+    startProbe,
     retryFailedGroups,
     confirmLoudness: () => {
       if (stage.value !== 'loudness' || !sessionId || loudnessComplete) return

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   interpolateLogResponseDb,
   micCompensationDbAtHz,
+  isMicCalibrationProfileEligibleForCorrection,
   parseMicCalibrationProfile,
   micTrustWeightAtHz,
 } from './profile'
@@ -23,6 +24,7 @@ function makeProfile(points = [
     referenceType: 'unknown',
     sourceSmoothing: 'none',
     capturePath: 'test capture path',
+    capturePathStatus: 'validated',
     dataMethod: 'published-data',
     normalizeAtHz: 1_000,
     referenceMicrophone: 'test reference',
@@ -85,5 +87,14 @@ describe('microphone profile math', () => {
     expect(Math.abs(micCompensationDbAtHz(syntheticProfile, 9_000))).toBeLessThanOrEqual(2)
     expect(Math.abs(micCompensationDbAtHz(syntheticProfile, 11_000))).toBeLessThanOrEqual(1)
     expect(micCompensationDbAtHz(syntheticProfile, 13_000)).toBeCloseTo(0, 6)
+  })
+
+  test('keeps unvalidated capture paths diagnostic-only', () => {
+    expect(isMicCalibrationProfileEligibleForCorrection(profile)).toBe(true)
+    const unvalidated = parseMicCalibrationProfile({
+      ...profile,
+      capturePathStatus: 'unvalidated',
+    })
+    expect(isMicCalibrationProfileEligibleForCorrection(unvalidated)).toBe(false)
   })
 })

@@ -3,7 +3,7 @@ import type { MicCalibrationProfile } from '../mics/types'
 import type { AggregateResponse, PositionResponse } from '../measurement/aggregation'
 import type { ResponsePoint } from '../measurement/response'
 import { smoothResponsePoints } from '../measurement/response'
-import { detectLfExtensionHz, targetPointsFor } from './target'
+import { detectLfCapability, targetPointsFor, type LfCapability } from './target'
 
 export type CorrectionStrength = 'off' | 'gentle' | 'normal' | 'strong'
 
@@ -17,7 +17,11 @@ export interface CorrectionOptions {
 export interface CorrectionResult {
   correction: ResponsePoint[]
   target: ResponsePoint[]
+  lfCapability: LfCapability
   lfExtensionHz: number
+  lfExtension3DbHz: number
+  lfExtension6DbHz: number
+  lfExtensionConfidence: number
   maxCutDb: number
   maxBoostDb: number
   headroomDb: number
@@ -96,13 +100,13 @@ function buildHardBoostSafetyMask(
   rawError: readonly ResponsePoint[],
   micProfile: MicCalibrationProfile,
   options: CorrectionOptions,
-  lfExtensionHz: number,
+  lfCapability: LfCapability,
 ): boolean[] {
   return aggregate.points.map((measuredPoint, index) => {
     const frequencyHz = measuredPoint.frequencyHz
     const spread = aggregate.spreadDb[index]?.magnitudeDb ?? 4
     if (options.headroomVerified !== true || spread > 2 || spatialConfidence(spread) <= 0) return false
-    if (frequencyHz < lfExtensionHz || micTrustWeightAtHz(micProfile, frequencyHz) <= 0) return false
+    if (frequencyHz <= lfCapability.minus6Db.frequencyHz || micTrustWeightAtHz(micProfile, frequencyHz) <= 0) return false
     const start = Math.max(0, index - 2)
     const end = Math.min(aggregate.points.length, index + 3)
     const neighborhood = rawError.slice(start, Math.min(rawError.length, end))
@@ -141,14 +145,15 @@ export function calculateCorrection(
   const strength = STRENGTH[options.strength ?? 'normal']
   const maxCut = Math.abs(options.maxCutDb ?? 9)
   const maxBoost = options.headroomVerified ? Math.abs(options.maxBoostDb ?? 3) : 0
-  const lfExtensionHz = detectLfExtensionHz(aggregate.points)
-  const target = targetPointsFor(aggregate.points, lfExtensionHz)
+  const lfCapability = detectLfCapability(aggregate.points)
+  const lfExtensionHz = lfCapability.minus3Db.frequencyHz
+  const target = targetPointsFor(aggregate.points, lfCapability)
   const rawError = aggregate.points.map((point, index) => ({
     frequencyHz: point.frequencyHz,
     magnitudeDb: target[index].magnitudeDb - point.magnitudeDb,
   }))
   const broadError = smoothError(rawError)
-  const hardBoostSafetyMask = buildHardBoostSafetyMask(aggregate, rawError, micProfile, options, lfExtensionHz)
+  const hardBoostSafetyMask = buildHardBoostSafetyMask(aggregate, rawError, micProfile, options, lfCapability)
   const spatialCutLimits = aggregate.points.map((_, index) => maxCut * spatialConfidence(aggregate.spreadDb[index]?.magnitudeDb ?? 4))
   let correction = broadError.map((point, index) => {
     const frequencyHz = point.frequencyHz
@@ -175,7 +180,18 @@ export function calculateCorrection(
   const maxCutDb = Math.min(...gains)
   const maxBoostDb = Math.max(...gains)
   const headroomDb = maxBoostDb > 0 ? -(maxBoostDb + 0.5) : 0
-  return { correction, target, lfExtensionHz, maxCutDb, maxBoostDb, headroomDb }
+  return {
+    correction,
+    target,
+    lfCapability,
+    lfExtensionHz,
+    lfExtension3DbHz: lfCapability.minus3Db.frequencyHz,
+    lfExtension6DbHz: lfCapability.minus6Db.frequencyHz,
+    lfExtensionConfidence: Math.min(lfCapability.minus3Db.confidence, lfCapability.minus6Db.confidence),
+    maxCutDb,
+    maxBoostDb,
+    headroomDb,
+  }
 }
 
 export function combineChannelAggregates(
@@ -205,8 +221,13 @@ export function combineChannelAggregates(
           frequencyHz: point.frequencyHz,
           magnitudeDb: leftPosition && rightPosition
             ? (point.magnitudeDb + (rightPosition.points[index]?.magnitudeDb ?? point.magnitudeDb)) / 2
-            : point.magnitudeDb,
+          : point.magnitudeDb,
         })),
+        broadbandLevelDb: leftPosition && rightPosition
+          ? (leftPosition.broadbandLevelDb !== null && rightPosition.broadbandLevelDb !== null
+            ? (leftPosition.broadbandLevelDb + rightPosition.broadbandLevelDb) / 2
+            : null)
+          : source.broadbandLevelDb,
       }
     })
     .filter((value): value is PositionResponse => value !== null)
@@ -235,14 +256,33 @@ export function combineChannelAggregates(
     records: [...left.records, ...right.records],
     repeatability: [...left.repeatability, ...right.repeatability],
     failedGroups: [...left.failedGroups, ...right.failedGroups],
+    broadbandLevelDb: left.broadbandLevelDb !== null && right.broadbandLevelDb !== null
+      ? (left.broadbandLevelDb + right.broadbandLevelDb) / 2
+      : null,
+    relativeChannelLevelDb: left.broadbandLevelDb !== null && right.broadbandLevelDb !== null
+      ? left.broadbandLevelDb - right.broadbandLevelDb
+      : null,
   }
 }
 
 export function targetErrorRms(points: readonly ResponsePoint[], target = targetPointsFor(points)): number {
   if (points.length === 0) return 0
+  const targetAtFrequency = (frequencyHz: number, index: number): number => {
+    const indexed = target[index]
+    if (indexed?.frequencyHz === frequencyHz) return indexed.magnitudeDb
+    if (frequencyHz <= (target[0]?.frequencyHz ?? frequencyHz)) return target[0]?.magnitudeDb ?? 0
+    for (let cursor = 1; cursor < target.length; cursor++) {
+      const lower = target[cursor - 1]
+      const upper = target[cursor]
+      if (!lower || !upper || frequencyHz > upper.frequencyHz) continue
+      const fraction = Math.log(frequencyHz / lower.frequencyHz) / Math.log(upper.frequencyHz / lower.frequencyHz)
+      return lower.magnitudeDb + (upper.magnitudeDb - lower.magnitudeDb) * fraction
+    }
+    return target[target.length - 1]?.magnitudeDb ?? 0
+  }
   const weighted = points.reduce((sum, point, index) => {
     const weight = point.frequencyHz <= 8_000 ? 1 : 0.25
-    return sum + weight * (target[index].magnitudeDb - point.magnitudeDb) ** 2
+    return sum + weight * (targetAtFrequency(point.frequencyHz, index) - point.magnitudeDb) ** 2
   }, 0)
   const weights = points.reduce((sum, point) => sum + (point.frequencyHz <= 8_000 ? 1 : 0.25), 0)
   return Math.sqrt(weighted / Math.max(weights, 1))

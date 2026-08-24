@@ -1,7 +1,7 @@
 import type { MeasurementContext } from '#shared/types/protocol'
 import type { MeasurementAnalysis, ResponsePoint } from './response'
 import type { CalibrationPositionId } from '#shared/types/protocol'
-import { measurementGroupForContext, measurementGroupKey } from './plan'
+import { MAX_REPEAT_COUNT, measurementGroupForContext, measurementGroupKey } from './plan'
 
 // Keep the domain name local to this module; the shared protocol calls it CalibrationChannel.
 export type MeasurementChannel = 'left' | 'right' | 'both'
@@ -33,6 +33,8 @@ export interface PositionResponse {
   positionCount: number
   channel: MeasurementChannel
   points: ResponsePoint[]
+  /** Relative broadband level in the recorder's arbitrary linear scale. */
+  broadbandLevelDb: number | null
 }
 
 export interface AggregateResponse {
@@ -43,7 +45,22 @@ export interface AggregateResponse {
   records: MeasurementRecord[]
   repeatability: RepeatabilitySummary[]
   failedGroups: RepeatabilitySummary[]
+  /** Robust broadband level; never presented as calibrated SPL. */
+  broadbandLevelDb: number | null
+  /** Left minus right broadband level when both channels are combined. */
+  relativeChannelLevelDb: number | null
 }
+
+export type AdaptiveTakeDecision =
+  | { kind: 'not-eligible' }
+  | { kind: 'no-third'; summary: RepeatabilitySummary }
+  | { kind: 'schedule-third'; summary: RepeatabilitySummary }
+
+export type InvalidTakeDecision =
+  | { kind: 'retry'; nextAttempts: number }
+  | { kind: 'terminal' }
+
+export const MAX_INVALID_TAKE_RETRIES = 2
 
 function median(values: number[]): number {
   const sorted = [...values].sort((left, right) => left - right)
@@ -54,6 +71,16 @@ function median(values: number[]): number {
   if (sorted.length % 2 !== 0) return current
   const previous = sorted[middle - 1]
   return previous === undefined ? current : (previous + current) / 2
+}
+
+function broadbandLevelDb(record: MeasurementRecord): number | null {
+  const signalRms = record.analysis.diagnostics.signalRms
+  return signalRms > 0 && Number.isFinite(signalRms) ? 20 * Math.log10(signalRms) : null
+}
+
+function medianFinite(values: readonly (number | null | undefined)[]): number | null {
+  const finite = values.filter((value): value is number => value !== null && value !== undefined && Number.isFinite(value))
+  return finite.length > 0 ? median(finite) : null
 }
 
 function interpolateLog(points: readonly ResponsePoint[], frequencyHz: number): number {
@@ -198,12 +225,36 @@ function summarizeGroup(records: readonly MeasurementRecord[]): GroupAggregation
         frequencyHz,
         magnitudeDb: median(adjudicated.records.map((record) => interpolateLog(record.analysis.correctedPoints, frequencyHz))),
       })),
+      broadbandLevelDb: medianFinite(adjudicated.records.map(broadbandLevelDb)),
     },
   }
 }
 
 export function calculateRepeatability(records: readonly MeasurementRecord[]): RepeatabilitySummary | null {
   return summarizeGroup(records)?.summary ?? null
+}
+
+export function decideAdaptiveTake(
+  records: readonly MeasurementRecord[],
+  context: MeasurementContext,
+): AdaptiveTakeDecision {
+  if (context.takeIndex !== 1) return { kind: 'not-eligible' }
+  const key = measurementGroupKey(context)
+  const groupRecords = records.filter((record) => measurementGroupKey(record.context) === key)
+  if (groupRecords.some((record) => record.context.takeIndex >= MAX_REPEAT_COUNT - 1)) {
+    return { kind: 'not-eligible' }
+  }
+  const summary = calculateRepeatability(groupRecords)
+  if (!summary) return { kind: 'not-eligible' }
+  return summary.passed
+    ? { kind: 'no-third', summary }
+    : { kind: 'schedule-third', summary }
+}
+
+export function decideInvalidTake(attempts: number): InvalidTakeDecision {
+  return attempts < MAX_INVALID_TAKE_RETRIES
+    ? { kind: 'retry', nextAttempts: attempts + 1 }
+    : { kind: 'terminal' }
 }
 
 function combinePositionResponses(
@@ -217,13 +268,22 @@ function combinePositionResponses(
     else byPosition.set(response.positionId, [response])
   }
   return [...byPosition.values()]
-    .filter((positionResponses) => channel !== 'both' || positionResponses.length === 2)
+    .filter((positionResponses) => {
+      if (channel !== 'both') return true
+      if (positionResponses.some((response) => response.channel === 'both')) {
+        return positionResponses.some((response) => response.channel === 'both')
+      }
+      return positionResponses.length === 2
+    })
     .map((positionResponses) => {
-    const first = positionResponses[0]
+    const candidates = positionResponses.some((response) => response.channel === 'both')
+      ? positionResponses.filter((response) => response.channel === 'both')
+      : positionResponses
+    const first = candidates[0]
     if (!first) throw new Error('Position response group cannot be empty.')
     const points = first.points.map((point) => ({
       frequencyHz: point.frequencyHz,
-      magnitudeDb: median(positionResponses.map((response) => interpolateLog(response.points, point.frequencyHz))),
+      magnitudeDb: median(candidates.map((response) => interpolateLog(response.points, point.frequencyHz))),
     }))
     return {
       positionId: first.positionId,
@@ -231,6 +291,7 @@ function combinePositionResponses(
       positionCount: first.positionCount,
       channel,
       points,
+      broadbandLevelDb: medianFinite(candidates.map((response) => response.broadbandLevelDb)),
     }
     })
 }
@@ -259,7 +320,6 @@ export function aggregateResponse(
   const groups = new Map<string, MeasurementRecord[]>()
   for (const record of filtered) {
     const group = measurementGroupForContext(record.context)
-    if (!group) continue
     const key = measurementGroupKey(group)
     const existing = groups.get(key)
     if (existing) existing.push(record)
@@ -282,6 +342,8 @@ export function aggregateResponse(
     records: filtered,
     repeatability,
     failedGroups: repeatability.filter((summary) => !summary.passed),
+    broadbandLevelDb: medianFinite(positionResponses.map((response) => response.broadbandLevelDb)),
+    relativeChannelLevelDb: null,
   }
 }
 

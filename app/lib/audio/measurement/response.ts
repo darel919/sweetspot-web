@@ -13,6 +13,11 @@ import {
 } from './impulse'
 import { fftInPlace, nextPowerOfTwo } from './fft'
 
+/** Expected recorder/TV clock mismatch is normally within 250 ppm. */
+export const CLOCK_DRIFT_WARNING_PPM = 250
+/** Larger mismatch is retained for diagnosis, but not accepted for analysis. */
+export const CLOCK_DRIFT_HARD_REJECT_PPM = 1_000
+
 export interface ResponsePoint {
   frequencyHz: number
   magnitudeDb: number
@@ -23,10 +28,15 @@ export interface SweepDetection {
   startSample: number | null
   leadingMarkerSample: number | null
   trailingMarkerSample: number | null
+  /** Recorder-timeline estimate used only to diagnose a missing marker pair. */
+  envelopeOnlyOffsetMs: number | null
+  /** Recorder-timeline offset from an accepted marker pair. */
   offsetMs: number | null
   confidence: number
   endingMarkerConfidence: number
+  /** Recorded samples per nominal TV sample, estimated from marker separation. */
   clockRatio: number | null
+  /** (clockRatio - 1) * 1e6; recorder clock drift relative to the TV. */
   driftPpm: number | null
   failureReason: 'sync_marker_not_found' | 'clock_drift_unreliable' | null
 }
@@ -38,6 +48,8 @@ export interface MeasurementAnalysisDiagnostics {
   detected: boolean
   /** Where the recorded sweep envelope was found inside the browser capture. */
   detectionOffsetMs: number | null
+  /** Diagnostic-only envelope estimate. It can never authorize deconvolution. */
+  envelopeOnlyOffsetMs: number | null
   detectionConfidence: number
   endingMarkerConfidence: number
   clockDriftPpm: number | null
@@ -161,6 +173,7 @@ function emptySweepDetection(failureReason: SweepDetection['failureReason'] = 's
     startSample: null,
     leadingMarkerSample: null,
     trailingMarkerSample: null,
+    envelopeOnlyOffsetMs: null,
     offsetMs: null,
     confidence: 0,
     endingMarkerConfidence: 0,
@@ -261,7 +274,7 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       endingMarkerConfidence: trailingConfidence,
     }
   }
-  if (!Number.isFinite(clockRatio) || Math.abs(driftPpm) > 5_000) {
+  if (!Number.isFinite(clockRatio) || Math.abs(driftPpm) > CLOCK_DRIFT_HARD_REJECT_PPM) {
     return {
       ...emptySweepDetection('clock_drift_unreliable'),
       leadingMarkerSample: best.leading,
@@ -317,7 +330,7 @@ export function detectSweepStart(
   const fallbackStartSample = detectEnvelopeStart(samples, sweep, sampleRate)
   return {
     ...markerDetection,
-    offsetMs: fallbackStartSample === null ? null : fallbackStartSample * 1000 / sampleRate,
+    envelopeOnlyOffsetMs: fallbackStartSample === null ? null : fallbackStartSample * 1000 / sampleRate,
   }
 }
 
@@ -400,6 +413,7 @@ export function analyzeMeasurement(
   const baseDiagnostics: MeasurementAnalysisDiagnostics = {
     detected: detection.found,
     detectionOffsetMs: detection.offsetMs,
+    envelopeOnlyOffsetMs: detection.envelopeOnlyOffsetMs,
     detectionConfidence: detection.confidence,
     endingMarkerConfidence: detection.endingMarkerConfidence,
     clockDriftPpm: detection.driftPpm,

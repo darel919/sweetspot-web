@@ -6,7 +6,8 @@ const props = defineProps<{
   stage: CalibrationStage
   message: string
   currentPosition: CalibrationPosition | null
-  currentChannel: 'left' | 'right' | null
+  currentChannel: 'left' | 'right' | 'both' | null
+  currentInstruction: string | null
   progress: { current: number; total: number }
   estimatedRemainingSeconds: number | null
 }>()
@@ -51,9 +52,11 @@ function stageLabel(stage: CalibrationStage): string {
       </div>
 
       <p v-if="props.currentPosition" class="calibration-position">
-        {{ props.currentPosition.label }}<span v-if="props.currentChannel"> · {{ props.currentChannel }} channel</span>
+        {{ props.currentPosition.label }}<span v-if="props.currentChannel"> · {{ props.currentChannel === 'both' ? 'both channels' : props.currentChannel + ' channel' }}</span>
       </p>
-      <p v-if="props.currentPosition" class="calibration-instruction">{{ props.currentPosition.instruction }}</p>
+      <p v-if="props.currentInstruction ?? props.currentPosition" class="calibration-instruction">
+        {{ props.currentInstruction ?? props.currentPosition?.instruction }}
+      </p>
       <p v-if="props.message" class="calibration-message" aria-live="polite">{{ props.message }}</p>
 
       <div class="calibration-actions">

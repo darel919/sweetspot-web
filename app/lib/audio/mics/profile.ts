@@ -1,6 +1,7 @@
 import type {
   MicCalibrationPoint,
   MicCalibrationProfile,
+  MicCapturePathStatus,
   MicCalibrationSummary,
 } from './types'
 
@@ -29,6 +30,12 @@ function requiredBoolean(value: Record<string, unknown>, key: string): boolean {
   const candidate = value[key]
   if (typeof candidate !== 'boolean') throw new Error(`Microphone profile requires ${key}`)
   return candidate
+}
+
+function requiredCapturePathStatus(value: Record<string, unknown>): MicCapturePathStatus {
+  const candidate = value.capturePathStatus
+  if (candidate === 'validated' || candidate === 'provisional' || candidate === 'unvalidated') return candidate
+  throw new Error('Microphone profile capturePathStatus is invalid')
 }
 
 function readPoint(value: unknown): MicCalibrationPoint {
@@ -98,6 +105,7 @@ export function parseMicCalibrationProfile(input: unknown): MicCalibrationProfil
     referenceType,
     sourceSmoothing: requiredString(input, 'sourceSmoothing'),
     capturePath: requiredString(input, 'capturePath'),
+    capturePathStatus: requiredCapturePathStatus(input),
     dataMethod,
     normalizeAtHz,
     referenceMicrophone: requiredString(input, 'referenceMicrophone'),
@@ -112,6 +120,10 @@ export function parseMicCalibrationProfile(input: unknown): MicCalibrationProfil
     points,
     trust: readTrust(input),
   }
+}
+
+export function isMicCalibrationProfileEligibleForCorrection(profile: MicCalibrationProfile): boolean {
+  return profile.capturePathStatus === 'validated'
 }
 
 export function interpolateLogResponseDb(profile: MicCalibrationProfile, frequencyHz: number): number {
@@ -173,6 +185,7 @@ export function summarizeMicCalibrationProfile(profile: MicCalibrationProfile): 
     sourceDate: profile.sourceDate,
     referenceType: profile.referenceType,
     capturePath: profile.capturePath,
+    capturePathStatus: profile.capturePathStatus,
     dataMethod: profile.dataMethod,
   }
 }

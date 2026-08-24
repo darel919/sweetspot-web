@@ -48,6 +48,7 @@
           :measurement-current-position="measurementCurrentPosition"
           :measurement-progress="measurementProgress"
           :measurement-capture-info="measurementCaptureInfo"
+          :measurement-failed-diagnostics="measurementFailedDiagnostics"
           :measurement-profiles="measurementProfiles"
           :measurement-selected-profile-id="measurementSelectedProfileId"
           :measurement-profile-error="measurementProfileError"
@@ -56,8 +57,11 @@
           :correction-strength-options="correctionStrengthOptions"
           :correction-pending="correctionPending"
           :calibration-applied="calibrationApplied"
-          :rollback-available="rollbackState !== null"
+          :rollback-available="candidateTransaction !== null"
           :validation-worse="validationWorse"
+          :candidate-pending="candidateTransaction !== null"
+          :candidate-validation-status="candidateTransaction?.validationStatus ?? null"
+          :validation-ready="validationReady"
           :cal-json="calJson"
           :cal-status="calStatus"
           :validation-metrics="validationMetrics"
@@ -74,6 +78,7 @@
           @apply-calibration="applyCalibration"
           @reset-calibration="resetCalibration"
           @rollback-calibration="rollbackCalibration"
+          @accept-candidate="acceptCandidate"
         />
 
         <ConnectDiagnosticsSection
@@ -82,17 +87,25 @@
           :probe="probe"
           :probe-pending="probePending"
           :persistent-state="persistentState"
-          :persist-bands="persistBands"
+          :probe-band="probeBand"
+          :probe-gain-db="probeGainDb"
+          :probe-lab-pending="probeLabPending"
+          :probe-lab-message="probeLabMessage"
+          :probe-evidence="probeEvidence"
           :virtualizer-on="virtualizerOn"
           :device-info="deviceInfo"
           :dev-info-pending="devInfoPending"
           @run-effects-diagnostics="runEffectsDiagnostics"
           @run-capacity-probe="runCapacityProbe"
-          @set-persist-bands="persistBands = $event"
+          @set-probe-band="probeBand = $event"
+          @set-probe-gain-db="probeGainDb = $event"
           @create-persistent="createPersistent"
           @release-persistent="releasePersistent"
           @apply-test-curve="applyTestCurve"
-          @quick-audible="quickAudible"
+          @capture-transfer-probe="captureTransferProbe"
+          @run-routing-probe="runRoutingProbe"
+          @clear-probe-evidence="probeEvidence = []"
+          @export-probe-evidence="exportProbeEvidence"
           @set-virtualizer="setVirtualizer"
           @fetch-device-info="fetchDeviceInfo"
         />
@@ -118,6 +131,7 @@
       :message="measurementMessage"
       :current-position="measurementCurrentPosition"
       :current-channel="measurementCurrentChannel"
+      :current-instruction="measurementCurrentInstruction"
       :progress="measurementProgress"
       :estimated-remaining-seconds="measurementEstimatedRemainingSeconds"
       @confirm-loudness="confirmLoudness"
@@ -131,15 +145,19 @@
 import type {
   DeviceInfoPayload,
   EffectsDiagnostics,
-  OkReply,
   PersistentProbeState,
   PresetOption,
   ProbeDiagnostics,
   StateSnapshot,
+  CalibrationTransaction,
 } from '#shared/types/protocol'
+import { CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB, isStateSnapshot } from '#shared/types/protocol'
 import { calculateCorrection, combineChannelAggregates, targetErrorRms, type CorrectionStrength } from '~/lib/audio/correction/optimizer'
-import { mapCorrectionToBands } from '~/lib/audio/correction/bandMapper'
+import { mapCorrectionToBandsConservative } from '~/lib/audio/correction/bandMapper'
+import { targetPointsFor } from '~/lib/audio/correction/target'
+import { isMicCalibrationProfileEligibleForCorrection } from '~/lib/audio/mics/profile'
 import { shouldNotifyOffline } from '~/composables/connectionState'
+import { useScreenWakeLock } from '~/composables/useScreenWakeLock'
 import { onMounted, onScopeDispose, watch } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import '~/components/connect/connect.css'
@@ -162,6 +180,7 @@ import { EqCommandRevisionGate } from '~/lib/eq-command-revision'
 import type {
   CalibrationValidationMetrics,
   CorrectionStrengthOption,
+  ProbeCaptureEvidence,
   RecommendedCorrection,
 } from '~/components/connect/types'
 
@@ -183,21 +202,25 @@ const {
   aggregateRight: measurementAggregateRight,
   aggregateBoth: measurementAggregateBoth,
   validationAnalysis: measurementValidationAnalysis,
+  validationActive: measurementValidationActive,
   validationAggregateLeft: measurementValidationAggregateLeft,
   validationAggregateRight: measurementValidationAggregateRight,
   repeatabilityPassed: measurementRepeatabilityPassed,
   failedRepeatabilityGroups: measurementFailedGroups,
   currentPosition: measurementCurrentPosition,
   currentChannel: measurementCurrentChannel,
+  currentInstruction: measurementCurrentInstruction,
   progress: measurementProgress,
   estimatedRemainingSeconds: measurementEstimatedRemainingSeconds,
   captureInfo: measurementCaptureInfo,
+  failedTakeDiagnostics: measurementFailedDiagnostics,
   profiles: measurementProfiles,
   selectedProfileId: measurementSelectedProfileId,
   profileError: measurementProfileError,
   loadProfiles: loadMeasurementProfiles,
   start: startMeasurementSession,
   startValidation: startValidationSession,
+  startProbe: startProbeSession,
   retryFailedGroups,
   confirmLoudness,
   continuePosition: continueMeasurement,
@@ -205,6 +228,7 @@ const {
 } = useCalibrationSession(connection)
 const measurementBusy = computed(() => isCalibrationActiveStage(measurementStage.value))
 const calibrationLocked = measurementBusy
+const screenWakeLock = useScreenWakeLock()
 const toastMessage = ref('')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 let eqRevisionTimer: ReturnType<typeof setTimeout> | null = null
@@ -218,6 +242,7 @@ function preventCalibrationUnload(event: BeforeUnloadEvent) {
 
 function syncCalibrationLock(locked: boolean) {
   if (!import.meta.client) return
+  screenWakeLock.setActive(locked)
   if (locked && restoreScrollLock === null) {
     const bodyOverflow = document.body.style.overflow
     const documentOverflow = document.documentElement.style.overflow
@@ -258,7 +283,12 @@ const diagPending = ref(false)
 const probe = ref<ProbeDiagnostics | null>(null)
 const probePending = ref(false)
 const persistentState = ref<PersistentProbeState | null>(null)
-const persistBands = ref<number | string>(64)
+const probeBand = ref<number | string>(32)
+const probeGainDb = ref<number | string>(-6)
+const probeLabPending = ref(false)
+const probeLabMessage = ref('')
+const probeEvidence = ref<ProbeCaptureEvidence[]>([])
+const ROUTING_TEST_BANDS = [4, 20, 36, 52] as const
 
 const deviceInfo = ref<DeviceInfoPayload | null>(null)
 const devInfoPending = ref(false)
@@ -269,22 +299,12 @@ const calIsError = ref(false)
 const profileName = ref('')
 const correctionPending = ref(false)
 const calibrationApplied = ref(false)
-const rollbackState = ref<{
-  active: boolean
-  bandsDb: number[]
-  leftBandsDb?: number[]
-  rightBandsDb?: number[]
-} | null>(null)
 const correctionStrength = ref<CorrectionStrength>('normal')
 const correctionStrengthOptions: readonly CorrectionStrengthOption[] = [
   { id: 'gentle', label: 'Gentle' },
   { id: 'normal', label: 'Normal' },
   { id: 'strong', label: 'Strong' },
 ]
-
-type CalibrationApplyReply = OkReply & {
-  calibration?: { applicationError?: string | null }
-}
 
 function mappedCorrectionSummary(curves: readonly number[]): {
   maxCutDb: number
@@ -307,6 +327,8 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
   const bandCutoffs = currentSnapshot.calibration.frequenciesHz
   if (bandCutoffs.length !== 64) return null
   if (measurementStage.value !== 'complete' || !measurementRepeatabilityPassed.value) return null
+  if (currentSnapshot.capabilities.supportsCalibratedCorrection !== true) return null
+  if (!isMicCalibrationProfileEligibleForCorrection(profile)) return null
   const headroomVerified = currentSnapshot.capabilities.supportsHeadroomCompensation === true
   const independent = currentSnapshot.capabilities.supportsIndependentCalibration === true
     && measurementAggregateLeft.value !== null
@@ -322,8 +344,13 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
     strength: correctionStrength.value,
     headroomVerified,
   })
-  const commonBands = mapCorrectionToBands(common.correction, bandCutoffs)
-  const commonSummary = mappedCorrectionSummary(commonBands)
+  const commonBands = mapCorrectionToBandsConservative(common.correction, bandCutoffs)
+  const commonSummary = {
+    ...mappedCorrectionSummary(commonBands),
+    lfExtension3DbHz: common.lfExtension3DbHz,
+    lfExtension6DbHz: common.lfExtension6DbHz,
+    lfExtensionConfidence: common.lfExtensionConfidence,
+  }
   if (!independent || !measurementAggregateLeft.value || !measurementAggregateRight.value) {
     return {
       bandsDb: commonBands,
@@ -333,8 +360,8 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
   }
   const left = calculateCorrection(measurementAggregateLeft.value, profile, { strength: correctionStrength.value, headroomVerified })
   const right = calculateCorrection(measurementAggregateRight.value, profile, { strength: correctionStrength.value, headroomVerified })
-  const leftBandsDb = mapCorrectionToBands(left.correction, bandCutoffs)
-  const rightBandsDb = mapCorrectionToBands(right.correction, bandCutoffs)
+  const leftBandsDb = mapCorrectionToBandsConservative(left.correction, bandCutoffs)
+  const rightBandsDb = mapCorrectionToBandsConservative(right.correction, bandCutoffs)
   const channelSummary = mappedCorrectionSummary([...leftBandsDb, ...rightBandsDb])
   return {
     bandsDb: commonBands,
@@ -352,17 +379,76 @@ const validationAggregate = computed<AggregateResponse | null>(() => {
   return combineChannelAggregates(measurementValidationAggregateLeft.value, measurementValidationAggregateRight.value)
 })
 
+const validationBaselineReady = computed(() => {
+  const left = measurementAggregateLeft.value
+  const right = measurementAggregateRight.value
+  const center = measurementAggregateBoth.value?.positionResponses.find((response) => response.positionId === 'center')
+  return left !== null
+    && right !== null
+    && allRepeatabilityPassed(left)
+    && allRepeatabilityPassed(right)
+    && center !== undefined
+    && center.points.length >= 2
+})
+
 const validationMetrics = computed<CalibrationValidationMetrics | null>(() => {
+  if (!validationBaselineReady.value) return null
   const before = measurementAggregateBoth.value?.positionResponses.find((response) => response.positionId === 'center')
   const after = validationAggregate.value?.positionResponses.find((response) => response.positionId === 'center')
   if (!before || !after) return null
-  return { before: targetErrorRms(before.points), after: targetErrorRms(after.points) }
+  const target = targetPointsFor(before.points)
+  return { before: targetErrorRms(before.points, target), after: targetErrorRms(after.points, target) }
 })
 
 const validationWorse = computed(() => {
+  if (candidateTransaction.value?.validationStatus === 'worse') return true
   const metrics = validationMetrics.value
-  return metrics !== null && metrics.after > metrics.before + 0.5
+  return metrics !== null && metrics.after > metrics.before + CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB
 })
+
+const candidateTransaction = computed<Extract<CalibrationTransaction, { state: 'candidate_pending' }> | null>(() => {
+  const transaction = snapshot.value?.calibration.transaction
+  return transaction?.state === 'candidate_pending' ? transaction : null
+})
+
+const deviceValidationReady = computed(() => {
+  const current = snapshot.value
+  return current !== null
+    && current.calibration.active
+    && current.calibration.transaction.state === 'candidate_pending'
+    && current.calibration.transaction.validationStatus === 'pending'
+    && current.calibration.applicationVerified === true
+    && current.calibration.liveDspStatus === 'verified'
+    && current.calibration.headroomVerified === true
+})
+
+const validationReady = computed(() => validationBaselineReady.value && deviceValidationReady.value)
+
+const validationOutcome = computed(() => {
+  if (measurementStage.value !== 'complete' || !candidateTransaction.value) return null
+  if (candidateTransaction.value.validationStatus !== 'pending') return null
+  if (!measurementValidationAggregateLeft.value
+    || !measurementValidationAggregateRight.value
+    || !allRepeatabilityPassed(measurementValidationAggregateLeft.value)
+    || !allRepeatabilityPassed(measurementValidationAggregateRight.value)) {
+    return { status: 'inconclusive' as const, reason: 'Validation measurements were not repeatable.' }
+  }
+  const metrics = validationMetrics.value
+  if (!metrics || !Number.isFinite(metrics.before) || !Number.isFinite(metrics.after)) {
+    return { status: 'inconclusive' as const, reason: 'Validation metrics were unavailable.' }
+  }
+  return metrics.after > metrics.before + CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB
+    ? { status: 'worse' as const, beforeDb: metrics.before, afterDb: metrics.after }
+    : { status: 'passed' as const, beforeDb: metrics.before, afterDb: metrics.after }
+})
+
+const validationOutcomeKey = computed(() => {
+  const outcome = validationOutcome.value
+  if (!outcome || !candidateTransaction.value) return null
+  return JSON.stringify({ candidateId: candidateTransaction.value.candidateId, ...outcome })
+})
+let lastSentValidationOutcomeKey: string | null = null
+let validationResultInFlight = false
 
 onMounted(() => {
   void loadMeasurementProfiles().catch(() => undefined)
@@ -389,7 +475,9 @@ watch([status, deviceOnline], ([nextStatus, nextOnline], [previousStatus, previo
 onScopeDispose(() => {
   if (toastTimer !== null) clearTimeout(toastTimer)
   if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)
+  if (persistentState.value?.active) send('probe.persistent.release')
   syncCalibrationLock(false)
+  screenWakeLock.dispose()
 })
 
 onMessage((env) => {
@@ -400,7 +488,15 @@ onMessage((env) => {
     if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)
     eqRevisionTimer = null
   }
-  const next = env.payload as StateSnapshot
+  if (typeof env.payload === 'object' && env.payload !== null && 'ok' in env.payload && env.payload.ok === false) {
+    const error = 'error' in env.payload && typeof env.payload.error === 'string' ? env.payload.error : 'live DSP rejected the change'
+    showToast(`TV rejected the change: ${error}`)
+  }
+  if (!isStateSnapshot(env.payload)) {
+    showToast('The TV sent an invalid state snapshot. Calibration controls are paused.')
+    return
+  }
+  const next: StateSnapshot = env.payload
   if (JSON.stringify(next) === JSON.stringify(snapshot.value)) return
   snapshot.value = next
 })
@@ -409,10 +505,58 @@ const eqDraft = ref<number[]>([])
 
 watch(snapshot, (s) => {
   if (!s) return
+  calibrationApplied.value = s.calibration.active
   if (eqDraftRevision === eqSentRevision) eqDraft.value = [...s.userEq.bandsDb]
   if (!calJson.value.trim()) {
     calJson.value = JSON.stringify(s.calibration.bandsDb.map((v) => Math.round(v * 10) / 10))
   }
+})
+
+watch([measurementStage, validationOutcomeKey, deviceOnline], ([stage, outcomeKey]) => {
+  if (stage !== 'complete' || !outcomeKey || outcomeKey === lastSentValidationOutcomeKey || validationResultInFlight) return
+  const transaction = candidateTransaction.value
+  const outcome = validationOutcome.value
+  if (!transaction || !outcome) return
+  validationResultInFlight = true
+  const payload = outcome.status === 'passed' || outcome.status === 'worse'
+    ? {
+        candidateId: transaction.candidateId,
+        status: outcome.status,
+        beforeDb: outcome.beforeDb,
+        afterDb: outcome.afterDb,
+      }
+    : {
+        candidateId: transaction.candidateId,
+        status: outcome.status,
+        reason: outcome.reason,
+      }
+  void withTimeout(request('calibration.validation.result', payload), 15_000)
+    .then((result) => {
+      if (result && responseWasAccepted(result.payload)) lastSentValidationOutcomeKey = outcomeKey
+      else if (result) showToast('The TV rejected the validation result. It remains pending.')
+    })
+    .finally(() => {
+      validationResultInFlight = false
+    })
+})
+
+watch([measurementStage, measurementValidationActive, candidateTransaction, deviceOnline], ([stage, validationActive, transaction]) => {
+  if (stage !== 'error' || !validationActive || !transaction || validationResultInFlight) return
+  const outcomeKey = `${transaction.candidateId}:failed:${measurementMessage.value}`
+  if (outcomeKey === lastSentValidationOutcomeKey) return
+  validationResultInFlight = true
+  void withTimeout(request('calibration.validation.result', {
+    candidateId: transaction.candidateId,
+    status: 'failed',
+    reason: measurementMessage.value || 'Validation measurement failed.',
+  }), 15_000)
+    .then((result) => {
+      if (result && responseWasAccepted(result.payload)) lastSentValidationOutcomeKey = outcomeKey
+      else if (result) showToast('The TV rejected the validation result. It remains pending.')
+    })
+    .finally(() => {
+      validationResultInFlight = false
+    })
 })
 
 const presets = computed<PresetOption[]>(() => snapshot.value?.capabilities.presets ?? [])
@@ -477,7 +621,8 @@ function parseCurve(text: string): number[] | null {
   try {
     const arr = JSON.parse(text)
     if (!Array.isArray(arr) || arr.length !== 64) return null
-    return arr.map((v) => Number(v))
+    const values = arr.map((v) => Number(v))
+    return values.every(Number.isFinite) ? values : null
   } catch {
     return null
   }
@@ -487,59 +632,68 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
   return Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))])
 }
 
-function captureRollbackState() {
-  const calibration = snapshot.value?.calibration
-  const bandsDb = calibration?.requestedBandsDb ?? calibration?.bandsDb
-  if (!calibration || !bandsDb || bandsDb.length !== 64) return null
-  return {
-    active: calibration.active,
-    bandsDb: [...bandsDb],
-    ...(calibration.independent && (calibration.requestedLeftBandsDb ?? calibration.leftBandsDb)?.length === 64 && (calibration.requestedRightBandsDb ?? calibration.rightBandsDb)?.length === 64
-      ? {
-          leftBandsDb: [...(calibration.requestedLeftBandsDb ?? calibration.leftBandsDb ?? [])],
-          rightBandsDb: [...(calibration.requestedRightBandsDb ?? calibration.rightBandsDb ?? [])],
-        }
-      : {}),
-  }
+function responseWasAccepted(payload: unknown): boolean {
+  return typeof payload === 'object'
+    && payload !== null
+    && 'ok' in payload
+    && payload.ok === true
 }
 
-function rememberRollbackState() {
-  const previous = captureRollbackState()
-  if (previous) rollbackState.value = previous
+function stateActionResult(payload: unknown): { ok: boolean; snapshot: StateSnapshot | null; error: string | null } {
+  const snapshot = isStateSnapshot(payload) ? payload : null
+  const ok = responseWasAccepted(payload)
+  const error = typeof payload === 'object' && payload !== null && 'error' in payload && typeof payload.error === 'string'
+    ? payload.error
+    : null
+  return { ok, snapshot, error }
 }
 
 async function applyCalibration() {
+  if (snapshot.value?.capabilities.supportsCalibratedCorrection !== true) {
+    calIsError.value = true
+    calStatus.value = 'The TV has not characterized its calibration transfer functions.'
+    return
+  }
+  if (!deviceOnline.value) {
+    calIsError.value = true
+    calStatus.value = 'The TV connection is offline. The candidate cannot apply.'
+    return
+  }
   const bandsDb = parseCurve(calJson.value)
   calIsError.value = bandsDb == null
   if (bandsDb == null) {
     calStatus.value = 'Need a JSON array of exactly 64 numbers.'
     return
   }
-  rememberRollbackState()
   calStatus.value = 'Applying…'
-  const res = await withTimeout(request<OkReply>('calibration.apply', { bandsDb }), 15_000)
+  const res = await withTimeout(request('calibration.applyCandidate', { bandsDb }), 15_000)
   if (!res) {
     calIsError.value = true
     calStatus.value = 'TV did not answer within 15s.'
     return
   }
-  const payload = res.payload as CalibrationApplyReply
-  calIsError.value = payload.ok === false
-  calStatus.value = payload.ok === false
-    ? 'Device rejected curve: ' + (payload.error ?? payload.calibration?.applicationError ?? 'unknown')
-    : 'Curve applied.'
-  void request('state.get')
+  const action = stateActionResult(res.payload)
+  const candidateStaged = action.snapshot?.calibration.transaction.state === 'candidate_pending'
+    && action.snapshot.calibration.liveDspStatus === 'verified'
+  calIsError.value = !action.ok || !candidateStaged
+  calStatus.value = !action.ok || !candidateStaged
+    ? 'Device rejected curve: ' + (action.error ?? 'invalid TV response')
+    : 'Candidate applied. Validate it, accept it, or roll it back.'
+  if (candidateStaged && action.snapshot) calibrationApplied.value = action.snapshot.calibration.active
 }
 
 async function applyRecommendedCorrection() {
   const correction = recommendedCorrection.value
   if (measurementStage.value !== 'complete' || !correction || !measurementRepeatabilityPassed.value || correctionPending.value) return
+  if (snapshot.value?.capabilities.supportsCalibratedCorrection !== true) {
+    showToast('The TV has not characterized its calibration transfer functions.')
+    return
+  }
   if (!deviceOnline.value) {
     showToast('The TV connection is offline. The correction cannot apply.')
     return
   }
   correctionPending.value = true
-  const previous = captureRollbackState()
   calStatus.value = 'Applying recommended correction…'
   try {
     const payload: Record<string, unknown> = { bandsDb: correction.bandsDb }
@@ -547,59 +701,80 @@ async function applyRecommendedCorrection() {
       payload.leftBandsDb = correction.leftBandsDb
       payload.rightBandsDb = correction.rightBandsDb
     }
-    const res = await withTimeout(request<OkReply>('calibration.apply', payload), 15_000)
+    const res = await withTimeout(request('calibration.applyCandidate', payload), 15_000)
     if (!res) {
       calIsError.value = true
       calStatus.value = 'TV did not answer within 15s.'
       return
     }
-    const result = res.payload as CalibrationApplyReply
-    calIsError.value = result.ok === false
-    calStatus.value = result.ok === false
-      ? 'Device rejected correction: ' + (result.error ?? result.calibration?.applicationError ?? 'unknown')
+    const action = stateActionResult(res.payload)
+    const candidateStaged = action.snapshot?.calibration.transaction.state === 'candidate_pending'
+      && action.snapshot.calibration.liveDspStatus === 'verified'
+    calIsError.value = !action.ok || !candidateStaged
+    calStatus.value = !action.ok || !candidateStaged
+      ? 'Device rejected correction: ' + (action.error ?? 'invalid TV response')
       : correction.independent
         ? 'Independent left/right correction applied.'
         : 'Common correction applied.'
-    calibrationApplied.value = result.ok !== false
-    if (result.ok !== false && previous) rollbackState.value = previous
-    calJson.value = JSON.stringify(correction.bandsDb.map((value) => Math.round(value * 10) / 10))
-    void request('state.get')
+    if (candidateStaged && action.snapshot) {
+      calibrationApplied.value = action.snapshot.calibration.active
+      calJson.value = JSON.stringify((action.snapshot.calibration.requestedBandsDb ?? action.snapshot.calibration.bandsDb).map((value) => Math.round(value * 10) / 10))
+    }
   } finally {
     correctionPending.value = false
   }
 }
 
 async function rollbackCalibration() {
-  const previous = rollbackState.value
-  if (!previous || correctionPending.value) return
+  const transaction = candidateTransaction.value
+  if (!transaction || correctionPending.value) return
   correctionPending.value = true
   calStatus.value = 'Rolling back the last calibration…'
   try {
-    const res = previous.active
-      ? await withTimeout(request<OkReply>('calibration.apply', {
-          bandsDb: previous.bandsDb,
-          ...(previous.leftBandsDb && previous.rightBandsDb
-            ? { leftBandsDb: previous.leftBandsDb, rightBandsDb: previous.rightBandsDb }
-            : {}),
-        }), 15_000)
-      : await withTimeout(request('calibration.reset'), 15_000)
+    const res = await withTimeout(request('calibration.rollbackCandidate', {
+      candidateId: transaction.candidateId,
+    }), 15_000)
     if (!res) {
       calIsError.value = true
       calStatus.value = 'TV did not answer within 15s.'
       return
     }
-    const result = res.payload as CalibrationApplyReply
-    if (result.ok === false) {
+    const action = stateActionResult(res.payload)
+    if (!action.ok || action.snapshot?.calibration.transaction.state !== 'none') {
       calIsError.value = true
-      calStatus.value = 'TV rejected the rollback: ' + (result.error ?? result.calibration?.applicationError ?? 'unknown')
+      calStatus.value = 'TV rejected the rollback: ' + (action.error ?? 'invalid TV response')
       return
     }
-    rollbackState.value = null
-    calibrationApplied.value = previous.active
-    calJson.value = JSON.stringify(previous.bandsDb.map((value) => Math.round(value * 10) / 10))
+    calibrationApplied.value = action.snapshot?.calibration.active ?? false
     calIsError.value = false
     calStatus.value = 'Previous calibration restored.'
-    void request('state.get')
+  } finally {
+    correctionPending.value = false
+  }
+}
+
+async function acceptCandidate() {
+  const transaction = candidateTransaction.value
+  if (!transaction || correctionPending.value) return
+  correctionPending.value = true
+  calStatus.value = 'Accepting the calibration candidate…'
+  try {
+    const res = await withTimeout(request('calibration.acceptCandidate', {
+      candidateId: transaction.candidateId,
+    }), 15_000)
+    if (!res) {
+      calIsError.value = true
+      calStatus.value = 'TV did not answer within 15s.'
+      return
+    }
+    const action = stateActionResult(res.payload)
+    const accepted = action.ok
+      && action.snapshot?.calibration.transaction.state === 'none'
+      && action.snapshot.calibration.liveDspStatus === 'verified'
+    calIsError.value = !accepted
+    calStatus.value = !accepted
+      ? 'TV rejected candidate acceptance: ' + (action.error ?? 'invalid TV response')
+      : 'Calibration candidate accepted.'
   } finally {
     correctionPending.value = false
   }
@@ -607,11 +782,26 @@ async function rollbackCalibration() {
 
 async function resetCalibration() {
   calStatus.value = 'Resetting…'
-  await withTimeout(request('calibration.reset'), 15_000)
-  rollbackState.value = null
+  const transaction = candidateTransaction.value
+  if (transaction) {
+    const rollback = await withTimeout(request('calibration.rollbackCandidate', {
+      candidateId: transaction.candidateId,
+    }), 15_000)
+    if (!rollback || !stateActionResult(rollback.payload).ok) {
+      calIsError.value = true
+      calStatus.value = 'TV could not roll back the pending candidate.'
+      return
+    }
+  }
+  const reset = await withTimeout(request('calibration.reset'), 15_000)
+  const resetAction = reset ? stateActionResult(reset.payload) : null
+  if (!resetAction?.ok || !resetAction.snapshot || resetAction.snapshot.calibration.active) {
+    calIsError.value = true
+    calStatus.value = 'TV could not verify the calibration reset.'
+    return
+  }
   calibrationApplied.value = false
   calStatus.value = 'Calibration reset.'
-  void request('state.get')
 }
 
 function getState() {
@@ -625,7 +815,6 @@ function startMeasurement() {
     return
   }
   calibrationApplied.value = false
-  rollbackState.value = null
   void startMeasurementSession()
 }
 
@@ -634,7 +823,24 @@ function startValidation() {
     showToast('The TV connection is offline. Validation cannot start.')
     return
   }
-  void startValidationSession()
+  if (snapshot.value?.calibration.liveDspStatus !== 'verified') {
+    showToast('The TV has not verified the live calibration state. Validation is blocked.')
+    return
+  }
+  if (!deviceValidationReady.value) {
+    showToast('Validation requires an active pending candidate, flat user EQ, verified headroom, and live DSP readback.')
+    return
+  }
+  const candidateId = candidateTransaction.value?.candidateId
+  if (!candidateId) {
+    showToast('Validation requires a pending calibration candidate.')
+    return
+  }
+  if (!validationBaselineReady.value) {
+    showToast('Validation requires a repeatable center baseline from this browser session. Re-measure before validating.')
+    return
+  }
+  startValidationSession(candidateId)
 }
 
 const virtualizerOn = ref(false)
@@ -683,10 +889,7 @@ async function runCapacityProbe() {
 }
 
 async function createPersistent() {
-  const input = persistBands.value
-  const numericBands = typeof input === 'number' ? input : input === '' ? 64 : parseFloat(input)
-  const bands = Math.max(1, Math.min(64, Math.round(numericBands || 64)))
-  persistBands.value = bands
+  const bands = 64
   await withTimeout(request('probe.persistent.start', { bands }), 30_000)
   await refreshProbeState()
 }
@@ -702,10 +905,174 @@ async function applyTestCurve(curve: 'hollow' | 'flat') {
   await refreshProbeState()
 }
 
-async function quickAudible(bands: number) {
-  await withTimeout(request('probe.persistent.start', { bands }), 30_000)
-  await withTimeout(request('probe.curve.apply', { curve: 'hollow' }), 20_000)
+function boundedProbeBand(): number {
+  const input = typeof probeBand.value === 'number' ? probeBand.value : Number(probeBand.value)
+  const band = Math.round(Number.isFinite(input) ? input : 32)
+  const bounded = Math.max(1, Math.min(64, band))
+  probeBand.value = bounded
+  return bounded
+}
+
+function boundedProbeGain(): number {
+  const input = typeof probeGainDb.value === 'number' ? probeGainDb.value : Number(probeGainDb.value)
+  const gain = Number.isFinite(input) ? input : -6
+  const bounded = Math.max(-6, Math.min(6, gain))
+  probeGainDb.value = bounded
+  return bounded
+}
+
+function probeCurve(channel: 'common' | 'left' | 'right', band: number, gainDb: number): Record<string, number[]> {
+  const common = Array.from({ length: 64 }, () => 0)
+  const selected = Array.from({ length: 64 }, () => 0)
+  selected[band - 1] = gainDb
+  if (channel === 'common') {
+    common[band - 1] = gainDb
+    return { bandsDb: common }
+  }
+  return {
+    bandsDb: common,
+    leftBandsDb: channel === 'left' ? selected : common,
+    rightBandsDb: channel === 'right' ? selected : common,
+  }
+}
+
+async function ensurePersistent64(): Promise<boolean> {
+  if (persistentState.value?.active && persistentState.value.bands === 64) return true
+  if (persistentState.value?.active) {
+    await withTimeout(request('probe.persistent.release'), 20_000)
+  }
+  await withTimeout(request('probe.persistent.start', { bands: 64 }), 30_000)
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    await refreshProbeState()
+    if (persistentState.value?.active && persistentState.value.bands === 64) return true
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  return false
+}
+
+function snapshotProbeEvidence(
+  mode: 'transfer' | 'routing',
+  cutChannel: 'common' | 'left' | 'right' | 'flat',
+  bandIndex: number,
+  gainDb: number,
+  aggregate: AggregateResponse,
+): ProbeCaptureEvidence {
+  return {
+    id: `probe_${Date.now().toString(36)}_${probeEvidence.value.length.toString(36)}`,
+    mode,
+    cutChannel,
+    bandIndex,
+    gainDb,
+    repeatabilityPassed: allRepeatabilityPassed(aggregate),
+    capturedAt: new Date().toISOString(),
+    positionResponses: JSON.parse(JSON.stringify(aggregate.positionResponses)) as AggregateResponse['positionResponses'],
+    repeatability: JSON.parse(JSON.stringify(aggregate.repeatability)) as AggregateResponse['repeatability'],
+  }
+}
+
+async function captureProbeSweep(kind: 'transfer' | 'routing'): Promise<AggregateResponse> {
+  const finished = new Promise<AggregateResponse>((resolve, reject) => {
+    const stop = watch(measurementStage, (nextStage) => {
+      if (nextStage === 'complete') {
+        stop()
+        const aggregate = measurementAggregateBoth.value
+        if (aggregate) resolve(aggregate)
+        else reject(new Error('The probe completed without a response aggregate.'))
+      } else if (nextStage === 'error') {
+        stop()
+        reject(new Error(measurementMessage.value || 'The diagnostic probe failed.'))
+      } else if (nextStage === 'idle') {
+        stop()
+        reject(new Error('The diagnostic probe was cancelled.'))
+      }
+    }, { immediate: true })
+    startProbeSession(kind)
+  })
+  return finished
+}
+
+async function applyProbeCurvePayload(payload: Record<string, number[]>) {
+  const response = await withTimeout(request('probe.curve.apply', payload), 20_000)
+  if (!response || !responseWasAccepted(response.payload)) {
+    throw new Error('The TV rejected the diagnostic curve. Keep the persistent 64-band probe active.')
+  }
   await refreshProbeState()
+}
+
+async function captureTransferProbe() {
+  if (probeLabPending.value || measurementBusy.value || !deviceOnline.value) return
+  probeLabPending.value = true
+  probeLabMessage.value = 'Preparing a 64-band transfer probe…'
+  const band = boundedProbeBand()
+  const gainDb = boundedProbeGain()
+  try {
+    if (!await ensurePersistent64()) throw new Error('The TV did not create a verified 64-band diagnostic instance.')
+    await applyProbeCurvePayload(probeCurve('common', band, gainDb))
+    probeLabMessage.value = `Capture the transfer response for band ${band} at the center position.`
+    const aggregate = await captureProbeSweep('transfer')
+    probeEvidence.value = [
+      ...probeEvidence.value,
+      snapshotProbeEvidence('transfer', 'common', band, gainDb, aggregate),
+    ]
+    probeLabMessage.value = `Transfer response captured for band ${band}. Repeat with other bands, then export the evidence.`
+  } catch (error: unknown) {
+    probeLabMessage.value = error instanceof Error ? error.message : 'Transfer probe failed.'
+  } finally {
+    probeLabPending.value = false
+  }
+}
+
+async function runRoutingProbe() {
+  if (probeLabPending.value || measurementBusy.value || !deviceOnline.value) return
+  probeLabPending.value = true
+  const gainDb = Math.min(0, boundedProbeGain())
+  probeLabMessage.value = 'Preparing the one-microphone left/right routing set…'
+  try {
+    if (!await ensurePersistent64()) throw new Error('The TV did not create a verified 64-band diagnostic instance.')
+
+    const addCapture = (capture: ProbeCaptureEvidence) => {
+      probeEvidence.value = [...probeEvidence.value, capture]
+    }
+    await applyProbeCurvePayload({ bandsDb: Array.from({ length: 64 }, () => 0) })
+    probeLabMessage.value = 'Flat baseline: move the one microphone between the fixed left and right positions when prompted.'
+    const flat = await captureProbeSweep('routing')
+    addCapture(snapshotProbeEvidence('routing', 'flat', ROUTING_TEST_BANDS[0], 0, flat))
+
+    for (const [index, band] of ROUTING_TEST_BANDS.entries()) {
+      await applyProbeCurvePayload(probeCurve('left', band, gainDb))
+      probeLabMessage.value = `Routing ${index + 1}/${ROUTING_TEST_BANDS.length}: left-only ${gainDb.toFixed(1)} dB cut at band ${band}. Repeat the same left/right microphone positions.`
+      const left = await captureProbeSweep('routing')
+      addCapture(snapshotProbeEvidence('routing', 'left', band, gainDb, left))
+
+      await applyProbeCurvePayload(probeCurve('right', band, gainDb))
+      probeLabMessage.value = `Routing ${index + 1}/${ROUTING_TEST_BANDS.length}: right-only ${gainDb.toFixed(1)} dB cut at band ${band}. Repeat the same left/right microphone positions.`
+      const right = await captureProbeSweep('routing')
+      addCapture(snapshotProbeEvidence('routing', 'right', band, gainDb, right))
+    }
+    probeLabMessage.value = 'Four-frequency routing set captured. Compare left-only versus right-only changes at both microphone positions.'
+  } catch (error: unknown) {
+    probeLabMessage.value = error instanceof Error ? error.message : 'Routing probe failed.'
+  } finally {
+    try {
+      await applyProbeCurvePayload({ bandsDb: Array.from({ length: 64 }, () => 0) })
+      await releasePersistent()
+    } catch {
+      probeLabMessage.value = `${probeLabMessage.value} The probe could not be returned to flat/released; release it from Diagnostics.`
+    }
+    probeLabPending.value = false
+  }
+}
+
+function exportProbeEvidence() {
+  if (probeEvidence.value.length === 0) return
+  const blob = new Blob([JSON.stringify({ version: 1, captures: probeEvidence.value }, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `sweetspot-probe-${new Date().toISOString().replaceAll(':', '-')}.json`
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 async function fetchDeviceInfo() {
