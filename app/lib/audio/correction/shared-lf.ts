@@ -113,6 +113,23 @@ function blendPoint(
   return commonValue * (1 - weight) + independentValue * weight
 }
 
+function safeSharedCommonValue(
+  commonValue: number,
+  leftValue: number,
+  rightValue: number,
+): number {
+  if (commonValue > 0 && (leftValue <= 0 || rightValue <= 0)) return 0
+  return commonValue
+}
+
+function preserveChannelBoostSafety(
+  blendedValue: number,
+  independentValue: number,
+): number {
+  if (blendedValue > 0 && independentValue <= 0) return 0
+  return blendedValue
+}
+
 export function blendSharedLfCorrections(
   common: readonly ResponsePoint[],
   left: readonly ResponsePoint[],
@@ -120,18 +137,27 @@ export function blendSharedLfCorrections(
   policy: SharedLfPolicy = DEFAULT_SHARED_LF_POLICY,
 ): SharedLfBlendResult {
   validatePolicy(policy)
-  const blend = (independent: readonly ResponsePoint[]): ResponsePoint[] => common.map((point) => {
+  const blend = (
+    independent: readonly ResponsePoint[],
+    otherChannel: readonly ResponsePoint[],
+  ): ResponsePoint[] => common.map((point) => {
     const weight = transitionWeight(point.frequencyHz, policy)
-    const commonValue = point.magnitudeDb
     const independentValue = correctionValue(independent, point.frequencyHz)
+    const otherChannelValue = correctionValue(otherChannel, point.frequencyHz)
+    const commonValue = safeSharedCommonValue(
+      point.magnitudeDb,
+      independentValue,
+      otherChannelValue,
+    )
+    const blendedValue = blendPoint(commonValue, independentValue, weight)
     return {
       frequencyHz: point.frequencyHz,
-      magnitudeDb: blendPoint(commonValue, independentValue, weight),
+      magnitudeDb: preserveChannelBoostSafety(blendedValue, independentValue),
     }
   })
   return {
-    left: blend(left),
-    right: blend(right),
+    left: blend(left, right),
+    right: blend(right, left),
   }
 }
 

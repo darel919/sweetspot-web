@@ -112,6 +112,85 @@ describe('shared low-frequency correction', () => {
     expect(result.right.filter((point) => point.frequencyHz <= 120).map((point) => point.magnitudeDb)).toEqual([1, 1, 1])
   })
 
+  test('blocks a shared boost when one channel rejects positive gain', () => {
+    const frequencies = [80, 120, 180, 250]
+    const result = blendSharedLfCorrections(
+      curve([3, 3, 3, 3], frequencies),
+      curve([0, 0, 0, 0], frequencies),
+      curve([3, 3, 3, 3], frequencies),
+    )
+
+    expect(result.left.every((point) => point.magnitudeDb <= 0)).toBe(true)
+    expect(result.right.filter((point) => point.frequencyHz <= 120).every((point) => point.magnitudeDb <= 0)).toBe(true)
+    expect(result.right.find((point) => point.frequencyHz === 250)?.magnitudeDb).toBe(3)
+  })
+
+  test('blocks shared boosts when both channels reject positive gain', () => {
+    const frequencies = [80, 120, 180, 250]
+    const result = blendSharedLfCorrections(
+      curve([3, 3, 3, 3], frequencies),
+      curve([0, 0, 0, 0], frequencies),
+      curve([0, 0, 0, 0], frequencies),
+    )
+
+    expect(result.left.every((point) => point.magnitudeDb <= 0)).toBe(true)
+    expect(result.right.every((point) => point.magnitudeDb <= 0)).toBe(true)
+  })
+
+  test('does not introduce a boost when one channel has a negative correction', () => {
+    const frequencies = [80, 180, 250]
+    const result = blendSharedLfCorrections(
+      curve([2, 2, 2], frequencies),
+      curve([-2, -2, -2], frequencies),
+      curve([2, 2, 2], frequencies),
+    )
+
+    expect(result.left.every((point) => point.magnitudeDb <= 0)).toBe(true)
+  })
+
+  test('retains shared positive gain when both channels authorize it', () => {
+    const frequencies = [80, 180, 250]
+    const result = blendSharedLfCorrections(
+      curve([2, 2, 2], frequencies),
+      curve([1, 1, 1], frequencies),
+      curve([3, 3, 3], frequencies),
+    )
+
+    expect(result.left.every((point) => point.magnitudeDb > 0)).toBe(true)
+    expect(result.right.every((point) => point.magnitudeDb > 0)).toBe(true)
+  })
+
+  test('keeps negative common correction blendable', () => {
+    const frequencies = [80, 180, 250]
+    const result = blendSharedLfCorrections(
+      curve([-5, -5, -5], frequencies),
+      curve([-3, -3, -3], frequencies),
+      curve([-6, -6, -6], frequencies),
+    )
+
+    expect(result.left.find((point) => point.frequencyHz === 80)?.magnitudeDb).toBe(-5)
+    expect(result.right.find((point) => point.frequencyHz === 80)?.magnitudeDb).toBe(-5)
+    const logPosition = Math.log(180 / 120) / Math.log(250 / 120)
+    const weight = logPosition * logPosition * (3 - 2 * logPosition)
+    expect(result.left.find((point) => point.frequencyHz === 180)?.magnitudeDb)
+      .toBeCloseTo(-5 * (1 - weight) + -3 * weight, 10)
+    expect(result.right.find((point) => point.frequencyHz === 180)?.magnitudeDb)
+      .toBeCloseTo(-5 * (1 - weight) + -6 * weight, 10)
+    expect(result.left.every((point) => point.magnitudeDb < 0)).toBe(true)
+    expect(result.right.every((point) => point.magnitudeDb < 0)).toBe(true)
+  })
+
+  test('keeps transition-region positive gain safe per channel', () => {
+    const frequencies = [180]
+    const result = blendSharedLfCorrections(
+      curve([3], frequencies),
+      curve([0], frequencies),
+      curve([3], frequencies),
+    )
+
+    expect(result.left[0]?.magnitudeDb).toBeLessThanOrEqual(0)
+  })
+
   test('restores independent curves at and above the independent boundary', () => {
     const common = curve([0, 0, 0, 0, 0, 0, 0, 0, 0])
     const left = curve([1, 1, 1, 2, 3, 4, 5, 6, 7])
@@ -285,5 +364,27 @@ describe('shared low-frequency correction', () => {
     expect(rolloffCorrection.correction
       .filter((point) => point.frequencyHz <= rolloffCorrection.lfCapability.minus6Db.frequencyHz)
       .every((point) => point.magnitudeDb <= 0)).toBe(true)
+  })
+
+  test('keeps a channel-specific LF null from regaining boost through shared mapping', () => {
+    const frequencies = Array.from({ length: 64 }, (_, index) => 20 * (20_000 / 20) ** (index / 63))
+    const base = frequencies.map((frequencyHz) => ({
+      frequencyHz,
+      magnitudeDb: frequencyHz < 80 ? -8 : 0,
+    }))
+    const leftInput = base.map((point) => ({
+      ...point,
+      magnitudeDb: Math.abs(point.frequencyHz - 80) < 4 ? -12 : point.magnitudeDb,
+    }))
+    const common = calculateCorrection(aggregateFromPoints(base), profile, { headroomVerified: true })
+    const left = calculateCorrection(aggregateFromPoints(leftInput), profile, { headroomVerified: true })
+    const right = calculateCorrection(aggregateFromPoints(base), profile, { headroomVerified: true })
+    const blended = blendSharedLfCorrections(common.correction, left.correction, right.correction)
+    const bands = mapCorrectionToBandsConservative(blended.left, [80, 100, 120, 160, 200, 250, 400, 800, 1_600, 3_200, 6_400, 12_800, 20_000])
+    const nullBand = bands[1]
+
+    expect(common.correction.find((point) => Math.abs(point.frequencyHz - 80) < 4)?.magnitudeDb ?? 0).toBeGreaterThan(0)
+    expect(left.correction.find((point) => Math.abs(point.frequencyHz - 80) < 4)?.magnitudeDb ?? 0).toBeLessThanOrEqual(0)
+    expect(nullBand ?? 0).toBeLessThanOrEqual(0)
   })
 })
