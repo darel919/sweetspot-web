@@ -14,6 +14,7 @@ export type CalibrationValidationOutcome =
 
 export interface AutomaticValidationStartInput {
   measurementComplete: boolean
+  measurementId: string | null
   candidateId: string | null
   baselineRepeatable: boolean
   deviceValidationReady: boolean
@@ -21,10 +22,12 @@ export interface AutomaticValidationStartInput {
   deviceOnline: boolean
   validationActive: boolean
   startedCandidateId: string | null
+  stagingFailedMeasurementId: string | null
 }
 
 export function shouldStartAutomaticValidation(input: AutomaticValidationStartInput): boolean {
   return input.measurementComplete
+    && input.measurementId !== null
     && input.candidateId !== null
     && input.baselineRepeatable
     && input.deviceValidationReady
@@ -32,6 +35,7 @@ export function shouldStartAutomaticValidation(input: AutomaticValidationStartIn
     && input.deviceOnline
     && !input.validationActive
     && input.startedCandidateId !== input.candidateId
+    && input.stagingFailedMeasurementId !== input.measurementId
 }
 
 export function classifyCalibrationValidation(input: CalibrationValidationInput): CalibrationValidationOutcome {

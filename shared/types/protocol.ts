@@ -195,6 +195,7 @@ export const CALIBRATION_ERROR_CODES = [
   'measurement_unstable',
   'dsp_state_unverified',
   'dsp_restore_failed',
+  'candidate_rollback_failed',
   'calibration_aborted',
 ] as const
 
@@ -215,7 +216,7 @@ export interface CalibrationSessionBeginPayload extends CalibrationSessionPayloa
 export interface CalibrationSessionEndPayload extends CalibrationSessionPayload {}
 
 export interface CalibrationSessionAbortPayload extends CalibrationSessionPayload {
-  code?: CalibrationErrorCode
+  code: CalibrationErrorCode
   message?: string
 }
 
@@ -1058,7 +1059,7 @@ export function isMeasurementReadyPayload(value: unknown): value is MeasurementR
 
 function isAbortPayload(value: unknown): value is Record<string, unknown> & CalibrationSessionAbortPayload {
   return isSessionPayload(value)
-    && (value.code === undefined || isCalibrationErrorCode(value.code))
+    && isCalibrationErrorCode(value.code)
     && hasOptionalMessage(value)
 }
 
@@ -1100,7 +1101,7 @@ export function validatePayload(type: string, payload: unknown): string | null {
     case 'measurement.response':
       return isMeasurementResponsePayload(payload) ? null : `${type} requires a compact finite response curve`
     case 'calibrationSession.abort':
-      return isAbortPayload(payload) ? null : `${type} requires sessionId and a valid optional error`
+      return isAbortPayload(payload) ? null : `${type} requires sessionId and a valid code`
     case 'calibration.applyCandidate':
       return isCalibrationApplyPayload(payload) ? null : `${type} requires 64 finite bands and optional paired channel curves`
     case 'calibration.acceptCandidate':

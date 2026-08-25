@@ -95,6 +95,35 @@ describe('measurement protocol boundary', () => {
       code: 'dsp_restore_failed',
       message: 'The TV could not restore its previous audio state',
     })).toBeNull()
+    expect(validatePayload('measurement.error', {
+      sessionId: 'cal_test',
+      code: 'candidate_rollback_failed',
+      message: 'The TV could not roll back the pending candidate',
+    })).toBeNull()
+  })
+
+  test('requires a valid abort code and bounds its optional message', () => {
+    expect(validatePayload('calibrationSession.abort', {
+      sessionId: 'cal_test',
+      code: 'calibration_aborted',
+    })).toBeNull()
+    expect(validatePayload('calibrationSession.abort', {
+      sessionId: 'cal_test',
+    })).not.toBeNull()
+    expect(validatePayload('calibrationSession.abort', {
+      sessionId: 'cal_test',
+      code: 'not-a-calibration-error',
+    })).not.toBeNull()
+    expect(validatePayload('calibrationSession.abort', {
+      sessionId: 'cal_test',
+      code: 'calibration_aborted',
+      message: 'x'.repeat(1024),
+    })).toBeNull()
+    expect(validatePayload('calibrationSession.abort', {
+      sessionId: 'cal_test',
+      code: 'calibration_aborted',
+      message: 'x'.repeat(1025),
+    })).not.toBeNull()
   })
 
   test('rejects malformed state snapshots and expired envelopes', () => {

@@ -123,10 +123,10 @@ function curveRange(curve: readonly number[] | undefined): string {
     </p>
     <div class="actions">
       <button
-        :disabled="!snapshot.capabilities.supportsSweep || measurementBusy"
+        :disabled="!snapshot.capabilities.supportsSweep || measurementBusy || correctionPending"
         @click="emit('start-measurement')"
       >
-        {{ measurementBusy ? measurementMessage : 'Start advanced calibration' }}
+        {{ measurementBusy ? measurementMessage : 'Start Auto Room Calibration' }}
       </button>
       <button v-if="measurementBusy" @click="emit('cancel-measurement')">Cancel</button>
     </div>
@@ -220,7 +220,7 @@ function curveRange(curve: readonly number[] | undefined): string {
           :disabled="!recommendedCorrection || !measurementRepeatabilityPassed || correctionPending || candidatePending || snapshot.capabilities.supportsCalibratedCorrection !== true"
           @click="emit('apply-recommended-correction')"
         >
-          {{ correctionPending ? 'Applying…' : 'Apply recommended correction' }}
+          {{ correctionPending ? 'Applying…' : 'Recovery-only apply recommended correction' }}
         </button>
         <button v-if="calibrationApplied && candidatePending && !calibrationFinalizationPending" :disabled="measurementBusy || !validationReady || snapshot.calibration.liveDspStatus !== 'verified'" @click="emit('start-validation')">
           Recovery validation sweep
@@ -266,6 +266,13 @@ function curveRange(curve: readonly number[] | undefined): string {
           Recovery-only rollback
         </button>
       </div>
+    </div>
+
+    <div v-if="measurementStage === 'error' && calibrationResult" class="response-graph">
+      <p :class="`calibration-result calibration-result-${calibrationResult}`">
+        {{ calibrationResult.toUpperCase() }}
+      </p>
+      <p v-if="calibrationResultMessage" class="note">{{ calibrationResultMessage }}</p>
     </div>
 
     <div v-if="candidatePending && measurementStage !== 'complete'" class="response-graph">

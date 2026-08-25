@@ -147,6 +147,7 @@ import type {
   ProbeDiagnostics,
   StateSnapshot,
   CalibrationTransaction,
+  CalibrationApplyPayload,
 } from '#shared/types/protocol'
 import { CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB, isStateSnapshot } from '#shared/types/protocol'
 import { calculateCorrection, combineChannelAggregates, targetErrorRms, type CorrectionStrength } from '~/lib/audio/correction/optimizer'
@@ -174,6 +175,13 @@ import {
   shouldStartAutomaticValidation,
   type CalibrationValidationOutcome,
 } from '~/lib/audio/correction/calibration-validation'
+import {
+  canIssueStandaloneCandidateRollback,
+  hasVerifiedAbortRecoveryReadback,
+  shouldKeepCalibrationLockedDuringAbort,
+  shouldReportValidationFailure,
+} from '~/lib/audio/correction/calibration-recovery'
+import { shouldStageAutomaticCorrection } from '~/lib/audio/correction/calibration-staging'
 import type {
   AggregateResponse,
 } from '~/lib/audio/measurement/aggregation'
@@ -225,8 +233,12 @@ const {
   retryFailedGroups,
   validationFailed: measurementValidationFailed,
   validationCandidateId: measurementValidationCandidateId,
+  completedMeasurementId: measurementCompletedId,
+  abortRecovery: measurementAbortRecovery,
   cancel: cancelMeasurement,
+  acknowledgeAbortRecovery: acknowledgeMeasurementAbortRecovery,
 } = useCalibrationSession(connection)
+const snapshot = ref<StateSnapshot | null>(null)
 const measurementBusy = computed(() => isCalibrationActiveStage(measurementStage.value))
 const calibrationFinalization = ref<{
   candidateId: string
@@ -236,11 +248,55 @@ const calibrationFinalization = ref<{
 } | null>(null)
 const calibrationFinalizationPending = computed(() =>
   calibrationFinalization.value !== null
-    && (calibrationFinalization.value.errorMessage === null
-      || snapshot.value?.calibration.transaction.state !== 'none'),
+    && calibrationFinalization.value.errorMessage === null,
 )
-const calibrationLocked = computed(() => measurementBusy.value || calibrationFinalizationPending.value)
+const validationAbortRecoveryError = computed(() => {
+  const recovery = measurementAbortRecovery.value
+  if (recovery.state === 'idle') return null
+  const currentSnapshot = snapshot.value
+  if (recovery.state === 'pending') {
+    return currentSnapshot?.calibration.transaction.state === 'none'
+      && currentSnapshot.calibration.liveDspStatus !== 'verified'
+      ? 'The TV finished the validation rollback without verified live DSP readback. Recovery is required.'
+      : null
+  }
+  if (recovery.state === 'failed') {
+    return `Validation recovery failed [${recovery.details.code}]. ${recovery.details.message} Recovery controls remain available.`
+  }
+  if (recovery.details.code !== 'calibration_aborted' && currentSnapshot !== null) {
+    return `Validation recovery failed [${recovery.details.code}]. ${recovery.details.message} Recovery controls remain available.`
+  }
+  if (currentSnapshot?.calibration.transaction.state === 'none'
+    && currentSnapshot.calibration.liveDspStatus !== 'verified') {
+    return 'The TV finished the validation rollback without verified live DSP readback. Recovery is required.'
+  }
+  return null
+})
+const validationAbortRecoveryPending = computed(() => shouldKeepCalibrationLockedDuringAbort({
+  abortState: measurementAbortRecovery.value.state,
+  transactionState: snapshot.value?.calibration.transaction.state ?? null,
+  liveDspStatus: snapshot.value?.calibration.liveDspStatus ?? null,
+}) && validationAbortRecoveryError.value === null)
+const automaticCalibrationPending = computed(() => {
+  if (calibrationFinalization.value?.errorMessage || validationAbortRecoveryError.value) {
+    return correctionPending.value || measurementValidationActive.value
+  }
+  const transaction = candidateTransaction.value
+  const automaticCandidate = transaction?.state === 'candidate_pending'
+    && ((automaticStagingMeasurementId.value !== null
+      && automaticStagingMeasurementId.value === measurementCompletedId.value
+      && automaticStagingFailedMeasurementId.value !== measurementCompletedId.value)
+      || automaticValidationCandidateId.value === transaction.candidateId)
+  return correctionPending.value || measurementValidationActive.value || automaticCandidate
+})
+const calibrationLocked = computed(() =>
+  measurementBusy.value
+    || calibrationFinalizationPending.value
+    || validationAbortRecoveryPending.value
+    || automaticCalibrationPending.value,
+)
 const canCancelCalibration = computed(() => {
+  if (validationAbortRecoveryPending.value) return false
   if (measurementBusy.value) return true
   const finalization = calibrationFinalization.value
   const transaction = snapshot.value?.calibration.transaction
@@ -248,8 +304,21 @@ const canCancelCalibration = computed(() => {
     && transaction.candidateId === finalization?.candidateId
   return sameCandidate && (finalization?.errorMessage !== null || finalization?.phase === 'reporting')
 })
-const calibrationOverlayStage = computed(() => calibrationFinalizationPending.value ? 'ending' : measurementStage.value)
+const calibrationOverlayStage = computed(() =>
+  calibrationFinalizationPending.value || validationAbortRecoveryPending.value || automaticCalibrationPending.value
+    ? 'ending'
+    : measurementStage.value,
+)
 const calibrationOverlayMessage = computed(() => {
+  if (validationAbortRecoveryPending.value) {
+    return measurementAbortRecovery.value.state === 'pending'
+      ? 'The TV is restoring the previous calibration.'
+      : 'The TV is confirming the final calibration state.'
+  }
+  if (automaticCalibrationPending.value) {
+    if (correctionPending.value) return 'The TV is staging the recommended correction.'
+    return 'Validation will continue automatically. Follow the instructions on the TV.'
+  }
   const finalization = calibrationFinalization.value
   if (!finalization) return measurementMessage.value
   if (finalization.errorMessage) return finalization.errorMessage
@@ -303,7 +372,6 @@ onBeforeRouteUpdate((to, from) => {
   if (calibrationLocked.value && to.fullPath !== from.fullPath) return false
 })
 
-const snapshot = ref<StateSnapshot | null>(null)
 const eqCommandRevision = new EqCommandRevisionGate()
 let eqDraftRevision = 0
 let eqSentRevision = 0
@@ -492,6 +560,8 @@ const validationOutcomeKey = computed(() => {
 type ValidationDecision = CalibrationValidationOutcome | { status: 'error'; reason: string }
 
 const automaticValidationCandidateId = ref<string | null>(null)
+const automaticStagingMeasurementId = ref<string | null>(null)
+const automaticStagingFailedMeasurementId = ref<string | null>(null)
 const sentValidationOutcomeKeys = new Set<string>()
 let validationResultInFlight = false
 
@@ -664,9 +734,34 @@ function completeFinalizationIfReady() {
   calibrationFinalization.value = null
 }
 
+function showAbortRecoveryError(message: string) {
+  calibrationResult.value = 'error'
+  calibrationResultMessage.value = message
+  calIsError.value = true
+  calStatus.value = message
+  showToast(message)
+}
+
+watch([snapshot, measurementAbortRecovery], () => {
+  const recovery = measurementAbortRecovery.value
+  if (recovery.state === 'idle' || recovery.state === 'pending') return
+  if (hasVerifiedAbortRecoveryReadback({
+    abortState: recovery.state,
+    transactionState: snapshot.value?.calibration.transaction.state ?? null,
+    liveDspStatus: snapshot.value?.calibration.liveDspStatus ?? null,
+  })) {
+    if (recovery.details.code !== 'calibration_aborted') {
+      showAbortRecoveryError(`Validation failed [${recovery.details.code}]. ${recovery.details.message} Previous settings were restored.`)
+    }
+    acknowledgeMeasurementAbortRecovery()
+    return
+  }
+  if (validationAbortRecoveryError.value) showAbortRecoveryError(validationAbortRecoveryError.value)
+})
+
 async function performCandidateFinalization(candidateId: string) {
   const current = calibrationFinalization.value
-  if (!current || current.candidateId !== candidateId || current.phase === 'reporting') return
+  if (!current || current.candidateId !== candidateId || current.phase === 'reporting' || measurementAbortRecovery.value.state !== 'idle') return
   if (!candidateMatches(candidateId)) {
     setFinalizationError(candidateId, 'The pending candidate changed before finalization. Recovery is required.')
     return
@@ -737,7 +832,7 @@ function beginCandidateFinalization(
 }
 
 async function sendValidationResultOnce(candidateId: string, outcome: ValidationDecision, outcomeKey: string) {
-  if (sentValidationOutcomeKeys.has(outcomeKey) || validationResultInFlight) return
+  if (sentValidationOutcomeKeys.has(outcomeKey) || validationResultInFlight || measurementAbortRecovery.value.state !== 'idle') return
   if (!candidateMatches(candidateId) || measurementValidationCandidateId.value !== candidateId) return
   calibrationFinalization.value = {
     candidateId,
@@ -769,11 +864,34 @@ async function sendValidationResultOnce(candidateId: string, outcome: Validation
 }
 
 watch(
-  [measurementStage, validationBaselineReady, deviceValidationReady, validationCapturePathEligible, candidateTransaction, deviceOnline, measurementValidationActive],
-  ([stage, baselineRepeatable, deviceReady, capturePathEligible, transaction, online, validationActive]) => {
+  [measurementStage, measurementCompletedId, recommendedCorrection, measurementRepeatabilityPassed, deviceOnline, correctionPending, candidateTransaction],
+  ([stage, measurementId, correction, repeatabilityPassed, online, applying, transaction]) => {
+    const currentSnapshot = snapshot.value
+    if (!shouldStageAutomaticCorrection({
+      measurementComplete: stage === 'complete' && repeatabilityPassed,
+      measurementId,
+      correction,
+      supportsCalibratedCorrection: currentSnapshot?.capabilities.supportsCalibratedCorrection === true,
+      capturePathEligible: validationCapturePathEligible.value,
+      deviceOnline: online,
+      candidatePending: transaction !== null,
+      applyInProgress: applying,
+      attemptedMeasurementId: automaticStagingMeasurementId.value,
+      failedMeasurementId: automaticStagingFailedMeasurementId.value,
+    })) return
+    if (!measurementId || !correction) return
+    void stageRecommendedCorrectionAutomatically(measurementId, correction)
+  },
+  { immediate: true },
+)
+
+watch(
+  [measurementStage, measurementCompletedId, validationBaselineReady, deviceValidationReady, validationCapturePathEligible, candidateTransaction, deviceOnline, measurementValidationActive, measurementAbortRecovery, automaticStagingFailedMeasurementId],
+  ([stage, measurementId, baselineRepeatable, deviceReady, capturePathEligible, transaction, online, validationActive, abortRecovery, stagingFailedMeasurementId]) => {
     const candidateId = transaction?.validationStatus === 'pending' ? transaction.candidateId : null
-    if (calibrationFinalizationPending.value || !shouldStartAutomaticValidation({
+    if (calibrationFinalizationPending.value || abortRecovery.state !== 'idle' || !shouldStartAutomaticValidation({
       measurementComplete: stage === 'complete',
+      measurementId,
       candidateId,
       baselineRepeatable,
       deviceValidationReady: deviceReady,
@@ -781,6 +899,7 @@ watch(
       deviceOnline: online,
       validationActive,
       startedCandidateId: automaticValidationCandidateId.value,
+      stagingFailedMeasurementId,
     })) return
     if (!candidateId) return
     automaticValidationCandidateId.value = candidateId
@@ -799,8 +918,12 @@ watch([measurementStage, validationOutcomeKey, deviceOnline], ([stage, outcomeKe
   void sendValidationResultOnce(transaction.candidateId, outcome, outcomeKey)
 })
 
-watch([measurementStage, measurementValidationFailed, measurementValidationCandidateId, candidateTransaction, deviceOnline], ([stage, failed, candidateId, transaction]) => {
-  if (stage !== 'error' || !failed || !candidateId || !transaction || transaction.candidateId !== candidateId) return
+watch([measurementStage, measurementValidationFailed, measurementValidationCandidateId, candidateTransaction, deviceOnline, measurementAbortRecovery], ([stage, failed, candidateId, transaction, _online, abortRecovery]) => {
+  if (stage !== 'error' || !shouldReportValidationFailure({
+    validationFailed: failed,
+    candidateMatches: candidateId !== null && transaction?.candidateId === candidateId,
+    abortState: abortRecovery.state,
+  }) || !candidateId || !transaction || transaction.candidateId !== candidateId) return
   const reason = measurementMessage.value || 'Validation measurement failed.'
   const outcome: ValidationDecision = { status: 'error', reason }
   void sendValidationResultOnce(candidateId, outcome, `${candidateId}:failed:${reason}`)
@@ -907,6 +1030,65 @@ function stateActionResult(payload: unknown): { ok: boolean; snapshot: StateSnap
   return { ok, snapshot, error }
 }
 
+function correctionPayload(correction: RecommendedCorrection): CalibrationApplyPayload {
+  if (correction.independent && correction.leftBandsDb && correction.rightBandsDb) {
+    return {
+      bandsDb: correction.bandsDb,
+      leftBandsDb: correction.leftBandsDb,
+      rightBandsDb: correction.rightBandsDb,
+    }
+  }
+  return { bandsDb: correction.bandsDb }
+}
+
+function automaticStagingFailure(measurementId: string, reason: string) {
+  automaticStagingFailedMeasurementId.value = measurementId
+  const message = `Automatic correction failed. ${reason} Recovery controls remain available. Automatic validation is blocked for this measurement.`
+  calibrationResult.value = 'error'
+  calibrationResultMessage.value = message
+  calIsError.value = true
+  calStatus.value = message
+  showToast(message)
+}
+
+async function stageRecommendedCorrectionAutomatically(
+  measurementId: string,
+  correction: RecommendedCorrection,
+) {
+  if (automaticStagingMeasurementId.value === measurementId) return
+  automaticStagingMeasurementId.value = measurementId
+  correctionPending.value = true
+  calibrationResult.value = null
+  calibrationResultMessage.value = ''
+  calIsError.value = false
+  calStatus.value = 'Applying the recommended correction…'
+  try {
+    const response = await withTimeout(request('calibration.applyCandidate', correctionPayload(correction)), 15_000)
+    if (!response) {
+      automaticStagingFailure(measurementId, 'The TV did not answer within 15s.')
+      return
+    }
+    const action = stateActionResult(response.payload)
+    if (action.snapshot) {
+      snapshot.value = action.snapshot
+      calibrationApplied.value = action.snapshot.calibration.active
+    }
+    const candidateStaged = action.ok
+      && action.snapshot?.calibration.transaction.state === 'candidate_pending'
+      && action.snapshot.calibration.liveDspStatus === 'verified'
+    if (!candidateStaged) {
+      automaticStagingFailure(measurementId, 'The TV did not confirm a verified pending candidate.')
+      return
+    }
+    calStatus.value = 'Correction staged. Validation will start automatically.'
+    calJson.value = JSON.stringify((action.snapshot.calibration.requestedBandsDb ?? action.snapshot.calibration.bandsDb).map((value) => Math.round(value * 10) / 10))
+  } catch (error: unknown) {
+    automaticStagingFailure(measurementId, error instanceof Error ? error.message : 'The TV rejected the correction.')
+  } finally {
+    correctionPending.value = false
+  }
+}
+
 async function applyCalibration() {
   if (snapshot.value?.capabilities.supportsCalibratedCorrection !== true) {
     calIsError.value = true
@@ -958,12 +1140,7 @@ async function applyRecommendedCorrection() {
   correctionPending.value = true
   calStatus.value = 'Applying recommended correction…'
   try {
-    const payload: Record<string, unknown> = { bandsDb: correction.bandsDb }
-    if (correction.independent && correction.leftBandsDb && correction.rightBandsDb) {
-      payload.leftBandsDb = correction.leftBandsDb
-      payload.rightBandsDb = correction.rightBandsDb
-    }
-    const res = await withTimeout(request('calibration.applyCandidate', payload), 15_000)
+    const res = await withTimeout(request('calibration.applyCandidate', correctionPayload(correction)), 15_000)
     if (!res) {
       calIsError.value = true
       calStatus.value = 'TV did not answer within 15s.'
@@ -990,7 +1167,10 @@ async function applyRecommendedCorrection() {
 
 async function rollbackCalibration() {
   const transaction = candidateTransaction.value
-  if (!transaction || correctionPending.value) return
+  if (!canIssueStandaloneCandidateRollback({
+    validationActive: measurementValidationActive.value,
+    candidatePending: transaction !== null,
+  }) || correctionPending.value) return
   correctionPending.value = true
   calStatus.value = 'Rolling back the last calibration…'
   try {
@@ -1018,7 +1198,7 @@ async function rollbackCalibration() {
 
 async function acceptCandidate() {
   const transaction = candidateTransaction.value
-  if (!transaction || correctionPending.value) return
+  if (!transaction || correctionPending.value || measurementValidationActive.value) return
   correctionPending.value = true
   calStatus.value = 'Accepting the calibration candidate…'
   try {
@@ -1044,6 +1224,7 @@ async function acceptCandidate() {
 }
 
 async function resetCalibration() {
+  if (measurementValidationActive.value) return
   calStatus.value = 'Resetting…'
   const transaction = candidateTransaction.value
   if (transaction) {
@@ -1073,6 +1254,7 @@ function getState() {
 
 function startMeasurement() {
   if (!snapshot.value?.capabilities.supportsSweep) return
+  if (correctionPending.value || measurementAbortRecovery.value.state !== 'idle') return
   if (!deviceOnline.value) {
     showToast('The TV connection is offline. Calibration cannot start.')
     return
@@ -1084,6 +1266,10 @@ function startMeasurement() {
 }
 
 function startValidation() {
+  if (measurementAbortRecovery.value.state !== 'idle') {
+    showToast('Resolve the pending validation recovery before starting another sweep.')
+    return
+  }
   if (!deviceOnline.value) {
     showToast('The TV connection is offline. Validation cannot start.')
     return

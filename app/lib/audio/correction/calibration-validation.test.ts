@@ -8,6 +8,7 @@ describe('calibration validation classification', () => {
   test('starts automatic validation only once for an eligible candidate', () => {
     const eligible = {
       measurementComplete: true,
+      measurementId: 'measurement-1',
       candidateId: 'candidate-1',
       baselineRepeatable: true,
       deviceValidationReady: true,
@@ -15,6 +16,7 @@ describe('calibration validation classification', () => {
       deviceOnline: true,
       validationActive: false,
       startedCandidateId: null,
+      stagingFailedMeasurementId: null,
     }
     expect(shouldStartAutomaticValidation(eligible)).toBe(true)
     expect(shouldStartAutomaticValidation({ ...eligible, startedCandidateId: 'candidate-1' })).toBe(false)
@@ -24,6 +26,7 @@ describe('calibration validation classification', () => {
     expect(shouldStartAutomaticValidation({ ...eligible, deviceOnline: false })).toBe(false)
     expect(shouldStartAutomaticValidation({ ...eligible, validationActive: true })).toBe(false)
     expect(shouldStartAutomaticValidation({ ...eligible, candidateId: null })).toBe(false)
+    expect(shouldStartAutomaticValidation({ ...eligible, stagingFailedMeasurementId: 'measurement-1' })).toBe(false)
   })
 
   test('requires improvement to exceed the tolerance', () => {
