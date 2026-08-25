@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { isMeasurementContext } from '../../../../shared/types/protocol'
 import {
   createMeasurementPlan,
   createMeasurementPlanForGroups,
@@ -18,6 +19,10 @@ describe('physical-position measurement sequencing', () => {
     expect(plan.every((context) => context.captureKind === 'position-composite')).toBe(true)
     expect(plan.every((context) => context.repairChannel === 'both')).toBe(true)
     expect(plan.every((context) => context.attemptIndex === 0)).toBe(true)
+  })
+
+  test('emits a complete TV measurement context for every planned position', () => {
+    expect(createMeasurementPlan().every((context) => isMeasurementContext(context))).toBe(true)
   })
 
   test('requires TV continuation only when moving to a new full position', () => {
