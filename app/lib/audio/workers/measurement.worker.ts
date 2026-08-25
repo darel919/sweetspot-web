@@ -1,7 +1,7 @@
 import { isMeasurementSweep } from '#shared/types/protocol'
 import {
-  analyzeMeasurement,
-  type MeasurementAnalysis,
+  analyzeCompositeMeasurement,
+  type CompositeMeasurementAnalysis,
 } from '../measurement/response'
 import { parseMicCalibrationProfile } from '../mics/profile'
 
@@ -16,7 +16,7 @@ interface MeasurementWorkerRequest {
 interface MeasurementWorkerResponse {
   id: number
   ok: boolean
-  result?: MeasurementAnalysis
+  result?: CompositeMeasurementAnalysis
   error?: string
 }
 
@@ -41,7 +41,7 @@ self.addEventListener('message', (event) => {
     if (!isMeasurementSweep(event.data.sweep)) throw new Error('Measurement worker received an invalid sweep.')
     const samples = new Float32Array(event.data.samples)
     const micProfile = parseMicCalibrationProfile(event.data.micProfile)
-    const result = analyzeMeasurement(
+    const result = analyzeCompositeMeasurement(
       samples,
       event.data.sampleRate,
       event.data.sweep,

@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "nuxt dev",
     "generate": "nuxt generate",
+    "generate:measurement-vector": "bun scripts/generate-measurement-sweep-vector.mjs",
     "verify:transport": "bun scripts/verify-websocket-only.mjs",
     "deploy": "bun run generate && bunx wrangler deploy",
     "test": "bun test"

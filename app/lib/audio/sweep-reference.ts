@@ -12,7 +12,9 @@ export function sweepSampleParts(sweep: MeasurementSweep, sampleRate = sweep.sam
   postRollSamples: number
   leadingMarkerStartSamples: number
   sweepStartSamples: number
+  rightSweepStartSamples: number
   trailingMarkerStartSamples: number
+  endMarkerSamples: number
   totalSamples: number
 } {
   const preRollSamples = sampleCountForMilliseconds(sweep.preRollMs, sampleRate)
@@ -22,7 +24,9 @@ export function sweepSampleParts(sweep: MeasurementSweep, sampleRate = sweep.sam
   const postRollSamples = sampleCountForMilliseconds(sweep.postRollMs, sampleRate)
   const leadingMarkerStartSamples = Math.max(0, preRollSamples - syncMarkerSamples - syncMarkerGapSamples)
   const sweepStartSamples = preRollSamples
-  const trailingMarkerStartSamples = sweepStartSamples + sweepSamples + postRollSamples + syncMarkerGapSamples
+  const rightSweepStartSamples = sweepStartSamples + sweepSamples + sampleCountForMilliseconds(sweep.interSweepGapMs, sampleRate)
+  const trailingMarkerStartSamples = rightSweepStartSamples + sweepSamples + syncMarkerGapSamples
+  const endMarkerSamples = Math.max(1, sampleCountForMilliseconds(sweep.endMarkerDurationMs, sampleRate))
   return {
     preRollSamples,
     syncMarkerSamples,
@@ -31,21 +35,29 @@ export function sweepSampleParts(sweep: MeasurementSweep, sampleRate = sweep.sam
     postRollSamples,
     leadingMarkerStartSamples,
     sweepStartSamples,
+    rightSweepStartSamples,
     trailingMarkerStartSamples,
-    totalSamples: trailingMarkerStartSamples + syncMarkerSamples,
+    endMarkerSamples,
+    totalSamples: trailingMarkerStartSamples + endMarkerSamples + postRollSamples,
   }
 }
 
-export function generateSyncMarker(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
+export function generateSyncMarker(
+  sweep: MeasurementSweep,
+  sampleRate = sweep.sampleRate,
+  kind: 'start' | 'end' = 'start',
+): Float32Array {
   const parts = sweepSampleParts(sweep, sampleRate)
-  const marker = new Float32Array(parts.syncMarkerSamples)
+  const marker = new Float32Array(kind === 'start' ? parts.syncMarkerSamples : parts.endMarkerSamples)
   const amplitude = 10 ** (sweep.levelDbfs / 20)
-  const durationSeconds = sweep.syncMarkerDurationMs / 1000
-  const chirpRate = (sweep.syncMarkerEndHz - sweep.syncMarkerStartHz) / durationSeconds
+  const durationSeconds = (kind === 'start' ? sweep.syncMarkerDurationMs : sweep.endMarkerDurationMs) / 1000
+  const startHz = kind === 'start' ? sweep.syncMarkerStartHz : sweep.endMarkerStartHz
+  const endHz = kind === 'start' ? sweep.syncMarkerEndHz : sweep.endMarkerEndHz
+  const chirpRate = (endHz - startHz) / durationSeconds
   for (let index = 0; index < marker.length; index++) {
     const progress = marker.length === 1 ? 0 : index / (marker.length - 1)
     const time = progress * durationSeconds
-    const phase = 2 * Math.PI * (sweep.syncMarkerStartHz * time + 0.5 * chirpRate * time * time)
+    const phase = 2 * Math.PI * (startHz * time + 0.5 * chirpRate * time * time)
     const window = marker.length <= 1 ? 1 : Math.sin(Math.PI * progress)
     marker[index] = amplitude * window * Math.sin(phase)
   }
@@ -78,9 +90,45 @@ export function generateSweepSignal(sweep: MeasurementSweep, sampleRate = sweep.
 export function generateSweepReference(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
   const parts = sweepSampleParts(sweep, sampleRate)
   const reference = new Float32Array(parts.totalSamples)
-  const marker = generateSyncMarker(sweep, sampleRate)
-  reference.set(marker, parts.leadingMarkerStartSamples)
+  reference.set(generateSyncMarker(sweep, sampleRate, 'start'), parts.leadingMarkerStartSamples)
   reference.set(generateSweepSignal(sweep, sampleRate), parts.sweepStartSamples)
-  reference.set(marker, parts.trailingMarkerStartSamples)
+  reference.set(generateSyncMarker(sweep, sampleRate, 'end'), parts.trailingMarkerStartSamples)
   return reference
+}
+
+export function generateCompositeSweepReference(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
+  const parts = sweepSampleParts(sweep, sampleRate)
+  const reference = generateSweepReference(sweep, sampleRate)
+  const right = generateSweepSignal(sweep, sampleRate)
+  for (let index = 0; index < right.length && parts.rightSweepStartSamples + index < reference.length; index++) {
+    reference[parts.rightSweepStartSamples + index] = right[index] ?? 0
+  }
+  return reference
+}
+
+/** Interleaved stereo reference matching MeasurementSweepGenerator's routing. */
+export function generateCompositeSweepStereoReference(
+  sweep: MeasurementSweep,
+  sampleRate = sweep.sampleRate,
+): Float32Array {
+  const parts = sweepSampleParts(sweep, sampleRate)
+  const start = generateSyncMarker(sweep, sampleRate, 'start')
+  const end = generateSyncMarker(sweep, sampleRate, 'end')
+  const leftSweep = generateSweepSignal(sweep, sampleRate)
+  const rightSweep = generateSweepSignal(sweep, sampleRate)
+  const left = new Float32Array(parts.totalSamples)
+  const right = new Float32Array(parts.totalSamples)
+  left.set(start, parts.leadingMarkerStartSamples)
+  right.set(start, parts.leadingMarkerStartSamples)
+  left.set(leftSweep, parts.sweepStartSamples)
+  right.set(rightSweep, parts.rightSweepStartSamples)
+  left.set(end, parts.trailingMarkerStartSamples)
+  right.set(end, parts.trailingMarkerStartSamples)
+
+  const interleaved = new Float32Array(parts.totalSamples * 2)
+  for (let index = 0; index < parts.totalSamples; index++) {
+    interleaved[index * 2] = left[index] ?? 0
+    interleaved[index * 2 + 1] = right[index] ?? 0
+  }
+  return interleaved
 }

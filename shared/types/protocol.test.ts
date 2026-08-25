@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   isEnvelope,
+  isCalibrationPackage,
   KNOWN_TYPES,
   isMeasurementContext,
   isMeasurementSweep,
@@ -11,6 +12,7 @@ import {
 
 const sweep = {
   algorithm: 'exponential-sine-v1',
+  captureKind: 'position-composite',
   sampleRate: 48_000,
   startHz: 20,
   endHz: 20_000,
@@ -21,6 +23,10 @@ const sweep = {
   syncMarkerEndHz: 4_000,
   syncMarkerDurationMs: 40,
   syncMarkerGapMs: 10,
+  endMarkerStartHz: 3_500,
+  endMarkerEndHz: 1_500,
+  endMarkerDurationMs: 40,
+  interSweepGapMs: 50,
   levelDbfs: -12,
   fadeInMs: 20,
   fadeOutMs: 20,
@@ -30,9 +36,9 @@ const context = {
   positionId: 'center',
   positionIndex: 0,
   positionCount: 5,
-  channel: 'left',
-  takeIndex: 0,
-  takeCount: 3,
+  channel: 'both',
+  captureKind: 'position-composite',
+  repairChannel: 'both',
   attemptIndex: 0,
   attemptCount: 2,
   phase: 'measurement',
@@ -49,11 +55,11 @@ describe('measurement protocol boundary', () => {
     expect(validatePayload('measurement.ready', { sessionId: 'cal_test', sweep: { ...sweep, endHz: 1 } })).not.toBeNull()
   })
 
-  test('accepts a routed position/take context and rejects invalid indexes', () => {
+  test('accepts a composite position context and rejects invalid indexes', () => {
     expect(isMeasurementContext(context)).toBe(true)
     expect(validatePayload('measurement.prepare', {
       sessionId: 'cal_test',
-      channel: 'left',
+      channel: 'both',
       context,
     })).toBeNull()
     expect(validatePayload('measurement.playSweep', {
@@ -62,7 +68,7 @@ describe('measurement protocol boundary', () => {
     })).toBeNull()
     expect(validatePayload('measurement.finished', {
       sessionId: 'cal_test',
-      context: { ...context, takeIndex: 3 },
+      context: { ...context, repairChannel: 'invalid' },
     })).not.toBeNull()
     expect(validatePayload('measurement.finished', {
       sessionId: 'cal_test',
@@ -70,7 +76,7 @@ describe('measurement protocol boundary', () => {
     })).not.toBeNull()
     expect(validatePayload('measurement.finished', {
       sessionId: 'cal_test',
-      context: { ...context, takeIndex: 3, takeCount: 4 },
+      context: { ...context, captureKind: 'single-channel' },
     })).not.toBeNull()
   })
 
@@ -180,6 +186,21 @@ describe('measurement protocol boundary', () => {
         },
       },
     })).toBe(true)
+    expect(isStateSnapshot({
+      ...snapshot,
+      calibration: {
+        ...snapshot.calibration,
+        active: true,
+        transaction: {
+          state: 'candidate_pending',
+          candidateId: 'candidate-imported',
+          validationStatus: 'imported',
+          beforeDb: null,
+          afterDb: null,
+          reason: 'Imported calibration is staged',
+        },
+      },
+    })).toBe(true)
     expect(isStateSnapshot({ ...snapshot, calibration: { ...snapshot.calibration, bandsDb: [0] } })).toBe(false)
     expect(isEnvelope({ v: 1, id: 'message', type: 'state.get', ts: 1_000, expiresAt: 31_000, payload: {} })).toBe(true)
     expect(isEnvelope({ v: 1, id: 'message', type: 'state.get', ts: 1_000, expiresAt: 1_000, payload: {} })).toBe(false)
@@ -205,6 +226,30 @@ describe('measurement protocol boundary', () => {
       status: 'inconclusive',
       reason: 'The center takes were not repeatable.',
     })).toBeNull()
+  })
+
+  test('validates portable calibration export and import messages', () => {
+    const bandsDb = Array.from({ length: 64 }, () => -1)
+    const pkg = {
+      format: 'sweetspot.calibration',
+      version: 1,
+      exportedAt: 1_757_000_000_000,
+      sourceDevice: { id: 'tv-1', name: 'TV', appVersion: '0.1.0' },
+      active: true,
+      frequenciesHz: Array.from({ length: 64 }, (_, index) => index + 20),
+      bandsDb,
+      effectiveBandsDb: bandsDb,
+    }
+    expect(isCalibrationPackage(pkg)).toBe(true)
+    expect(KNOWN_TYPES.has('calibration.export')).toBe(true)
+    expect(KNOWN_TYPES.has('calibration.import')).toBe(true)
+    expect(KNOWN_TYPES.has('calibration.exported')).toBe(true)
+    expect(validatePayload('calibration.export', {})).toBeNull()
+    expect(validatePayload('calibration.export', { unexpected: true })).not.toBeNull()
+    expect(validatePayload('calibration.import', pkg)).toBeNull()
+    expect(validatePayload('calibration.exported', pkg)).toBeNull()
+    expect(validatePayload('calibration.import', { ...pkg, bandsDb: [...bandsDb.slice(0, 63), 13] })).not.toBeNull()
+    expect(validatePayload('calibration.import', { ...pkg, leftBandsDb: bandsDb })).not.toBeNull()
   })
 
   test('accepts bounded diagnostic curves and rejects unsafe probe payloads', () => {
@@ -250,9 +295,9 @@ describe('measurement protocol boundary', () => {
         positionId: 'center',
         positionIndex: 0,
         positionCount: 1,
-        channel: 'left',
-        takeIndex: 0,
-        takeCount: 2,
+        channel: 'both',
+        captureKind: 'position-composite',
+        repairChannel: 'both',
         attemptIndex: 0,
         attemptCount: 2,
         phase: 'validation',
@@ -260,7 +305,7 @@ describe('measurement protocol boundary', () => {
     })).toBeNull()
     expect(validatePayload('calibrationSession.position.continued', {
       sessionId: 'cal_test',
-      context: { ...context, takeIndex: 3 },
+      context: { ...context, attemptIndex: 2 },
     })).not.toBeNull()
   })
 
@@ -275,6 +320,10 @@ describe('measurement protocol boundary', () => {
         signalPeak: 0.2,
         snrEstimateDb: 24,
         detectionOffsetMs: 1012,
+        startMarkerSample: 48_576,
+        endMarkerSample: 197_376,
+        expectedMarkerSeparationSamples: 148_800,
+        observedMarkerSeparationSamples: 148_800,
         syncMarkerConfidence: 0.9,
         endingMarkerConfidence: 0.88,
         clockDriftPpm: 25,

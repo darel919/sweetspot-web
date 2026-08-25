@@ -21,26 +21,37 @@ import { analyzeInWorker } from '../lib/audio/measurement/worker-client'
 import {
   aggregateResponse,
   allRepeatabilityPassed,
-  calculateRepeatability,
-  decideAdaptiveTake,
-  decideInvalidTake,
   type AggregateResponse,
   type MeasurementRecord,
   type RepeatabilitySummary,
 } from '../lib/audio/measurement/aggregation'
-import type { MeasurementAnalysis } from '../lib/audio/measurement/response'
+import type { MeasurementAnalysis, ResponsePoint } from '../lib/audio/measurement/response'
 import {
   createMeasurementPlan,
   createMeasurementPlanForGroups,
   createProbeMeasurementPlan,
-  createRetryContext,
-  createThirdTakeContext,
-  measurementGroupKey,
   positionForContext,
   requiresRemoteContinue,
-  type MeasurementGroup,
   type ProbePlanKind,
 } from '../lib/audio/measurement/plan'
+import {
+  appendCompositeCapture,
+  acceptedPositionCount,
+  createPositionLedger,
+  projectAcceptedRecords,
+  projectPhysicalPositionLedger,
+  type PositionLedger,
+} from '../lib/audio/measurement/position-ledger'
+import { decideNextCapture, type ConvergenceAssessment } from '../lib/audio/measurement/adaptive-planner'
+import {
+  checkCalibrationCheckpointCompatibility,
+  clearCalibrationCheckpoint,
+  createCalibrationCheckpoint,
+  loadCalibrationCheckpoint,
+  saveCalibrationCheckpoint,
+  type CalibrationCheckpoint,
+  type CalibrationCheckpointIdentity,
+} from '../lib/audio/measurement/checkpoint'
 import { sweepSampleParts } from '../lib/audio/sweep-reference'
 import { discoverMicCalibrationProfiles } from '../lib/audio/mics/registry'
 import type { MicCalibrationProfile } from '../lib/audio/mics/types'
@@ -68,7 +79,14 @@ type Connection = {
   isDeviceOnline: () => boolean
 }
 
+interface CalibrationSessionOptions {
+  getDeviceIdentity?: () => { id: string; appVersion: string } | null
+}
+
 const ABORT_RECOVERY_POLL_INTERVAL_MS = 400
+const CAPTURE_TAIL_AFTER_PLAYBACK_MS = 450
+const MAX_MEDIAN_CORRECTION_CHANGE_DB = 1.5
+const MAX_P95_CORRECTION_CHANGE_DB = 3
 
 export type CalibrationStage =
   | 'idle'
@@ -121,7 +139,7 @@ function isUserCancellationCode(code: CalibrationErrorCode): boolean {
   return code === 'calibration_aborted' || code === 'calibration_ui_closed'
 }
 
-export function useCalibrationSession(connection: Connection) {
+export function useCalibrationSession(connection: Connection, options: CalibrationSessionOptions = {}) {
   const stage = ref<CalibrationStage>('idle')
   const message = ref('')
   const analysis = shallowRef<MeasurementAnalysis | null>(null)
@@ -150,6 +168,9 @@ export function useCalibrationSession(connection: Connection) {
   const validationCandidateId = ref<string | null>(null)
   const completedMeasurementId = ref<string | null>(null)
   const abortRecovery = shallowRef<CalibrationAbortRecovery>({ state: 'idle' })
+  const resumeAvailable = ref(false)
+  const resumePositionCount = ref(0)
+  const resumeMessage = ref('')
 
   let disposed = false
   let sessionId: string | null = null
@@ -166,6 +187,7 @@ export function useCalibrationSession(connection: Connection) {
   let sessionGeneration = 0
   let plan: MeasurementContext[] = []
   let planIndex = 0
+  let positionLedger: PositionLedger | null = null
   let sessionMode: 'measurement' | 'validation' | 'probe' = 'measurement'
   let probePlanKind: ProbePlanKind | null = null
   const activeContext = shallowRef<MeasurementContext | null>(null)
@@ -173,6 +195,10 @@ export function useCalibrationSession(connection: Connection) {
   let takeStartInFlightGeneration: number | null = null
   let loudnessRequested = false
   let loudnessComplete = false
+  let validationConfirmationUsed = false
+  let checkpointWriteChain: Promise<void> = Promise.resolve()
+  let loadedResumeCheckpoint: CalibrationCheckpoint | null = null
+  let previousConvergencePoints: readonly ResponsePoint[] | null = null
 
   const repeatabilityPassed = computed(() =>
     allRepeatabilityPassed(aggregateLeft.value) && allRepeatabilityPassed(aggregateRight.value))
@@ -189,7 +215,7 @@ export function useCalibrationSession(connection: Connection) {
     probeRepeatabilitySummaries.value.filter((summary) => !summary.passed))
   const currentPosition = computed(() => activeContext.value ? positionForContext(activeContext.value) : null)
   const currentChannel = computed(() => {
-    const channel = activeContext.value?.channel
+    const channel = activeContext.value?.repairChannel ?? activeContext.value?.channel
     return channel === 'left' || channel === 'right' || channel === 'both' ? channel : null
   })
   const currentInstruction = computed(() => {
@@ -336,6 +362,90 @@ export function useCalibrationSession(connection: Connection) {
     if (currentCapture) closeMicrophone(currentCapture)
   }
 
+  function currentCheckpointIdentity(): CalibrationCheckpointIdentity | null {
+    const device = options.getDeviceIdentity?.() ?? null
+    const currentProfile = profile ?? profiles.value.find((candidate) => candidate.id === selectedProfileId.value) ?? null
+    if (!device || !currentProfile) return null
+    return {
+      deviceId: device.id,
+      appVersion: device.appVersion,
+      profileId: currentProfile.id,
+      profileSourceDate: currentProfile.sourceDate,
+      capturePathStatus: currentProfile.capturePathStatus,
+      sampleRate: captureMetadata.value?.sampleRate ?? null,
+    }
+  }
+
+  async function refreshResumeCheckpoint(): Promise<void> {
+    const identity = currentCheckpointIdentity()
+    if (!identity) {
+      resumeAvailable.value = false
+      resumePositionCount.value = 0
+      return
+    }
+    try {
+      const checkpoint = await loadCalibrationCheckpoint(identity.deviceId)
+      loadedResumeCheckpoint = checkpoint
+      if (!checkpoint) {
+        resumeAvailable.value = false
+        resumePositionCount.value = 0
+        resumeMessage.value = ''
+        return
+      }
+      const compatibility = checkCalibrationCheckpointCompatibility(checkpoint, identity)
+      if (!compatibility.compatible) {
+        resumeAvailable.value = false
+        resumePositionCount.value = 0
+        resumeMessage.value = 'A saved calibration cannot be resumed because the TV or microphone setup has changed.'
+        return
+      }
+      resumeAvailable.value = true
+      resumePositionCount.value = acceptedPositionCount(checkpoint.ledger)
+      resumeMessage.value = ''
+    } catch {
+      loadedResumeCheckpoint = null
+      resumeAvailable.value = false
+      resumePositionCount.value = 0
+    }
+  }
+
+  function persistPositionCheckpoint(): void {
+    const ledger = positionLedger
+    const identity = currentCheckpointIdentity()
+    if (!ledger || !identity || !sessionId || !profile) return
+    const checkpoint = createCalibrationCheckpoint({
+      sessionId,
+      device: { id: identity.deviceId, appVersion: identity.appVersion },
+      microphone: {
+        profileId: profile.id,
+        sourceDate: profile.sourceDate,
+        capturePathStatus: profile.capturePathStatus,
+        sampleRate: identity.sampleRate,
+      },
+      captureMetadata: captureMetadata.value,
+      ledger,
+      validationStarted: false,
+    })
+    checkpointWriteChain = checkpointWriteChain
+      .then(() => saveCalibrationCheckpoint(checkpoint))
+      .catch(() => undefined)
+    loadedResumeCheckpoint = checkpoint
+    resumeAvailable.value = true
+    resumePositionCount.value = acceptedPositionCount(ledger)
+  }
+
+  function clearPersistedCheckpoint(): void {
+    const device = options.getDeviceIdentity?.() ?? null
+    if (!device) return
+    checkpointWriteChain = checkpointWriteChain
+      .then(() => clearCalibrationCheckpoint(device.id))
+      .catch(() => undefined)
+    loadedResumeCheckpoint = null
+    resumeAvailable.value = false
+    resumePositionCount.value = 0
+    resumeMessage.value = ''
+  }
+
   function rebuildAggregates() {
     const current = records.value
     aggregateLeft.value = aggregateResponse(current, 'left')
@@ -346,6 +456,109 @@ export function useCalibrationSession(connection: Connection) {
   function rebuildValidationAggregates() {
     validationAggregateLeft.value = aggregateResponse(validationRecords.value, 'left')
     validationAggregateRight.value = aggregateResponse(validationRecords.value, 'right')
+  }
+
+  function assessConvergence(): ConvergenceAssessment | null {
+    if (!positionLedger || sessionMode !== 'measurement') return null
+    const physical = projectPhysicalPositionLedger(positionLedger)
+    if (physical.positions.filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted').length < 3) {
+      return null
+    }
+    const spread = aggregateBoth.value?.spreadDb ?? []
+    const currentPoints = aggregateBoth.value?.points ?? []
+    if (spread.length === 0) {
+      return {
+        sufficient: false,
+        medianCorrectionChangeDb: null,
+        p95CorrectionChangeDb: null,
+        medianSpatialSpreadDb: null,
+        lowFrequencySpreadDb: null,
+        highConfidenceBandFraction: 0,
+      }
+    }
+    const sorted = spread.map((point) => point.magnitudeDb).sort((left, right) => left - right)
+    const percentile = (fraction: number): number | null => {
+      const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)))
+      return sorted[index] ?? null
+    }
+    const lowFrequency = spread.filter((point) => point.frequencyHz <= 200).map((point) => point.magnitudeDb)
+    const lowSorted = lowFrequency.sort((left, right) => left - right)
+    const lowMedian = lowSorted.length === 0 ? null : lowSorted[Math.floor(lowSorted.length / 2)] ?? null
+    const medianSpread = percentile(0.5)
+    const p95Spread = percentile(0.95)
+    const correctionChanges = previousConvergencePoints === null
+      ? []
+      : currentPoints.flatMap((point) => {
+        const previous = previousConvergencePoints?.find((candidate) => Math.abs(candidate.frequencyHz - point.frequencyHz) < 0.001)
+        return previous ? [Math.abs(point.magnitudeDb - previous.magnitudeDb)] : []
+      }).sort((left, right) => left - right)
+    const correctionPercentile = (fraction: number): number | null => {
+      if (correctionChanges.length === 0) return null
+      const index = Math.min(correctionChanges.length - 1, Math.max(0, Math.round((correctionChanges.length - 1) * fraction)))
+      return correctionChanges[index] ?? null
+    }
+    const medianCorrectionChangeDb = correctionPercentile(0.5)
+    const p95CorrectionChangeDb = correctionPercentile(0.95)
+    const highConfidenceBandFraction = spread.filter((point) => point.magnitudeDb <= 3).length / spread.length
+    const correctionStable = medianCorrectionChangeDb === null || (
+      medianCorrectionChangeDb <= MAX_MEDIAN_CORRECTION_CHANGE_DB
+      && (p95CorrectionChangeDb ?? Number.POSITIVE_INFINITY) <= MAX_P95_CORRECTION_CHANGE_DB
+    )
+    return {
+      sufficient: medianSpread !== null
+        && p95Spread !== null
+        && (lowMedian === null || lowMedian <= 4)
+        && medianSpread <= 3
+        && p95Spread <= 6
+        && correctionStable
+        && highConfidenceBandFraction >= 0.5,
+      medianCorrectionChangeDb,
+      p95CorrectionChangeDb,
+      medianSpatialSpreadDb: medianSpread,
+      lowFrequencySpreadDb: lowMedian,
+      highConfidenceBandFraction,
+    }
+  }
+
+  function contextForAdaptiveDecision(decision: Extract<ReturnType<typeof decideNextCapture>, { kind: 'capture' }>): MeasurementContext {
+    return {
+      positionId: decision.position.id,
+      positionIndex: decision.positionIndex,
+      positionCount: decision.requestedPositionCount,
+      channel: 'both',
+      captureKind: 'position-composite',
+      repairChannel: decision.repairChannel,
+      attemptIndex: decision.attemptIndex,
+      attemptCount: 2,
+      phase: 'measurement',
+    }
+  }
+
+  function scheduleAdaptiveNext(): void {
+    if (!positionLedger) return
+    const decision = decideNextCapture(projectPhysicalPositionLedger(positionLedger), assessConvergence())
+    if (decision.kind === 'finish') {
+      if (decision.outcome === 'insufficient') {
+        void fail(
+          'measurement_unstable',
+          'Calibration could not collect the minimum three high-quality listening positions. No correction was generated; you can retry the affected setup or resume the saved readings.',
+        )
+        return
+      }
+      void finishMeasurement()
+      return
+    }
+    if (decision.kind === 'abort') {
+      void fail('sync_marker_not_found', decision.message)
+      return
+    }
+    const next = contextForAdaptiveDecision(decision)
+    plan = [next]
+    planIndex = 0
+    progress.value = { current: progress.value.current, total: next.positionCount }
+    activeContext.value = next
+    if (requiresRemoteContinue(next)) waitForPosition(next)
+    else sendPrepare(next)
   }
 
   function responseChannel(aggregate: AggregateResponse | null): MeasurementResponsePayload['left'] {
@@ -370,31 +583,14 @@ export function useCalibrationSession(connection: Connection) {
     connection.send('measurement.response', { sessionId, current, total, left, right })
   }
 
-  function sessionRecords(): readonly MeasurementRecord[] {
-    return sessionMode === 'validation' ? validationRecords.value : records.value
-  }
-
-  function groupRecords(group: Pick<MeasurementContext, 'positionId' | 'channel'>): MeasurementRecord[] {
-    const key = measurementGroupKey(group)
-    return sessionRecords().filter((record) => measurementGroupKey(record.context) === key)
-  }
-
-  function maybeScheduleThirdTake(context: MeasurementContext): boolean {
-    const decision = decideAdaptiveTake(sessionRecords(), context)
-    if (decision.kind !== 'schedule-third') return false
-    plan.splice(planIndex + 1, 0, createThirdTakeContext(context))
-    progress.value = { ...progress.value, total: progress.value.total + 1 }
-    return true
-  }
-
   function repeatabilityFailureMessage(groups: readonly RepeatabilitySummary[]): string {
     if (groups.length === 0) return ''
     return groups.map((group) => {
-      if (group.failureReason === 'insufficient_takes') {
-        const failedTakes = group.failedTakeIndices.map((index) => index + 1).join(', ')
-        return `${group.positionId} ${group.channel} channel (only ${group.takeCount}/${group.expectedTakeCount} valid takes; failed take${group.failedTakeIndices.length === 1 ? '' : 's'} ${failedTakes})`
-      }
-      return `${group.positionId} ${group.channel} channel (median ${group.medianSpreadDb.toFixed(1)} dB, max ${group.maxSpreadDb.toFixed(1)} dB, ${Math.round(group.withinTwoDbFraction * 100)}% within 2 dB)`
+      if (group.failureReason === 'capture_rejected') return `${group.positionId} ${group.channel} channel was not usable`
+      const medianSpread = group.medianSpreadDb === null ? 'unknown' : `${group.medianSpreadDb.toFixed(1)} dB`
+      const maxSpread = group.maxSpreadDb === null ? 'unknown' : `${group.maxSpreadDb.toFixed(1)} dB`
+      const withinTwoDb = group.withinTwoDbFraction === null ? 'unknown' : `${Math.round(group.withinTwoDbFraction * 100)}%`
+      return `${group.positionId} ${group.channel} channel (median ${medianSpread}, max ${maxSpread}, ${withinTwoDb} within 2 dB)`
     }).join('; ')
   }
 
@@ -442,7 +638,11 @@ export function useCalibrationSession(connection: Connection) {
     clearPositionKeepAlive()
     clearSessionKeepAlive()
     if (currentSessionId && !ownsValidationAbort && code !== 'calibration_aborted') {
-      connection.send('calibrationSession.abort', { sessionId: currentSessionId, code })
+      connection.send('calibrationSession.abort', {
+        sessionId: currentSessionId,
+        code,
+        message: boundedAbortMessage(text),
+      })
     }
     if (code === 'calibration_aborted' && !ownsValidationAbort) connection.send('state.get')
     await closeCapture()
@@ -543,18 +743,18 @@ export function useCalibrationSession(connection: Connection) {
     }, 25_000)
   }
 
-  function advanceAfterTake(
-    currentContext: MeasurementContext,
-    addedThirdTake = false,
-    notice: string | null = null,
-  ) {
+  function advanceAfterCapture(currentContext: MeasurementContext) {
     const operationGeneration = sessionGeneration
     const operationSessionId = sessionId
     if (!isCurrentOperation(operationGeneration, operationSessionId)) return
     planIndex++
     if (sessionMode === 'validation') rebuildValidationAggregates()
     else rebuildAggregates()
-    if (sessionMode === 'measurement') sendResponseGraph(progress.value.current, progress.value.total)
+    if (sessionMode === 'measurement') {
+      sendResponseGraph(progress.value.current, progress.value.total)
+      scheduleAdaptiveNext()
+      return
+    }
     const next = plan[planIndex]
     if (!next) {
       void finishMeasurement()
@@ -566,13 +766,7 @@ export function useCalibrationSession(connection: Connection) {
     }
     sendPrepare(next)
     activeContext.value = next
-    if (notice) {
-      message.value = notice
-      sendProgress('preparing', notice)
-    } else if (addedThirdTake) {
-      message.value = `${currentContext.positionId} ${currentContext.channel} measurements were borderline. Adding one repeat to check them.`
-      sendProgress('preparing', message.value)
-    }
+    message.value = 'Follow the instructions on the TV.'
   }
 
   async function startTake(context: MeasurementContext, operationGeneration = sessionGeneration) {
@@ -670,9 +864,10 @@ export function useCalibrationSession(connection: Connection) {
 
   async function startMode(
     mode: 'measurement' | 'validation' | 'probe',
-    retryGroups: readonly MeasurementGroup[] | null = null,
+    _retryGroups: readonly unknown[] | null = null,
     candidateId: string | null = null,
     nextProbePlanKind: ProbePlanKind | null = null,
+    resumeCheckpoint: CalibrationCheckpoint | null = null,
   ) {
     if (disposed || ['requesting-microphone', 'preparing', 'loudness', 'position-pause', 'recording', 'analyzing', 'ending'].includes(stage.value)) return
     if (abortRecovery.value.state === 'pending' || abortRecovery.value.state === 'awaiting-readback') return
@@ -682,6 +877,7 @@ export function useCalibrationSession(connection: Connection) {
       return
     }
     sessionMode = mode
+    const resumingMeasurement = mode === 'measurement' && resumeCheckpoint !== null
     abortRecovery.value = { state: 'idle' }
     if (mode === 'measurement') completedMeasurementId.value = null
     probePlanKind = mode === 'probe' ? nextProbePlanKind : null
@@ -696,18 +892,13 @@ export function useCalibrationSession(connection: Connection) {
     validationCandidateId.value = mode === 'validation' ? candidateId : null
     if (mode === 'measurement' || mode === 'probe') {
       analysis.value = null
-      if (mode === 'measurement' && retryGroups && retryGroups.length > 0) {
-        const retryKeys = new Set(retryGroups.map((group) => measurementGroupKey(group)))
-        records.value = records.value.filter((record) => !retryKeys.has(measurementGroupKey(record.context)))
-      } else {
-        records.value = []
-      }
-      if (mode === 'measurement' && retryGroups && retryGroups.length > 0) rebuildAggregates()
-      else {
-        aggregateLeft.value = null
-        aggregateRight.value = null
-        aggregateBoth.value = null
-      }
+      records.value = []
+      aggregateLeft.value = null
+      aggregateRight.value = null
+      aggregateBoth.value = null
+      positionLedger = null
+      previousConvergencePoints = null
+      if (!resumingMeasurement) loadedResumeCheckpoint = null
     } else {
       validationAnalysis.value = null
       validationRecords.value = []
@@ -720,21 +911,19 @@ export function useCalibrationSession(connection: Connection) {
     captureMetadata.value = null
     plan = mode === 'validation'
       ? createMeasurementPlanForGroups([
-          { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'left' },
-          { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'right' },
+          { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'both' },
         ], 'validation')
       : mode === 'probe'
         ? createProbeMeasurementPlan(probePlanKind as ProbePlanKind)
-        : retryGroups && retryGroups.length > 0
-          ? createMeasurementPlanForGroups(retryGroups)
-          : createMeasurementPlan()
-    progress.value = { current: 0, total: plan.length }
+        : [createMeasurementPlan()[0]!]
+    progress.value = { current: 0, total: mode === 'measurement' ? plan[0]?.positionCount ?? 3 : plan.length }
     estimatedRemainingSeconds.value = null
     planIndex = 0
     activeContext.value = null
     preparedContext = null
     loudnessRequested = false
     loudnessComplete = false
+    validationConfirmationUsed = false
     stage.value = 'requesting-microphone'
     message.value = 'Loading microphone profiles…'
     try {
@@ -743,7 +932,36 @@ export function useCalibrationSession(connection: Connection) {
         await closeCapture()
         return
       }
+      if (resumingMeasurement && resumeCheckpoint) {
+        const identity = currentCheckpointIdentity()
+        const compatibility = identity
+          ? checkCalibrationCheckpointCompatibility(resumeCheckpoint, identity)
+          : { compatible: false as const, reason: 'device' as const }
+        if (!compatibility.compatible) {
+          resumeAvailable.value = false
+          resumeMessage.value = 'The saved calibration cannot be resumed because the TV or microphone setup changed.'
+          throw new Error(resumeMessage.value)
+        }
+      }
       sessionId = newSessionId()
+      if (mode === 'measurement') {
+        positionLedger = resumingMeasurement && resumeCheckpoint
+          ? { ...resumeCheckpoint.ledger, sessionId }
+          : createPositionLedger(sessionId)
+        records.value = projectAcceptedRecords(positionLedger)
+        rebuildAggregates()
+        if (resumingMeasurement && positionLedger) {
+          const decision = decideNextCapture(projectPhysicalPositionLedger(positionLedger), null)
+          if (decision.kind === 'capture') {
+            const next = contextForAdaptiveDecision(decision)
+            plan = [next]
+            progress.value = {
+              current: acceptedPositionCount(positionLedger),
+              total: next.positionCount,
+            }
+          }
+        }
+      }
       stage.value = 'preparing'
       message.value = 'Preparing the TV measurement. Follow the instructions on the TV.'
       armTimeout()
@@ -770,6 +988,16 @@ export function useCalibrationSession(connection: Connection) {
     void startMode('measurement')
   }
 
+  async function resume() {
+    if (disposed || isCalibrationActiveStage(stage.value)) return
+    await refreshResumeCheckpoint()
+    if (!loadedResumeCheckpoint || !resumeAvailable.value) {
+      message.value = resumeMessage.value || 'There is no compatible saved calibration to resume.'
+      return
+    }
+    void startMode('measurement', null, null, null, loadedResumeCheckpoint)
+  }
+
   function startValidation(candidateId: string) {
     void startMode('validation', null, candidateId)
   }
@@ -780,10 +1008,8 @@ export function useCalibrationSession(connection: Connection) {
 
   function retryFailedGroups() {
     if (stage.value !== 'complete' || sessionMode !== 'measurement') return
-    const groups = failedRepeatabilityGroups.value.filter((summary): summary is RepeatabilitySummary & MeasurementGroup =>
-      summary.channel === 'left' || summary.channel === 'right')
-    if (groups.length === 0) return
-    void startMode('measurement', groups)
+    if (failedRepeatabilityGroups.value.length === 0) return
+    void startMode('measurement')
   }
 
   async function onReady(payload: unknown) {
@@ -833,6 +1059,8 @@ export function useCalibrationSession(connection: Connection) {
     sendProgress('analyzing')
     try {
       if (!currentRecorder) throw new Error('Microphone recorder is unavailable.')
+      await new Promise<void>((resolve) => setTimeout(resolve, CAPTURE_TAIL_AFTER_PLAYBACK_MS))
+      if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       const recording = await currentRecorder.stop()
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       captureDiagnostics.value = recording.diagnostics
@@ -851,78 +1079,129 @@ export function useCalibrationSession(connection: Connection) {
       if (!currentProfile) throw new Error('Microphone calibration profile is unavailable.')
       const result = await analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile)
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
-      const nextProgress = { current: progress.value.current + 1, total: progress.value.total }
-      const diagnostics: MeasurementDiagnosticsValues = {
-        analysisStatus: result.status,
-        failureReason: result.diagnostics.failureReason,
-        signalRms: result.diagnostics.signalRms,
-        signalPeak: result.diagnostics.signalPeak,
-        snrEstimateDb: Number.isFinite(result.diagnostics.snrEstimateDb ?? Number.NaN) ? result.diagnostics.snrEstimateDb : null,
-        detectionOffsetMs: Number.isFinite(result.diagnostics.detectionOffsetMs ?? Number.NaN) ? result.diagnostics.detectionOffsetMs : null,
-        envelopeOnlyOffsetMs: Number.isFinite(result.diagnostics.envelopeOnlyOffsetMs ?? Number.NaN) ? result.diagnostics.envelopeOnlyOffsetMs : null,
-        syncMarkerConfidence: result.diagnostics.detectionConfidence,
-        endingMarkerConfidence: result.diagnostics.endingMarkerConfidence,
-        clockDriftPpm: Number.isFinite(result.diagnostics.clockDriftPpm ?? Number.NaN) ? result.diagnostics.clockDriftPpm : null,
-        clipped: result.diagnostics.clipped,
-        clippedSamples: result.diagnostics.clippedSamples,
-        directArrivalMs: result.room?.directArrivalMs ?? null,
-        directToLateDb: result.room?.directToLateDb ?? null,
-        c50Db: result.room?.c50Db ?? null,
-        c80Db: result.room?.c80Db ?? null,
-        edtMs: result.room?.edtMs ?? null,
-        t20Ms: result.room?.t20Ms ?? null,
-        t30Ms: result.room?.t30Ms ?? null,
-        earlyReflections: result.room?.earlyReflections.length ?? 0,
-        decayConfidence: result.room?.decayConfidence ?? 'low',
+      const diagnosticsFor = (child: MeasurementAnalysis, channel: 'left' | 'right'): MeasurementDiagnosticsValues => ({
+        channel,
+        analysisStatus: child.status,
+        failureReason: child.diagnostics.failureReason,
+        signalRms: child.diagnostics.signalRms,
+        signalPeak: child.diagnostics.signalPeak,
+        snrEstimateDb: Number.isFinite(child.diagnostics.snrEstimateDb ?? Number.NaN) ? child.diagnostics.snrEstimateDb : null,
+        detectionOffsetMs: Number.isFinite(child.diagnostics.detectionOffsetMs ?? Number.NaN) ? child.diagnostics.detectionOffsetMs : null,
+        envelopeOnlyOffsetMs: Number.isFinite(child.diagnostics.envelopeOnlyOffsetMs ?? Number.NaN) ? child.diagnostics.envelopeOnlyOffsetMs : null,
+        startMarkerSample: result.detection.leadingMarkerSample,
+        endMarkerSample: result.detection.trailingMarkerSample,
+        expectedMarkerSeparationSamples: result.detection.expectedMarkerSeparationSamples,
+        observedMarkerSeparationSamples: result.detection.observedMarkerSeparationSamples,
+        syncMarkerConfidence: child.diagnostics.detectionConfidence,
+        endingMarkerConfidence: child.diagnostics.endingMarkerConfidence,
+        clockDriftPpm: Number.isFinite(child.diagnostics.clockDriftPpm ?? Number.NaN) ? child.diagnostics.clockDriftPpm : null,
+        clipped: child.diagnostics.clipped,
+        clippedSamples: child.diagnostics.clippedSamples,
+        directArrivalMs: child.room?.directArrivalMs ?? null,
+        directToLateDb: child.room?.directToLateDb ?? null,
+        c50Db: child.room?.c50Db ?? null,
+        c80Db: child.room?.c80Db ?? null,
+        edtMs: child.room?.edtMs ?? null,
+        t20Ms: child.room?.t20Ms ?? null,
+        t30Ms: child.room?.t30Ms ?? null,
+        earlyReflections: child.room?.earlyReflections.length ?? 0,
+        decayConfidence: child.room?.decayConfidence ?? 'low',
         ...(captureMetadata.value ? { captureMetadata: captureMetadata.value } : {}),
-      }
-      if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
+      })
+      const leftDiagnostics = diagnosticsFor(result.left, 'left')
+      const rightDiagnostics = diagnosticsFor(result.right, 'right')
+      const currentPositionCount = currentContext.positionCount
       connection.send('measurement.diagnostics', {
         sessionId: operationSessionId,
         context: currentContext,
-        current: result.status === 'ok' ? nextProgress.current : progress.value.current,
-        total: nextProgress.total,
-        diagnostics,
+        current: progress.value.current,
+        total: currentPositionCount,
+        diagnostics: leftDiagnostics,
       })
-      if (result.status !== 'ok') {
-        const invalidDecision = decideInvalidTake(currentContext.attemptIndex)
-        const retryContext = invalidDecision.kind === 'retry' ? createRetryContext(currentContext) : null
-        if (retryContext) {
-          plan[planIndex] = retryContext
-          activeContext.value = retryContext
-          message.value = `${retryContext.positionId} ${retryContext.channel} channel · Take ${retryContext.takeIndex + 1} of ${retryContext.takeCount}\n` +
-            `Retry ${retryContext.attemptIndex} of ${retryContext.attemptCount - 1}\n` +
-            `Previous attempt rejected: ${result.status.replaceAll('_', ' ')}`
-          sendPrepare(retryContext)
+      connection.send('measurement.diagnostics', {
+        sessionId: operationSessionId,
+        context: currentContext,
+        current: progress.value.current,
+        total: currentPositionCount,
+        diagnostics: rightDiagnostics,
+      })
+
+      const acceptedRecords = (child: MeasurementAnalysis, channel: 'left' | 'right'): MeasurementRecord[] =>
+        child.status === 'ok' && child.correctedPoints.length > 1
+          ? [{ context: currentContext, channel, analysis: child }]
+          : []
+      const rejectedDiagnostics = [
+        result.left.status === 'ok' ? null : { context: currentContext, diagnostics: leftDiagnostics },
+        result.right.status === 'ok' ? null : { context: currentContext, diagnostics: rightDiagnostics },
+      ].filter((value): value is { context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues } => value !== null)
+      if (rejectedDiagnostics.length > 0) failedTakeDiagnostics.value = [...failedTakeDiagnostics.value, ...rejectedDiagnostics]
+
+      if (sessionMode === 'validation') {
+        const nextRecords = [
+          ...acceptedRecords(result.left, 'left'),
+          ...acceptedRecords(result.right, 'right'),
+        ]
+        validationRecords.value = [...validationRecords.value, ...nextRecords]
+        validationAnalysis.value = result.left.status === 'ok' ? result.left : result.right
+        rebuildValidationAggregates()
+        const hasBothChannels = result.left.status === 'ok' && result.right.status === 'ok'
+        if (!hasBothChannels && !validationConfirmationUsed) {
+          validationConfirmationUsed = true
+          const confirmation = { ...currentContext, attemptIndex: 1 }
+          plan[planIndex] = confirmation
+          activeContext.value = confirmation
+          message.value = 'Validation was inconclusive. One confirmation reading will be taken.'
+          sendPrepare(confirmation)
           return
         }
-        if (sessionMode === 'validation') {
-          failedTakeDiagnostics.value = [...failedTakeDiagnostics.value, { context: currentContext, diagnostics }]
-          await fail(analysisErrorCode(result.status), measurementFailureMessage(result))
+        if (!hasBothChannels && validationConfirmationUsed) {
+          await fail(analysisErrorCode(result.left.status === 'ok' ? result.right.status : result.left.status), measurementFailureMessage(result.left.status === 'ok' ? result.right : result.left))
           return
         }
-        failedTakeDiagnostics.value = [...failedTakeDiagnostics.value, { context: currentContext, diagnostics }]
-        records.value = [...records.value, { context: currentContext, analysis: result }]
-        progress.value = nextProgress
-        advanceAfterTake(currentContext, false, measurementFailureMessage(result))
+        progress.value = { current: 1, total: 1 }
+        advanceAfterCapture(currentContext)
         return
       }
-      if (sessionMode === 'validation') {
-        validationAnalysis.value = result
-        validationRecords.value = [...validationRecords.value, { context: currentContext, analysis: result }]
-      } else {
-        analysis.value = result
-        records.value = [...records.value, { context: currentContext, analysis: result }]
+
+      if (sessionMode === 'probe') {
+        records.value = [...records.value, ...acceptedRecords(result.left, 'left'), ...acceptedRecords(result.right, 'right')]
+        rebuildAggregates()
+        if (result.status !== 'ok' && currentContext.attemptIndex + 1 < currentContext.attemptCount) {
+          const retry = { ...currentContext, attemptIndex: currentContext.attemptIndex + 1 }
+          plan[planIndex] = retry
+          activeContext.value = retry
+          message.value = 'Repeating this position. The previous reading was not clear enough.'
+          sendPrepare(retry)
+          return
+        }
+        progress.value = { current: progress.value.current + 1, total: progress.value.total }
+        advanceAfterCapture(currentContext)
+        return
       }
-      progress.value = nextProgress
-      const addedThirdTake = maybeScheduleThirdTake(currentContext)
-      const finalGroupSummary = (sessionMode === 'measurement' || sessionMode === 'probe') && currentContext.takeIndex === 2
-        ? calculateRepeatability(groupRecords(currentContext))
-        : null
-      const finalGroupNotice = finalGroupSummary && !finalGroupSummary.passed
-        ? `${currentContext.positionId} ${currentContext.channel} repeatability still failed: ${repeatabilityFailureMessage([finalGroupSummary])}`
-        : null
-      advanceAfterTake(currentContext, addedThirdTake, finalGroupNotice)
+      if (!positionLedger) throw new Error('Calibration position ledger is unavailable.')
+      const acceptedChannelsBefore = projectAcceptedRecords(positionLedger).length
+      const previousAggregatePoints = aggregateBoth.value?.points ?? null
+      positionLedger = appendCompositeCapture(positionLedger, {
+        context: currentContext,
+        analysis: result,
+        captureMetadata: captureMetadata.value,
+        acceptedAt: Date.now(),
+      })
+      const acceptedRecordsInLedger = projectAcceptedRecords(positionLedger)
+      records.value = acceptedRecordsInLedger
+      const projected = projectPhysicalPositionLedger(positionLedger)
+      const acceptedPositionTotal = projected.positions.filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted').length
+      if (acceptedRecordsInLedger.length > acceptedChannelsBefore) persistPositionCheckpoint()
+      previousConvergencePoints = previousAggregatePoints
+      analysis.value = result.left.status === 'ok' ? result.left : result.right
+      progress.value = { current: acceptedPositionTotal, total: Math.max(progress.value.total, currentPositionCount) }
+      if (result.status !== 'ok') {
+        message.value = result.status === 'partial'
+          ? 'Repeating this position. One channel reading was not clear enough.'
+          : measurementFailureMessage(result.left.status !== 'ok' ? result.left : result.right)
+        sendProgress('preparing', message.value)
+      }
+      advanceAfterCapture(currentContext)
     } catch (error: unknown) {
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       await fail('sweep_not_found', error instanceof Error ? error.message : 'Measurement analysis failed.')
@@ -961,6 +1240,7 @@ export function useCalibrationSession(connection: Connection) {
     const currentSessionId = sessionId
     if (!currentSessionId) {
       invalidateSessionGeneration()
+      clearPersistedCheckpoint()
       validationFailed.value = false
       validationActive.value = false
       stage.value = 'idle'
@@ -977,6 +1257,7 @@ export function useCalibrationSession(connection: Connection) {
     clearPositionKeepAlive()
     clearSessionKeepAlive()
     void closeCapture()
+    clearPersistedCheckpoint()
     sessionId = null
     sweep = null
     profile = null
@@ -1071,7 +1352,10 @@ export function useCalibrationSession(connection: Connection) {
         message.value = endedAbort.details.message
         return
       }
-      if (endedMode === 'measurement' && hadAnalysis) completedMeasurementId.value = endedSessionId
+      if (endedMode === 'measurement' && hadAnalysis) {
+        completedMeasurementId.value = endedSessionId
+        if (positionLedger && acceptedPositionCount(positionLedger) >= 3) clearPersistedCheckpoint()
+      }
       stage.value = hadAnalysis ? 'complete' : 'idle'
       message.value = hadAnalysis
         ? endedMode === 'validation'
@@ -1173,11 +1457,16 @@ export function useCalibrationSession(connection: Connection) {
     failedTakeDiagnostics: readonly(failedTakeDiagnostics),
     captureInfo,
     captureMetadata: readonly(captureMetadata),
+    resumeAvailable: readonly(resumeAvailable),
+    resumePositionCount: readonly(resumePositionCount),
+    resumeMessage: readonly(resumeMessage),
     profiles: readonly(profiles),
     selectedProfileId,
     profileError: readonly(profileError),
     loadProfiles,
     start,
+    resume,
+    refreshResumeCheckpoint,
     startValidation,
     startProbe,
     retryFailedGroups,

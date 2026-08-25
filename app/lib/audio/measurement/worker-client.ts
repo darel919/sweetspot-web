@@ -1,5 +1,5 @@
 import type { MeasurementSweep } from '#shared/types/protocol'
-import type { MeasurementAnalysis } from './response'
+import type { CompositeMeasurementAnalysis } from './response'
 import type { MicCalibrationProfile } from '../mics/types'
 
 interface MeasurementWorkerRequest {
@@ -13,12 +13,12 @@ interface MeasurementWorkerRequest {
 interface MeasurementWorkerResponse {
   id: number
   ok: boolean
-  result?: MeasurementAnalysis
+  result?: CompositeMeasurementAnalysis
   error?: string
 }
 
 interface PendingRequest {
-  resolve: (result: MeasurementAnalysis) => void
+  resolve: (result: CompositeMeasurementAnalysis) => void
   reject: (error: Error) => void
 }
 
@@ -87,7 +87,7 @@ export function analyzeInWorker(
   sampleRate: number,
   sweep: MeasurementSweep,
   micProfile: MicCalibrationProfile,
-): Promise<MeasurementAnalysis> {
+): Promise<CompositeMeasurementAnalysis> {
   return new Promise((resolve, reject) => {
     let currentWorker: Worker
     try {

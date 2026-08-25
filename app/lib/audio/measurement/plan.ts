@@ -1,26 +1,20 @@
-import type { CalibrationChannel, CalibrationPositionId, MeasurementContext } from '#shared/types/protocol'
+import type {
+  CalibrationChannel,
+  CalibrationPositionId,
+  MeasurementContext,
+} from '#shared/types/protocol'
+import { DEFAULT_POSITION_SPECS, type PositionSpec } from './physical-position'
 
-export interface CalibrationPosition {
-  id: CalibrationPositionId
-  label: string
-  instruction: string
-}
+export interface CalibrationPosition extends PositionSpec {}
 
-export const CALIBRATION_POSITIONS: readonly [CalibrationPosition, ...CalibrationPosition[]] = [
-  { id: 'center', label: 'normal head position', instruction: 'Hold the iPhone at your normal listening position.' },
-  { id: 'left', label: '20 cm left', instruction: 'Move the iPhone about 20 cm to the left.' },
-  { id: 'right', label: '20 cm right', instruction: 'Move the iPhone about 20 cm to the right.' },
-  { id: 'forward', label: '20 cm forward / slightly up', instruction: 'Move the iPhone about 20 cm forward and slightly up.' },
-  { id: 'backward', label: '20 cm backward / slightly down', instruction: 'Move the iPhone about 20 cm backward and slightly down.' },
-]
+export const CALIBRATION_POSITIONS: readonly [CalibrationPosition, ...CalibrationPosition[]] = DEFAULT_POSITION_SPECS
 
-export const MEASUREMENT_CHANNELS: readonly Exclude<CalibrationChannel, 'both'>[] = ['left', 'right']
-export const REPEAT_COUNT = 2
-export const MAX_REPEAT_COUNT = 3
 export const MAX_ATTEMPT_COUNT = 2
+export const MIN_POSITION_COUNT = 3
+export const MAX_POSITION_COUNT = 5
 
-export function requiresRemoteContinue(context: Pick<MeasurementContext, 'positionIndex' | 'takeIndex'>): boolean {
-  return context.positionIndex > 0 && context.takeIndex === 0
+export function requiresRemoteContinue(context: Pick<MeasurementContext, 'positionIndex' | 'repairChannel' | 'attemptIndex'>): boolean {
+  return context.positionIndex > 0 && context.attemptIndex === 0 && context.repairChannel === 'both'
 }
 
 export interface MeasurementGroup {
@@ -41,90 +35,80 @@ export function measurementGroupForContext(context: MeasurementContext): Measure
 
 export function measurementGroupKey(group: {
   positionId: CalibrationPositionId
-  channel: CalibrationChannel
+  channel?: CalibrationChannel
 }): string {
-  return `${group.positionId}:${group.channel}`
+  return group.positionId
 }
 
-function contextsForGroups(
-  groups: readonly MeasurementGroup[],
-  repeats: number,
+function compositeContext(
+  position: PositionSpec,
+  positionIndex: number,
+  positionCount: number,
   phase: MeasurementContext['phase'],
-): MeasurementContext[] {
-  const takeCount = Math.max(1, Math.min(MAX_REPEAT_COUNT, Math.floor(repeats)))
-  return groups.flatMap((group) => Array.from({ length: takeCount }, (_, takeIndex) => ({
-    ...group,
-    takeIndex,
-    takeCount,
-    attemptIndex: 0,
+  repairChannel: MeasurementContext['repairChannel'] = 'both',
+  attemptIndex = 0,
+): MeasurementContext {
+  return {
+    positionId: position.id,
+    positionIndex,
+    positionCount,
+    channel: 'both',
+    captureKind: 'position-composite',
+    repairChannel,
+    attemptIndex,
     attemptCount: MAX_ATTEMPT_COUNT,
     phase,
-  })))
+  }
 }
 
 export function createMeasurementPlan(
-  repeats = REPEAT_COUNT,
+  _repeats = 1,
   phase: MeasurementContext['phase'] = 'measurement',
 ): MeasurementContext[] {
-  const groups: MeasurementGroup[] = CALIBRATION_POSITIONS.flatMap((position, positionIndex) =>
-    MEASUREMENT_CHANNELS.map((channel) => ({
-      positionId: position.id,
-      positionIndex,
-      positionCount: CALIBRATION_POSITIONS.length,
-      channel,
-    })))
-  return contextsForGroups(groups, repeats, phase)
+  return DEFAULT_POSITION_SPECS.slice(0, MIN_POSITION_COUNT)
+    .map((position, positionIndex) => compositeContext(position, positionIndex, MIN_POSITION_COUNT, phase))
 }
 
 export function createMeasurementPlanForGroups(
   groups: readonly MeasurementGroup[],
   phase: MeasurementContext['phase'] = 'measurement',
 ): MeasurementContext[] {
-  return contextsForGroups(groups, REPEAT_COUNT, phase)
+  const positions = groups
+    .map((group) => DEFAULT_POSITION_SPECS.find((position) => position.id === group.positionId))
+    .filter((position): position is PositionSpec => position !== undefined)
+    .filter((position, index, all) => all.findIndex((candidate) => candidate.id === position.id) === index)
+  const positionCount = Math.max(1, Math.min(MAX_POSITION_COUNT, positions.length))
+  return positions.map((position, positionIndex) => compositeContext(position, positionIndex, positionCount, phase))
 }
 
 export type ProbePlanKind = 'transfer' | 'routing'
 
-/**
- * Diagnostic probe plans always play both output channels. The transfer plan
- * keeps one microphone at center; the routing plan moves that same microphone
- * between fixed left and right positions so it does not depend on a stereo
- * capture device or browser channel labeling.
- */
 export function createProbeMeasurementPlan(
   kind: ProbePlanKind,
-  repeats = REPEAT_COUNT,
+  _repeats = 1,
 ): MeasurementContext[] {
   const positions = kind === 'transfer'
-    ? [{ id: 'center' as const, positionIndex: 0 }]
-    : [{ id: 'left' as const, positionIndex: 0 }, { id: 'right' as const, positionIndex: 1 }]
-  const groups: MeasurementGroup[] = positions.map(({ id, positionIndex }) => ({
-    positionId: id,
-    positionIndex,
-    positionCount: positions.length,
-    channel: 'both',
-  }))
-  return contextsForGroups(groups, repeats, 'measurement')
-}
-
-export function createThirdTakeContext(context: MeasurementContext): MeasurementContext {
-  return {
-    ...context,
-    takeIndex: MAX_REPEAT_COUNT - 1,
-    takeCount: MAX_REPEAT_COUNT,
-    attemptIndex: 0,
-    attemptCount: MAX_ATTEMPT_COUNT,
-  }
+    ? [DEFAULT_POSITION_SPECS[0]!]
+    : [DEFAULT_POSITION_SPECS[1]!, DEFAULT_POSITION_SPECS[2]!]
+  return positions.map((position, positionIndex) => compositeContext(position, positionIndex, positions.length, 'measurement'))
 }
 
 export function createRetryContext(context: MeasurementContext): MeasurementContext | null {
   if (context.attemptIndex >= context.attemptCount - 1) return null
+  return { ...context, attemptIndex: context.attemptIndex + 1 }
+}
+
+export function createRepairContext(
+  context: MeasurementContext,
+  repairChannel: Exclude<MeasurementContext['repairChannel'], 'both'>,
+): MeasurementContext {
   return {
     ...context,
-    attemptIndex: context.attemptIndex + 1,
+    repairChannel,
+    attemptIndex: Math.min(context.attemptCount - 1, context.attemptIndex + 1),
   }
 }
 
 export function positionForContext(context: MeasurementContext): CalibrationPosition {
-  return CALIBRATION_POSITIONS.find((position) => position.id === context.positionId) ?? CALIBRATION_POSITIONS[0]
+  return CALIBRATION_POSITIONS.find((position) => position.id === context.positionId) ?? CALIBRATION_POSITIONS[0]!
 }

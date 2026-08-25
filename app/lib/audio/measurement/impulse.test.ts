@@ -10,6 +10,7 @@ import {
 
 const sweep = {
   algorithm: 'exponential-sine-v1' as const,
+  captureKind: 'position-composite' as const,
   sampleRate: 8_000,
   startHz: 20,
   endHz: 3_500,
@@ -20,6 +21,10 @@ const sweep = {
   syncMarkerEndHz: 3_000,
   syncMarkerDurationMs: 20,
   syncMarkerGapMs: 10,
+  endMarkerStartHz: 3_400,
+  endMarkerEndHz: 1_200,
+  endMarkerDurationMs: 20,
+  interSweepGapMs: 20,
   levelDbfs: -12,
   fadeInMs: 10,
   fadeOutMs: 10,

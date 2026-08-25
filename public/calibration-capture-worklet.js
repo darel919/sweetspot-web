@@ -6,6 +6,7 @@ class SweetSpotPcmCaptureProcessor extends AudioWorkletProcessor {
     this.port.onmessage = (event) => {
       if (event.data?.type === 'start') this.recording = true
       if (event.data?.type === 'flush') this.flushRequested = true
+      if (event.data?.type === 'pause') this.recording = false
     }
   }
 
@@ -20,7 +21,6 @@ class SweetSpotPcmCaptureProcessor extends AudioWorkletProcessor {
     if (output) output.fill(0)
     if (this.flushRequested) {
       this.flushRequested = false
-      this.recording = false
       this.port.postMessage({ type: 'flushed' })
     }
     return true

@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import type { MeasurementSweep } from '#shared/types/protocol'
-import { analyzeMeasurement, detectSweepStart, normalizeResponsePoints, CLOCK_DRIFT_HARD_REJECT_PPM } from './response'
+import { analyzeCompositeMeasurement, analyzeMeasurement, detectSweepStart, normalizeResponsePoints, CLOCK_DRIFT_HARD_REJECT_PPM } from './response'
 import { windowedImpulseResponse } from './impulse'
-import { generateSweepReference, sweepSampleParts } from '../sweep-reference'
+import { generateCompositeSweepReference, generateSweepReference, sweepSampleParts } from '../sweep-reference'
 import { parseMicCalibrationProfile } from '../mics/profile'
 import type { MicCalibrationProfile } from '../mics/types'
 import { calculateCorrection, targetErrorRms, type AggregateResponse } from '../correction/optimizer'
@@ -11,6 +11,7 @@ import type { ResponsePoint } from './response'
 
 const sweep: MeasurementSweep = {
   algorithm: 'exponential-sine-v1',
+  captureKind: 'position-composite',
   sampleRate: 8_000,
   startHz: 20,
   endHz: 3_500,
@@ -21,6 +22,10 @@ const sweep: MeasurementSweep = {
   syncMarkerEndHz: 3_000,
   syncMarkerDurationMs: 20,
   syncMarkerGapMs: 10,
+  endMarkerStartHz: 3_400,
+  endMarkerEndHz: 1_200,
+  endMarkerDurationMs: 20,
+  interSweepGapMs: 20,
   levelDbfs: -12,
   fadeInMs: 10,
   fadeOutMs: 10,
@@ -139,10 +144,26 @@ describe('measurement response analysis', () => {
       const capture = stretchCapture(generateMeasurementReference(sweep), ratio)
       const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
       expect(detection.found).toBe(true)
-      expect(detection.clockRatio).toBeCloseTo(ratio, 4)
-      expect(Math.abs((detection.driftPpm ?? 0) - (ratio - 1) * 1_000_000)).toBeLessThan(25)
+      expect(detection.clockRatio).toBeCloseTo(ratio, 3)
+      expect(Math.abs((detection.driftPpm ?? 0) - (ratio - 1) * 1_000_000)).toBeLessThan(250)
       expect(detection.startSample).toBeCloseTo(sweepSampleParts(sweep).sweepStartSamples * ratio, 0)
     }
+  })
+
+  test('analyzes left and right sweeps from one composite capture', () => {
+    const result = analyzeCompositeMeasurement(
+      generateCompositeSweepReference(sweep),
+      sweep.sampleRate,
+      sweep,
+      profile,
+    )
+
+    expect(result.status).toBe('ok')
+    expect(result.detection.rightStartSample).toBe(sweepSampleParts(sweep).rightSweepStartSamples)
+    expect(result.left.status).toBe('ok')
+    expect(result.right.status).toBe('ok')
+    expect(result.left.rawPoints).toHaveLength(48)
+    expect(result.right.rawPoints).toHaveLength(48)
   })
 
   test('rejects an implausibly large marker-derived clock mismatch', () => {

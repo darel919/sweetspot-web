@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB } from '../../../../shared/types/protocol'
-import { classifyCalibrationValidation, shouldStartAutomaticValidation } from './calibration-validation'
+import {
+  classifyCalibrationValidation,
+  shouldRunValidationConfirmation,
+  shouldStartAutomaticValidation,
+} from './calibration-validation'
 
 const quality = { baselineRepeatable: true, validationRepeatable: true }
 
@@ -59,5 +63,12 @@ describe('calibration validation classification', () => {
     expect(classifyCalibrationValidation({ ...quality, beforeDb: null, afterDb: 2 }).status).toBe('inconclusive')
     expect(classifyCalibrationValidation({ ...quality, baselineRepeatable: false, beforeDb: 4, afterDb: 1 }).status).toBe('inconclusive')
     expect(classifyCalibrationValidation({ ...quality, validationRepeatable: false, beforeDb: 4, afterDb: 1 }).status).toBe('inconclusive')
+  })
+
+  test('allows exactly one confirmation capture for a borderline candidate', () => {
+    const outcome = { status: 'inconclusive' as const, reason: 'borderline' }
+    expect(shouldRunValidationConfirmation({ outcome, candidateId: 'candidate-1', confirmedCandidateId: null })).toBe(true)
+    expect(shouldRunValidationConfirmation({ outcome, candidateId: 'candidate-1', confirmedCandidateId: 'candidate-1' })).toBe(false)
+    expect(shouldRunValidationConfirmation({ outcome: { status: 'improved', beforeDb: 4, afterDb: 2 }, candidateId: 'candidate-1', confirmedCandidateId: null })).toBe(false)
   })
 })

@@ -60,6 +60,25 @@ export interface DeviceInfo {
   appVersion: string
 }
 
+export const CALIBRATION_PACKAGE_FORMAT = 'sweetspot.calibration' as const
+export const CALIBRATION_PACKAGE_VERSION = 1 as const
+export const CALIBRATION_PACKAGE_MAX_GAIN_DB = 12
+
+export interface CalibrationPackage {
+  format: typeof CALIBRATION_PACKAGE_FORMAT
+  version: typeof CALIBRATION_PACKAGE_VERSION
+  exportedAt: number
+  sourceDevice: DeviceInfo
+  active: boolean
+  frequenciesHz: number[]
+  bandsDb: number[]
+  leftBandsDb?: number[]
+  rightBandsDb?: number[]
+  effectiveBandsDb?: number[]
+  effectiveLeftBandsDb?: number[]
+  effectiveRightBandsDb?: number[]
+}
+
 export interface EngineState {
   enabled: boolean
   hasControl: boolean
@@ -96,7 +115,7 @@ export interface CalibrationState {
   transaction: CalibrationTransaction
 }
 
-export type CalibrationValidationStatus = 'pending' | 'rolling_back' | 'passed' | 'worse' | 'inconclusive' | 'failed'
+export type CalibrationValidationStatus = 'pending' | 'rolling_back' | 'passed' | 'worse' | 'inconclusive' | 'failed' | 'imported'
 
 export const CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB = 0.5
 
@@ -126,6 +145,8 @@ export interface ProfileListPayload {
 }
 
 export interface CalibrationCurvePayload extends CalibrationState {}
+
+export interface CalibrationExportRequestPayload {}
 
 export interface ProbeResultEntry {
   requested: number
@@ -158,6 +179,10 @@ export type CalibrationPositionId = 'center' | 'left' | 'right' | 'forward' | 'b
 
 export type MeasurementPhase = 'measurement' | 'validation'
 
+export type MeasurementRepairChannel = 'both' | 'left' | 'right'
+
+export type MeasurementCaptureKind = 'position-composite'
+
 export type CalibrationProgressStage =
   | 'loudness'
   | 'preparing'
@@ -172,8 +197,8 @@ export interface MeasurementContext {
   positionIndex: number
   positionCount: number
   channel: CalibrationChannel
-  takeIndex: number
-  takeCount: number
+  captureKind: MeasurementCaptureKind
+  repairChannel: MeasurementRepairChannel
   attemptIndex: number
   attemptCount: number
   phase: MeasurementPhase
@@ -244,6 +269,7 @@ export interface CalibrationSessionPositionContinuedPayload extends CalibrationS
 
 export interface MeasurementSweep {
   algorithm: 'exponential-sine-v1'
+  captureKind: MeasurementCaptureKind
   sampleRate: number
   startHz: number
   endHz: number
@@ -254,6 +280,10 @@ export interface MeasurementSweep {
   syncMarkerEndHz: number
   syncMarkerDurationMs: number
   syncMarkerGapMs: number
+  endMarkerStartHz: number
+  endMarkerEndHz: number
+  endMarkerDurationMs: number
+  interSweepGapMs: number
   levelDbfs: number
   fadeInMs: number
   fadeOutMs: number
@@ -290,6 +320,7 @@ export interface MeasurementErrorPayload extends CalibrationSessionPayload {
 }
 
 export interface MeasurementDiagnosticsValues {
+  channel?: 'left' | 'right' | 'both'
   analysisStatus?: 'ok' | 'signal_too_low' | 'sweep_not_found' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
   failureReason?: string | null
   signalRms: number
@@ -297,6 +328,10 @@ export interface MeasurementDiagnosticsValues {
   snrEstimateDb: number | null
   detectionOffsetMs: number | null
   envelopeOnlyOffsetMs?: number | null
+  startMarkerSample?: number | null
+  endMarkerSample?: number | null
+  expectedMarkerSeparationSamples?: number | null
+  observedMarkerSeparationSamples?: number | null
   syncMarkerConfidence: number
   endingMarkerConfidence: number
   clockDriftPpm: number | null
@@ -433,7 +468,8 @@ function isCalibrationTransaction(value: unknown): value is CalibrationTransacti
       || value.validationStatus === 'passed'
       || value.validationStatus === 'worse'
       || value.validationStatus === 'inconclusive'
-      || value.validationStatus === 'failed')
+      || value.validationStatus === 'failed'
+      || value.validationStatus === 'imported')
     && isNullableFiniteNumber(value.beforeDb)
     && isNullableFiniteNumber(value.afterDb)
     && (value.reason === null || typeof value.reason === 'string')
@@ -587,6 +623,8 @@ const DEVICE_TARGETED_TYPES = [
   'calibration.rollbackCandidate',
   'calibration.validation.result',
   'calibration.reset',
+  'calibration.export',
+  'calibration.import',
   'calibrationSession.begin',
   'calibrationSession.end',
   'calibrationSession.abort',
@@ -629,6 +667,7 @@ export const KNOWN_TYPES = new Set<string>([
   'measurement.started',
   'measurement.finished',
   'measurement.error',
+  'calibration.exported',
   'probe.status',
   'probe.result',
   'diagnostics.deviceInfo',
@@ -745,10 +784,9 @@ export function isMeasurementContext(value: unknown): value is MeasurementContex
   if (!isInteger(value.positionIndex) || value.positionIndex < 0 || value.positionIndex >= 16) return false
   if (!isInteger(value.positionCount) || value.positionCount < 1 || value.positionCount > 16) return false
   if (value.positionIndex >= value.positionCount) return false
-  if (!isCalibrationChannel(value.channel)) return false
-  if (!isInteger(value.takeIndex) || value.takeIndex < 0 || value.takeIndex >= 16) return false
-  if (!isInteger(value.takeCount) || value.takeCount < 1 || value.takeCount > 3) return false
-  if (value.takeIndex >= value.takeCount) return false
+  if (value.channel !== 'both') return false
+  if (value.captureKind !== 'position-composite') return false
+  if (value.repairChannel !== 'both' && value.repairChannel !== 'left' && value.repairChannel !== 'right') return false
   if (!isInteger(value.attemptIndex) || value.attemptIndex < 0 || value.attemptIndex >= 2) return false
   if (!isInteger(value.attemptCount) || value.attemptCount < 1 || value.attemptCount > 2) return false
   if (value.attemptIndex >= value.attemptCount) return false
@@ -850,6 +888,7 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
       || diagnostics.analysisStatus === 'clock_drift_unreliable'
       || diagnostics.analysisStatus === 'capture_too_short'
       || diagnostics.analysisStatus === 'capture_clipped')
+    && (diagnostics.channel === undefined || diagnostics.channel === 'left' || diagnostics.channel === 'right' || diagnostics.channel === 'both')
     && (diagnostics.failureReason === undefined || diagnostics.failureReason === null || typeof diagnostics.failureReason === 'string')
     && isFiniteNumber(diagnostics.signalRms)
     && diagnostics.signalRms >= 0
@@ -859,6 +898,10 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
     && isNullableFiniteNumber(diagnostics.detectionOffsetMs)
     && (diagnostics.detectionOffsetMs === null || diagnostics.detectionOffsetMs >= 0)
     && (!('envelopeOnlyOffsetMs' in diagnostics) || isNullableFiniteNumber(diagnostics.envelopeOnlyOffsetMs))
+    && (!('startMarkerSample' in diagnostics) || isNullableFiniteNumber(diagnostics.startMarkerSample))
+    && (!('endMarkerSample' in diagnostics) || isNullableFiniteNumber(diagnostics.endMarkerSample))
+    && (!('expectedMarkerSeparationSamples' in diagnostics) || isNullableFiniteNumber(diagnostics.expectedMarkerSeparationSamples))
+    && (!('observedMarkerSeparationSamples' in diagnostics) || isNullableFiniteNumber(diagnostics.observedMarkerSeparationSamples))
     && (diagnostics.captureMetadata === undefined || isMeasurementCaptureMetadata(diagnostics.captureMetadata))
     && isFiniteNumber(diagnostics.syncMarkerConfidence)
     && diagnostics.syncMarkerConfidence >= 0
@@ -919,6 +962,56 @@ function isDbArray(value: unknown): value is number[] {
   return Array.isArray(value)
     && value.length === 64
     && value.every(isFiniteNumber)
+}
+
+function isCalibrationPackageGainArray(value: unknown): value is number[] {
+  return Array.isArray(value)
+    && value.length === 64
+    && value.every((gain) => isFiniteNumber(gain)
+      && gain >= -CALIBRATION_PACKAGE_MAX_GAIN_DB
+      && gain <= CALIBRATION_PACKAGE_MAX_GAIN_DB)
+}
+
+function isCalibrationPackageFrequencyArray(value: unknown): value is number[] {
+  if (!Array.isArray(value) || value.length !== 64) return false
+  for (let index = 0; index < value.length; index++) {
+    const frequency = value[index]
+    if (!isFiniteNumber(frequency) || frequency <= 0) return false
+    const previous = index > 0 ? value[index - 1] : undefined
+    if (previous !== undefined && frequency <= previous) return false
+  }
+  return true
+}
+
+export function isCalibrationPackage(value: unknown): value is CalibrationPackage {
+  if (!isRecord(value)
+    || value.format !== CALIBRATION_PACKAGE_FORMAT
+    || value.version !== CALIBRATION_PACKAGE_VERSION
+    || !isFiniteNumber(value.exportedAt)
+    || value.exportedAt <= 0
+    || typeof value.active !== 'boolean'
+    || !isRecord(value.sourceDevice)
+    || typeof value.sourceDevice.id !== 'string'
+    || value.sourceDevice.id.length === 0
+    || value.sourceDevice.id.length > 256
+    || typeof value.sourceDevice.name !== 'string'
+    || value.sourceDevice.name.length === 0
+    || value.sourceDevice.name.length > 256
+    || typeof value.sourceDevice.appVersion !== 'string'
+    || value.sourceDevice.appVersion.length === 0
+    || value.sourceDevice.appVersion.length > 64
+    || !isCalibrationPackageFrequencyArray(value.frequenciesHz)
+    || !isCalibrationPackageGainArray(value.bandsDb)) return false
+
+  const hasLeft = value.leftBandsDb !== undefined
+  const hasRight = value.rightBandsDb !== undefined
+  const hasEffectiveLeft = value.effectiveLeftBandsDb !== undefined
+  const hasEffectiveRight = value.effectiveRightBandsDb !== undefined
+  return hasLeft === hasRight
+    && (!hasLeft || (isCalibrationPackageGainArray(value.leftBandsDb) && isCalibrationPackageGainArray(value.rightBandsDb)))
+    && hasEffectiveLeft === hasEffectiveRight
+    && (!hasEffectiveLeft || (isCalibrationPackageGainArray(value.effectiveLeftBandsDb) && isCalibrationPackageGainArray(value.effectiveRightBandsDb)))
+    && (value.effectiveBandsDb === undefined || isCalibrationPackageGainArray(value.effectiveBandsDb))
 }
 
 function isProbeDbArray(value: unknown): value is number[] {
@@ -991,6 +1084,7 @@ function isCalibrationValidationResultPayload(value: unknown): value is Calibrat
 export function isMeasurementSweep(value: unknown): value is MeasurementSweep {
   if (!isRecord(value)) return false
   if (value.algorithm !== 'exponential-sine-v1') return false
+  if (value.captureKind !== 'position-composite') return false
   if (!isFiniteNumber(value.sampleRate) || !Number.isInteger(value.sampleRate)) return false
   if (value.sampleRate < 8_000 || value.sampleRate > 192_000) return false
   if (!isFiniteNumber(value.startHz) || value.startHz <= 0) return false
@@ -1004,6 +1098,11 @@ export function isMeasurementSweep(value: unknown): value is MeasurementSweep {
   if (value.syncMarkerEndHz >= value.sampleRate / 2) return false
   if (!isFiniteNumber(value.syncMarkerDurationMs) || value.syncMarkerDurationMs <= 0 || value.syncMarkerDurationMs > 1_000) return false
   if (!isFiniteNumber(value.syncMarkerGapMs) || value.syncMarkerGapMs < 0 || value.syncMarkerGapMs > 1_000) return false
+  if (!isFiniteNumber(value.endMarkerStartHz) || value.endMarkerStartHz <= 0) return false
+  if (!isFiniteNumber(value.endMarkerEndHz) || value.endMarkerEndHz <= 0 || value.endMarkerEndHz === value.endMarkerStartHz) return false
+  if (Math.max(value.endMarkerStartHz, value.endMarkerEndHz) >= value.sampleRate / 2) return false
+  if (!isFiniteNumber(value.endMarkerDurationMs) || value.endMarkerDurationMs <= 0 || value.endMarkerDurationMs > 1_000) return false
+  if (!isFiniteNumber(value.interSweepGapMs) || value.interSweepGapMs < 0 || value.interSweepGapMs > 1_000) return false
   if (value.preRollMs < value.syncMarkerDurationMs + value.syncMarkerGapMs) return false
   if (!isFiniteNumber(value.levelDbfs) || value.levelDbfs > 0 || value.levelDbfs < -120) return false
   if (!isFiniteNumber(value.fadeInMs) || value.fadeInMs < 0 || value.fadeInMs > value.durationMs) return false
@@ -1109,11 +1208,17 @@ export function validatePayload(type: string, payload: unknown): string | null {
       return isAbortPayload(payload) ? null : `${type} requires sessionId and a valid code`
     case 'calibration.applyCandidate':
       return isCalibrationApplyPayload(payload) ? null : `${type} requires 64 finite bands and optional paired channel curves`
+    case 'calibration.export':
+      return isRecord(payload) && Object.keys(payload).length === 0 ? null : `${type} requires an empty request payload`
+    case 'calibration.import':
+      return isCalibrationPackage(payload) ? null : `${type} requires a valid SweetSpot calibration package`
     case 'calibration.acceptCandidate':
     case 'calibration.rollbackCandidate':
       return isCandidateActionPayload(payload) ? null : `${type} requires a candidateId`
     case 'calibration.validation.result':
       return isCalibrationValidationResultPayload(payload) ? null : `${type} requires a candidateId and a valid validation result`
+    case 'calibration.exported':
+      return isCalibrationPackage(payload) ? null : `${type} requires a valid SweetSpot calibration package`
     case 'measurement.ready':
     case 'measurement.started':
       return isSessionWithSweep(payload) ? null : `${type} requires sessionId and sweep`

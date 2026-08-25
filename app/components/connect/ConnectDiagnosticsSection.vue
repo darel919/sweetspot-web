@@ -37,9 +37,13 @@ const emit = defineEmits<{
   (event: 'fetch-device-info'): void
 }>()
 
+function readNumber(event: Event, emitName: 'set-probe-band'): void
+function readNumber(event: Event, emitName: 'set-probe-gain-db'): void
 function readNumber(event: Event, emitName: 'set-probe-band' | 'set-probe-gain-db') {
   if (!(event.target instanceof HTMLInputElement)) return
-  emit(emitName, Number.isNaN(event.target.valueAsNumber) ? event.target.value : event.target.valueAsNumber)
+  const value = Number.isNaN(event.target.valueAsNumber) ? event.target.value : event.target.valueAsNumber
+  if (emitName === 'set-probe-band') emit(emitName, value)
+  else emit(emitName, value)
 }
 
 function fmtBytes(bytes: number): string {

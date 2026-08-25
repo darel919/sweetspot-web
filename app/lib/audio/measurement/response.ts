@@ -26,6 +26,7 @@ export interface ResponsePoint {
 export interface SweepDetection {
   found: boolean
   startSample: number | null
+  rightStartSample: number | null
   leadingMarkerSample: number | null
   trailingMarkerSample: number | null
   /** Recorder-timeline estimate used only to diagnose a missing marker pair. */
@@ -38,6 +39,8 @@ export interface SweepDetection {
   clockRatio: number | null
   /** (clockRatio - 1) * 1e6; recorder clock drift relative to the TV. */
   driftPpm: number | null
+  expectedMarkerSeparationSamples: number | null
+  observedMarkerSeparationSamples: number | null
   failureReason: 'sync_marker_not_found' | 'clock_drift_unreliable' | null
 }
 
@@ -142,9 +145,10 @@ function estimateCaptureNoiseRms(
   sampleRate: number,
   sweep: MeasurementSweep,
   startSample: number,
+  noiseAnchorSample = startSample,
 ): number | null {
   const parts = sweepSampleParts(sweep, sampleRate)
-  const signalStart = Math.min(samples.length, startSample)
+  const signalStart = Math.min(samples.length, noiseAnchorSample)
   const noiseEnd = Math.max(0, signalStart - parts.syncMarkerGapSamples - parts.syncMarkerSamples)
   const noiseStart = Math.max(0, noiseEnd - Math.min(parts.preRollSamples, Math.round(sampleRate * 0.25)))
   if (noiseEnd <= noiseStart) return null
@@ -156,11 +160,17 @@ function estimateCaptureNoiseRms(
   return median(blockLevels)
 }
 
-function estimateSnr(samples: Float32Array, sampleRate: number, sweep: MeasurementSweep, startSample: number): number | null {
+function estimateSnr(
+  samples: Float32Array,
+  sampleRate: number,
+  sweep: MeasurementSweep,
+  startSample: number,
+  noiseAnchorSample = startSample,
+): number | null {
   const parts = sweepSampleParts(sweep, sampleRate)
   const signalStart = Math.min(samples.length, startSample)
   const signalEnd = Math.min(samples.length, signalStart + parts.sweepSamples)
-  const noise = estimateCaptureNoiseRms(samples, sampleRate, sweep, startSample)
+  const noise = estimateCaptureNoiseRms(samples, sampleRate, sweep, startSample, noiseAnchorSample)
   const signal = blockRms(samples, signalStart, Math.max(1, signalEnd - signalStart))
   if (!(signal > 0)) return null
   if (noise === null || !(noise > 0)) return Number.POSITIVE_INFINITY
@@ -171,6 +181,7 @@ function emptySweepDetection(failureReason: SweepDetection['failureReason'] = 's
   return {
     found: false,
     startSample: null,
+    rightStartSample: null,
     leadingMarkerSample: null,
     trailingMarkerSample: null,
     envelopeOnlyOffsetMs: null,
@@ -179,6 +190,8 @@ function emptySweepDetection(failureReason: SweepDetection['failureReason'] = 's
     endingMarkerConfidence: 0,
     clockRatio: null,
     driftPpm: null,
+    expectedMarkerSeparationSamples: null,
+    observedMarkerSeparationSamples: null,
     failureReason,
   }
 }
@@ -227,41 +240,58 @@ function normalizedMarkerCorrelation(samples: Float32Array, marker: Float32Array
   return correlation
 }
 
-function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampleRate: number): SweepDetection {
-  const tvParts = sweepSampleParts(sweep, sweep.sampleRate)
-  const marker = generateSyncMarker(sweep, sampleRate)
-  const correlation = normalizedMarkerCorrelation(samples, marker)
-  if (correlation.length === 0) return emptySweepDetection()
-
-  const candidateIndexes: number[] = []
+function markerCandidates(correlation: Float64Array, threshold = 0.35): number[] {
+  const candidates: number[] = []
   for (let index = 0; index < correlation.length; index++) {
     const value = correlation[index]
-    if (value < 0.35) continue
+    if (value < threshold) continue
     if (index > 0 && value < correlation[index - 1]) continue
     if (index + 1 < correlation.length && value < correlation[index + 1]) continue
-    candidateIndexes.push(index)
+    candidates.push(index)
   }
-  candidateIndexes.sort((left, right) => correlation[right] - correlation[left])
-  const candidates = candidateIndexes.slice(0, 64)
+  candidates.sort((left, right) => correlation[right] - correlation[left])
+  return candidates.slice(0, 64)
+}
+
+function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampleRate: number): SweepDetection {
+  const tvParts = sweepSampleParts(sweep, sweep.sampleRate)
+  const startCorrelation = normalizedMarkerCorrelation(samples, generateSyncMarker(sweep, sampleRate, 'start'))
+  const endCorrelation = normalizedMarkerCorrelation(samples, generateSyncMarker(sweep, sampleRate, 'end'))
+  if (startCorrelation.length === 0 || endCorrelation.length === 0) return emptySweepDetection()
+
+  const startCandidates = markerCandidates(startCorrelation)
+  const endCandidates = markerCandidates(endCorrelation)
   const expectedTvSeparation = tvParts.trailingMarkerStartSamples - tvParts.leadingMarkerStartSamples
   const nominalCapturePerTvFrame = sampleRate / sweep.sampleRate
   const expectedSeparation = expectedTvSeparation * nominalCapturePerTvFrame
   const minimumSeparation = expectedSeparation * 0.995
   const maximumSeparation = expectedSeparation * 1.005
   let best: { leading: number; trailing: number; score: number } | null = null
-  for (const leading of candidates) {
-    for (const trailing of candidates) {
+  for (const leading of startCandidates) {
+    for (const trailing of endCandidates) {
       if (trailing <= leading) continue
       const separation = trailing - leading
       if (separation < minimumSeparation || separation > maximumSeparation) continue
-      const separationPenalty = Math.abs(separation - expectedSeparation) / expectedSeparation
-      const score = Math.min(correlation[leading], correlation[trailing]) - separationPenalty
+      const separationPenalty = Math.abs(separation - expectedSeparation) * 0.01
+      const score = startCorrelation[leading] * 0.7 + endCorrelation[trailing] * 0.3 - separationPenalty
       if (!best || score > best.score) best = { leading, trailing, score }
     }
   }
-  if (!best) return emptySweepDetection()
-  const leadingConfidence = correlation[best.leading]
-  const trailingConfidence = correlation[best.trailing]
+  if (!best) {
+    const leading = startCandidates[0] ?? null
+    const trailing = endCandidates.find((candidate) => leading !== null && candidate > leading) ?? null
+    return {
+      ...emptySweepDetection(),
+      leadingMarkerSample: leading,
+      trailingMarkerSample: trailing,
+      confidence: leading === null ? 0 : startCorrelation[leading] ?? 0,
+      endingMarkerConfidence: trailing === null ? 0 : endCorrelation[trailing] ?? 0,
+      expectedMarkerSeparationSamples: expectedSeparation,
+      observedMarkerSeparationSamples: leading !== null && trailing !== null ? trailing - leading : null,
+    }
+  }
+  const leadingConfidence = startCorrelation[best.leading]
+  const trailingConfidence = endCorrelation[best.trailing]
   const confidence = Math.min(leadingConfidence, trailingConfidence)
   const clockRatio = (best.trailing - best.leading) / expectedSeparation
   const driftPpm = (clockRatio - 1) * 1_000_000
@@ -272,6 +302,8 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       trailingMarkerSample: best.trailing,
       confidence: leadingConfidence,
       endingMarkerConfidence: trailingConfidence,
+      expectedMarkerSeparationSamples: expectedSeparation,
+      observedMarkerSeparationSamples: best.trailing - best.leading,
     }
   }
   if (!Number.isFinite(clockRatio) || Math.abs(driftPpm) > CLOCK_DRIFT_HARD_REJECT_PPM) {
@@ -282,13 +314,18 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       confidence: leadingConfidence,
       endingMarkerConfidence: trailingConfidence,
       driftPpm,
+      expectedMarkerSeparationSamples: expectedSeparation,
+      observedMarkerSeparationSamples: best.trailing - best.leading,
     }
   }
   const activeSweepOffsetInTvFrames = tvParts.sweepStartSamples - tvParts.leadingMarkerStartSamples
+  const rightSweepOffsetInTvFrames = tvParts.rightSweepStartSamples - tvParts.leadingMarkerStartSamples
   const startSample = best.leading + Math.round(activeSweepOffsetInTvFrames * nominalCapturePerTvFrame * clockRatio)
+  const rightStartSample = best.leading + Math.round(rightSweepOffsetInTvFrames * nominalCapturePerTvFrame * clockRatio)
   return {
     found: true,
     startSample,
+    rightStartSample,
     leadingMarkerSample: best.leading,
     trailingMarkerSample: best.trailing,
     offsetMs: startSample * 1000 / sampleRate,
@@ -296,6 +333,8 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
     endingMarkerConfidence: trailingConfidence,
     clockRatio,
     driftPpm,
+    expectedMarkerSeparationSamples: expectedSeparation,
+    observedMarkerSeparationSamples: best.trailing - best.leading,
     failureReason: null,
   }
 }
@@ -392,19 +431,30 @@ function emptyAnalysis(
   }
 }
 
-export function analyzeMeasurement(
+interface MeasurementWindowOptions {
+  detection?: SweepDetection
+  postRollMs?: number
+  noiseAnchorSample?: number
+}
+
+function analyzeMeasurementWindow(
   samples: Float32Array,
   sampleRate: number,
   sweep: MeasurementSweep,
   micProfile: MicCalibrationProfile,
+  options: MeasurementWindowOptions = {},
 ): MeasurementAnalysis {
   const centeredSamples = removeDc(samples)
   const wholeCaptureSignal = calculateSignalStats(centeredSamples)
-  const detection = detectSweepStart(centeredSamples, sweep, sampleRate)
+  const detection = options.detection ?? detectSweepStart(centeredSamples, sweep, sampleRate)
+  const analysisSweep = options.postRollMs === undefined
+    ? sweep
+    : { ...sweep, postRollMs: options.postRollMs }
+  const parts = sweepSampleParts(analysisSweep, sampleRate)
   const activeEnd = detection.startSample === null
     ? centeredSamples.length
     : detection.startSample + Math.ceil(
-      (sweepSampleParts(sweep, sampleRate).sweepSamples + sweepSampleParts(sweep, sampleRate).postRollSamples)
+      (parts.sweepSamples + parts.postRollSamples)
       * (detection.clockRatio ?? 1),
     )
   const signal = detection.startSample === null
@@ -432,15 +482,16 @@ export function analyzeMeasurement(
     return emptyAnalysis(detection.failureReason ?? 'sync_marker_not_found', micProfile, baseDiagnostics)
   }
 
-  const captureNoiseRms = estimateCaptureNoiseRms(centeredSamples, sampleRate, sweep, detection.startSample)
-  const snrEstimateDb = estimateSnr(centeredSamples, sampleRate, sweep, detection.startSample)
+  const noiseAnchorSample = options.noiseAnchorSample ?? detection.leadingMarkerSample ?? detection.startSample
+  const captureNoiseRms = estimateCaptureNoiseRms(centeredSamples, sampleRate, analysisSweep, detection.startSample, noiseAnchorSample)
+  const snrEstimateDb = estimateSnr(centeredSamples, sampleRate, analysisSweep, detection.startSample, noiseAnchorSample)
   const diagnostics = { ...baseDiagnostics, snrEstimateDb }
   if (snrEstimateDb !== null && snrEstimateDb < 8) return emptyAnalysis('signal_too_low', micProfile, diagnostics)
 
   const deconvolution = deconvolveSweep(
     centeredSamples,
     sampleRate,
-    sweep,
+    analysisSweep,
     detection.startSample,
     detection.clockRatio ?? 1,
     captureNoiseRms,
@@ -451,8 +502,8 @@ export function analyzeMeasurement(
   const rawPoints = normalizeResponsePoints(windowedImpulseResponse(
     deconvolution.samples,
     sampleRate,
-    sweep.startHz,
-    sweep.endHz,
+    analysisSweep.startHz,
+    analysisSweep.endHz,
     48,
     deconvolution.summary.noiseFloorRms,
   ))
@@ -475,5 +526,65 @@ export function analyzeMeasurement(
       frequencyPoints: correctedPoints.length,
       failureReason: signal.clippedSamples > 0 ? 'capture_clipped' : null,
     },
+  }
+}
+
+export function analyzeMeasurement(
+  samples: Float32Array,
+  sampleRate: number,
+  sweep: MeasurementSweep,
+  micProfile: MicCalibrationProfile,
+): MeasurementAnalysis {
+  return analyzeMeasurementWindow(samples, sampleRate, sweep, micProfile)
+}
+
+export interface CompositeMeasurementAnalysis {
+  status: 'ok' | 'partial' | MeasurementAnalysisFailure
+  detection: SweepDetection
+  left: MeasurementAnalysis
+  right: MeasurementAnalysis
+}
+
+/** Analyze both routed sweeps from one physical-position recording. */
+export function analyzeCompositeMeasurement(
+  samples: Float32Array,
+  sampleRate: number,
+  sweep: MeasurementSweep,
+  micProfile: MicCalibrationProfile,
+): CompositeMeasurementAnalysis {
+  const centeredSamples = removeDc(samples)
+  const detection = detectSweepStart(centeredSamples, sweep, sampleRate)
+  if (!detection.found || detection.startSample === null || detection.rightStartSample === null) {
+    const failed = analyzeMeasurementWindow(centeredSamples, sampleRate, sweep, micProfile, { detection })
+    return { status: failed.status, detection, left: failed, right: failed }
+  }
+
+  const noiseAnchorSample = detection.leadingMarkerSample ?? detection.startSample
+  const left = analyzeMeasurementWindow(centeredSamples, sampleRate, sweep, micProfile, {
+    detection,
+    postRollMs: sweep.interSweepGapMs,
+    noiseAnchorSample,
+  })
+  const rightDetection: SweepDetection = {
+    ...detection,
+    startSample: detection.rightStartSample,
+    offsetMs: detection.rightStartSample * 1000 / sampleRate,
+  }
+  const right = analyzeMeasurementWindow(centeredSamples, sampleRate, sweep, micProfile, {
+    detection: rightDetection,
+    postRollMs: sweep.postRollMs,
+    noiseAnchorSample,
+  })
+  const leftAccepted = left.status === 'ok'
+  const rightAccepted = right.status === 'ok'
+  return {
+    status: leftAccepted && rightAccepted
+      ? 'ok'
+      : leftAccepted || rightAccepted
+        ? 'partial'
+        : left.status,
+    detection,
+    left,
+    right,
   }
 }

@@ -12,6 +12,16 @@ export type CalibrationValidationOutcome =
   | { status: 'worse'; beforeDb: number; afterDb: number }
   | { status: 'inconclusive'; reason: string; beforeDb?: number; afterDb?: number }
 
+export function shouldRunValidationConfirmation(input: {
+  outcome: CalibrationValidationOutcome | null
+  candidateId: string | null
+  confirmedCandidateId: string | null
+}): boolean {
+  return input.outcome?.status === 'inconclusive'
+    && input.candidateId !== null
+    && input.candidateId !== input.confirmedCandidateId
+}
+
 export interface AutomaticValidationStartInput {
   measurementComplete: boolean
   measurementId: string | null

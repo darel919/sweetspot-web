@@ -1,39 +1,49 @@
 import { describe, expect, test } from 'bun:test'
-import { createMeasurementPlan, createRetryContext, createThirdTakeContext, requiresRemoteContinue } from './plan'
+import {
+  createMeasurementPlan,
+  createProbeMeasurementPlan,
+  createRepairContext,
+  createRetryContext,
+  requiresRemoteContinue,
+} from './plan'
 
-describe('measurement position sequencing', () => {
-  test('requires remote continuation only before the first take at a later position', () => {
-    expect(requiresRemoteContinue({ positionIndex: 0, takeIndex: 0 })).toBe(false)
-    expect(requiresRemoteContinue({ positionIndex: 1, takeIndex: 0 })).toBe(true)
-    expect(requiresRemoteContinue({ positionIndex: 1, takeIndex: 1 })).toBe(false)
+describe('physical-position measurement sequencing', () => {
+  test('plans three composite physical positions without duplicate takes', () => {
+    const plan = createMeasurementPlan()
+
+    expect(plan).toHaveLength(3)
+    expect(plan.map((context) => context.positionId)).toEqual(['center', 'left', 'right'])
+    expect(plan.every((context) => context.channel === 'both')).toBe(true)
+    expect(plan.every((context) => context.captureKind === 'position-composite')).toBe(true)
+    expect(plan.every((context) => context.repairChannel === 'both')).toBe(true)
+    expect(plan.every((context) => context.attemptIndex === 0)).toBe(true)
   })
 
-  test('changes only attempt metadata when retrying a logical take', () => {
-    const original = createMeasurementPlan(2)[0]
-    if (!original) throw new Error('Expected a planned context.')
+  test('requires TV continuation only when moving to a new full position', () => {
+    const plan = createMeasurementPlan()
+
+    expect(requiresRemoteContinue(plan[0]!)).toBe(false)
+    expect(requiresRemoteContinue(plan[1]!)).toBe(true)
+    expect(requiresRemoteContinue(createRepairContext(plan[1]!, 'right'))).toBe(false)
+  })
+
+  test('retries a position without changing its physical identity', () => {
+    const original = createMeasurementPlan()[0]!
     const retry = createRetryContext(original)
+
     expect(retry).toMatchObject({
-      positionId: original.positionId,
-      channel: original.channel,
-      takeIndex: original.takeIndex,
-      takeCount: original.takeCount,
+      positionId: 'center',
+      captureKind: 'position-composite',
+      repairChannel: 'both',
       attemptIndex: 1,
       attemptCount: 2,
     })
-    if (!retry) throw new Error('Expected one bounded retry.')
-    expect(createRetryContext(retry)).toBeNull()
+    expect(createRetryContext(retry!)).toBeNull()
   })
 
-  test('adaptive third take starts a fresh attempt budget and never creates a fourth take', () => {
-    const first = createMeasurementPlan(2)[0]
-    if (!first) throw new Error('Expected a planned context.')
-    const third = createThirdTakeContext(first)
-    const thirdRetry = createRetryContext(third)
-
-    expect(third).toMatchObject({ takeIndex: 2, takeCount: 3, attemptIndex: 0, attemptCount: 2 })
-    expect(thirdRetry).toMatchObject({ takeIndex: 2, takeCount: 3, attemptIndex: 1, attemptCount: 2 })
-    if (!thirdRetry) throw new Error('Expected one bounded retry for the adaptive take.')
-    expect(createRetryContext(thirdRetry)).toBeNull()
-    expect(createThirdTakeContext(third).takeIndex).toBe(2)
+  test('probe plans remain composite and do not add duplicate takes', () => {
+    expect(createProbeMeasurementPlan('transfer')).toHaveLength(1)
+    expect(createProbeMeasurementPlan('routing').map((context) => context.positionId)).toEqual(['left', 'right'])
+    expect(createProbeMeasurementPlan('routing').every((context) => context.channel === 'both')).toBe(true)
   })
 })

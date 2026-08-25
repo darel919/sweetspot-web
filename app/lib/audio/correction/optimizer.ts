@@ -207,11 +207,10 @@ export function combineChannelAggregates(
     if (existing) existing.right = response
     else byPosition.set(response.positionId, { right: response })
   }
-  const positionResponses = [...byPosition.values()]
-    .filter(({ left, right }) => left !== undefined && right !== undefined)
-    .map(({ left: leftPosition, right: rightPosition }) => {
-      const source = leftPosition ?? rightPosition
-      if (!source) return null
+  const positionResponses: PositionResponse[] = [...byPosition.values()]
+    .flatMap(({ left: leftPosition, right: rightPosition }) => {
+      if (!leftPosition || !rightPosition) return []
+      const source = leftPosition
       return {
         positionId: source.positionId,
         positionIndex: source.positionIndex,
@@ -223,14 +222,11 @@ export function combineChannelAggregates(
             ? (point.magnitudeDb + (rightPosition.points[index]?.magnitudeDb ?? point.magnitudeDb)) / 2
           : point.magnitudeDb,
         })),
-        broadbandLevelDb: leftPosition && rightPosition
-          ? (leftPosition.broadbandLevelDb !== null && rightPosition.broadbandLevelDb !== null
-            ? (leftPosition.broadbandLevelDb + rightPosition.broadbandLevelDb) / 2
-            : null)
-          : source.broadbandLevelDb,
+        broadbandLevelDb: leftPosition.broadbandLevelDb !== null && rightPosition.broadbandLevelDb !== null
+          ? (leftPosition.broadbandLevelDb + rightPosition.broadbandLevelDb) / 2
+          : null,
       }
     })
-    .filter((value): value is PositionResponse => value !== null)
     .sort((a, b) => a.positionIndex - b.positionIndex)
   const frequencies = positionResponses[0]?.points.map((point) => point.frequencyHz) ?? left.points.map((point) => point.frequencyHz)
   const median = (values: number[]): number => {

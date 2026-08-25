@@ -50,6 +50,9 @@
           :measurement-progress="measurementProgress"
           :measurement-capture-info="measurementCaptureInfo"
           :measurement-failed-diagnostics="measurementFailedDiagnostics"
+          :measurement-resume-available="measurementResumeAvailable"
+          :measurement-resume-position-count="measurementResumePositionCount"
+          :measurement-resume-message="measurementResumeMessage"
           :measurement-profiles="measurementProfiles"
           :measurement-selected-profile-id="measurementSelectedProfileId"
           :measurement-profile-error="measurementProfileError"
@@ -68,11 +71,14 @@
           :validation-ready="validationReady"
           :cal-json="calJson"
           :cal-status="calStatus"
+          :calibration-file-pending="calibrationFilePending"
+          :calibration-file-status="calibrationFileStatus"
           :validation-metrics="validationMetrics"
           @select-profile="measurementSelectedProfileId = $event"
           @select-strength="correctionStrength = $event"
           @edit-curve="calJson = $event"
           @start-measurement="startMeasurement"
+          @resume-measurement="resumeMeasurement"
           @cancel-measurement="cancelCalibration"
           @retry-failed-groups="retryFailedGroups"
           @start-validation="startValidation"
@@ -81,6 +87,8 @@
           @reset-calibration="resetCalibration"
           @rollback-calibration="rollbackCalibration"
           @accept-candidate="acceptCandidate"
+          @download-calibration="downloadCalibration"
+          @import-calibration="importCalibration"
         />
 
         <ConnectDiagnosticsSection
@@ -150,15 +158,16 @@ import type {
   StateSnapshot,
   CalibrationTransaction,
   CalibrationApplyPayload,
+  CalibrationPackage,
 } from '#shared/types/protocol'
-import { CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB, isStateSnapshot } from '#shared/types/protocol'
+import { CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB, isCalibrationPackage, isStateSnapshot } from '#shared/types/protocol'
 import { calculateCorrection, combineChannelAggregates, targetErrorRms, type CorrectionStrength } from '~/lib/audio/correction/optimizer'
 import { mapCorrectionToBandsConservative } from '~/lib/audio/correction/bandMapper'
 import { targetPointsFor } from '~/lib/audio/correction/target'
 import { isMicCalibrationProfileEligibleForCorrection } from '~/lib/audio/mics/profile'
 import { shouldNotifyOffline } from '~/composables/connectionState'
 import { useScreenWakeLock } from '~/composables/useScreenWakeLock'
-import { onMounted, onScopeDispose, watch } from 'vue'
+import { onMounted, onScopeDispose, ref, watch } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import '~/components/connect/connect.css'
 import ConnectCalibrationSection from '~/components/connect/ConnectCalibrationSection.vue'
@@ -174,6 +183,7 @@ import ConnectStateSection from '~/components/connect/ConnectStateSection.vue'
 import { isCalibrationActiveStage } from '~/composables/useCalibrationSession'
 import {
   classifyCalibrationValidation,
+  shouldRunValidationConfirmation,
   shouldStartAutomaticValidation,
   type CalibrationValidationOutcome,
 } from '~/lib/audio/correction/calibration-validation'
@@ -186,6 +196,10 @@ import {
   shouldReportValidationFailure,
 } from '~/lib/audio/correction/calibration-recovery'
 import { shouldStageAutomaticCorrection } from '~/lib/audio/correction/calibration-staging'
+import {
+  calibrationPackageFilename,
+  parseCalibrationPackageJson,
+} from '~/lib/audio/correction/calibration-package'
 import {
   assessSharedLfReproduction,
   blendSharedLfCorrections,
@@ -213,6 +227,7 @@ const room = computed(() => rawCode.value.toUpperCase())
 
 const connection = useSweetSpotConnection('client', () => rawCode.value)
 const { status, deviceOnline, debugLog, connect, send, request, onMessage } = connection
+const snapshot = ref<StateSnapshot | null>(null)
 const {
   stage: measurementStage,
   message: measurementMessage,
@@ -238,6 +253,11 @@ const {
   profileError: measurementProfileError,
   loadProfiles: loadMeasurementProfiles,
   start: startMeasurementSession,
+  resume: resumeMeasurementSession,
+  refreshResumeCheckpoint: refreshMeasurementResume,
+  resumeAvailable: measurementResumeAvailable,
+  resumePositionCount: measurementResumePositionCount,
+  resumeMessage: measurementResumeMessage,
   startValidation: startValidationSession,
   startProbe: startProbeSession,
   retryFailedGroups,
@@ -251,8 +271,12 @@ const {
   send: connection.send,
   onMessage: connection.onMessage,
   isDeviceOnline: () => deviceOnline.value,
+}, {
+  getDeviceIdentity: () => snapshot.value ? {
+    id: snapshot.value.device.id,
+    appVersion: snapshot.value.device.appVersion,
+  } : null,
 })
-const snapshot = ref<StateSnapshot | null>(null)
 const candidateTransaction = computed<Extract<CalibrationTransaction, { state: 'candidate_pending' }> | null>(() => {
   const transaction = snapshot.value?.calibration.transaction
   return transaction?.state === 'candidate_pending' ? transaction : null
@@ -417,6 +441,8 @@ const profileName = ref('')
 const calibrationApplied = ref(false)
 const calibrationResult = ref<CalibrationResultStatus | null>(null)
 const calibrationResultMessage = ref('')
+const calibrationFilePending = ref(false)
+const calibrationFileStatus = ref('')
 const correctionStrength = ref<CorrectionStrength>('normal')
 const correctionStrengthOptions: readonly CorrectionStrengthOption[] = [
   { id: 'gentle', label: 'Gentle' },
@@ -577,9 +603,12 @@ type ValidationDecision = CalibrationValidationOutcome | { status: 'error'; reas
 
 const sentValidationOutcomeKeys = new Set<string>()
 let validationResultInFlight = false
+const validationConfirmationCandidateId = ref<string | null>(null)
 
 onMounted(() => {
-  void loadMeasurementProfiles().catch(() => undefined)
+  void loadMeasurementProfiles()
+    .then(() => refreshMeasurementResume())
+    .catch(() => undefined)
 })
 
 function showToast(message: string) {
@@ -634,6 +663,7 @@ onMessage((env) => {
     applicationError: next.calibration.applicationError ?? null,
   })
   if (JSON.stringify(next) !== JSON.stringify(snapshot.value)) snapshot.value = next
+  void refreshMeasurementResume()
   if (recoveryObservation.kind === 'completed') applyAbortRecoveryCompletion(recoveryObservation.details)
 })
 
@@ -845,7 +875,6 @@ function beginCandidateFinalization(
     calStatus.value = message
     return
   }
-  // Only a metrics-proven improvement is accepted; inconclusive and worse outcomes restore the baseline.
   const phase = forceRollback || outcome.status !== 'improved' ? 'rolling-back' as const : 'accepting' as const
   const current = calibrationFinalization.value
   if (current?.candidateId === candidateId) {
@@ -942,6 +971,15 @@ watch([measurementStage, validationOutcomeKey, deviceOnline], ([stage, outcomeKe
   const transaction = candidateTransaction.value
   const outcome = validationOutcome.value
   if (!transaction || !outcome || measurementValidationCandidateId.value !== transaction.candidateId) return
+  if (shouldRunValidationConfirmation({
+    outcome,
+    candidateId: transaction.candidateId,
+    confirmedCandidateId: validationConfirmationCandidateId.value,
+  })) {
+    validationConfirmationCandidateId.value = transaction.candidateId
+    startValidationSession(transaction.candidateId)
+    return
+  }
   void sendValidationResultOnce(transaction.candidateId, outcome, outcomeKey)
 })
 
@@ -1034,6 +1072,101 @@ function parseCurve(text: string): number[] | null {
     return values.every(Number.isFinite) ? values : null
   } catch {
     return null
+  }
+}
+
+async function downloadCalibration() {
+  if (calibrationFilePending.value || correctionPending.value || candidateTransaction.value || !snapshot.value?.calibration.active) return
+  if (!deviceOnline.value) {
+    calibrationFileStatus.value = 'The TV connection is offline. Calibration cannot be downloaded.'
+    return
+  }
+  calibrationFilePending.value = true
+  calibrationFileStatus.value = 'Requesting the saved calibration from the TV…'
+  try {
+    const response = await withTimeout(request<CalibrationPackage>('calibration.export'), 15_000)
+    if (!response) {
+      calibrationFileStatus.value = 'The TV did not answer within 15 seconds.'
+      return
+    }
+    if (response.type !== 'calibration.exported') {
+      const action = stateActionResult(response.payload)
+      calibrationFileStatus.value = action.error ?? 'The TV could not export its calibration.'
+      return
+    }
+    if (!isCalibrationPackage(response.payload)) {
+      calibrationFileStatus.value = 'The TV returned an invalid calibration package.'
+      return
+    }
+    const blob = new Blob([JSON.stringify(response.payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = calibrationPackageFilename(response.payload)
+    anchor.style.display = 'none'
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1_000)
+    calibrationFileStatus.value = 'Calibration downloaded.'
+  } catch (error: unknown) {
+    calibrationFileStatus.value = error instanceof Error ? error.message : 'Calibration download failed.'
+  } finally {
+    calibrationFilePending.value = false
+  }
+}
+
+async function importCalibration(file: File) {
+  if (calibrationFilePending.value || correctionPending.value || candidateTransaction.value) return
+  if (!deviceOnline.value) {
+    calibrationFileStatus.value = 'The TV connection is offline. Calibration cannot be imported.'
+    return
+  }
+  if (file.size > 64 * 1024) {
+    calibrationFileStatus.value = 'This calibration file is too large.'
+    return
+  }
+  calibrationFilePending.value = true
+  correctionPending.value = true
+  calibrationFileStatus.value = `Reading ${file.name}…`
+  try {
+    const pkg = parseCalibrationPackageJson(await file.text())
+    if (!pkg) {
+      calibrationFileStatus.value = 'That file is not a valid SweetSpot calibration package.'
+      return
+    }
+    if (!pkg.active) {
+      calibrationFileStatus.value = 'This package contains no active calibration to import.'
+      return
+    }
+    if (snapshot.value?.capabilities.supportsCalibratedCorrection !== true) {
+      calibrationFileStatus.value = 'The TV has not verified its calibration transfer path. Import is blocked.'
+      return
+    }
+    calibrationFileStatus.value = 'Staging the imported calibration on the TV…'
+    const response = await withTimeout(request('calibration.import', pkg), 15_000)
+    if (!response) {
+      calibrationFileStatus.value = 'The TV did not answer within 15 seconds.'
+      return
+    }
+    const action = stateActionResult(response.payload)
+    if (action.snapshot) snapshot.value = action.snapshot
+    const staged = action.ok
+      && action.snapshot?.calibration.transaction.state === 'candidate_pending'
+      && action.snapshot.calibration.transaction.validationStatus === 'imported'
+      && action.snapshot.calibration.liveDspStatus === 'verified'
+    if (staged && action.snapshot) {
+      calibrationApplied.value = action.snapshot.calibration.active
+      calJson.value = JSON.stringify((action.snapshot.calibration.requestedBandsDb ?? action.snapshot.calibration.bandsDb).map((value) => Math.round(value * 10) / 10))
+    }
+    calibrationFileStatus.value = staged
+      ? 'Imported calibration is staged. Accept it to keep it or roll it back.'
+      : `The TV rejected the imported calibration: ${action.error ?? 'invalid TV response'}`
+  } catch (error: unknown) {
+    calibrationFileStatus.value = error instanceof Error ? error.message : 'Calibration import failed.'
+  } finally {
+    calibrationFilePending.value = false
+    correctionPending.value = false
   }
 }
 
@@ -1290,6 +1423,14 @@ function startMeasurement() {
   calibrationResult.value = null
   calibrationResultMessage.value = ''
   void startMeasurementSession()
+}
+
+function resumeMeasurement() {
+  if (!snapshot.value?.capabilities.supportsSweep || correctionPending.value || !deviceOnline.value) return
+  calibrationApplied.value = false
+  calibrationResult.value = null
+  calibrationResultMessage.value = ''
+  void resumeMeasurementSession()
 }
 
 function startValidation() {

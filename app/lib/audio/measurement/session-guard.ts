@@ -6,8 +6,8 @@ export function isSameMeasurementContext(left: MeasurementContext | null, right:
     && left.positionIndex === right.positionIndex
     && left.positionCount === right.positionCount
     && left.channel === right.channel
-    && left.takeIndex === right.takeIndex
-    && left.takeCount === right.takeCount
+    && left.captureKind === right.captureKind
+    && left.repairChannel === right.repairChannel
     && left.attemptIndex === right.attemptIndex
     && left.attemptCount === right.attemptCount
     && left.phase === right.phase

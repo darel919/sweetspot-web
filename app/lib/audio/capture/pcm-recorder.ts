@@ -16,6 +16,8 @@ export interface CaptureSignalDiagnostics {
 export interface PcmRecording {
   samples: Float32Array
   diagnostics: CaptureSignalDiagnostics
+  startSample: number
+  endSample: number
 }
 
 export class PcmRecorderError extends Error {
@@ -53,27 +55,36 @@ export interface PcmRecorderOptions {
   onTrackEnded?: () => void
 }
 
+/**
+ * One recorder owns one AudioContext/source/worklet graph for the session.
+ * start/stop delimit windows in a sample-indexed local buffer; they do not
+ * tear down the graph or reacquire the microphone.
+ */
 export interface PcmRecorder {
   start(): Promise<void>
   stop(): Promise<PcmRecording>
   dispose(): Promise<void>
 }
 
+interface PcmChunk {
+  startSample: number
+  samples: Float32Array
+}
+
 class PcmRecorderImpl implements PcmRecorder {
-  private readonly chunks: Float32Array[] = []
   private readonly capture: MicrophoneCapture
   private readonly options: PcmRecorderOptions
+  private readonly chunks: PcmChunk[] = []
   private context: AudioContext | null = null
   private source: MediaStreamAudioSourceNode | null = null
   private node: AudioWorkletNode | null = null
   private silence: GainNode | null = null
   private trackEndedHandler: (() => void) | null = null
   private flushResolve: (() => void) | null = null
-  private started = false
-  private sampleCount = 0
-  private sumSquares = 0
-  private peak = 0
-  private clippedSamples = 0
+  private graphStarted = false
+  private windowActive = false
+  private streamSampleCount = 0
+  private windowStartSample = 0
 
   constructor(capture: MicrophoneCapture, options: PcmRecorderOptions) {
     this.capture = capture
@@ -81,11 +92,11 @@ class PcmRecorderImpl implements PcmRecorder {
   }
 
   async start(): Promise<void> {
-    if (this.started) return
     if (this.capture.track.readyState === 'ended') {
       this.options.onTrackEnded?.()
       throw new PcmRecorderError('The microphone ended before capture could start.')
     }
+
     if (!this.context) {
       this.context = new AudioContext({ latencyHint: 'interactive' })
       try {
@@ -97,70 +108,68 @@ class PcmRecorderImpl implements PcmRecorder {
         throw new PcmRecorderError(message)
       }
     }
-    this.chunks.length = 0
-    this.sampleCount = 0
-    this.sumSquares = 0
-    this.peak = 0
-    this.clippedSamples = 0
+
     await this.context.resume()
-    this.source = this.context.createMediaStreamSource(this.capture.stream)
-    this.node = new AudioWorkletNode(this.context, 'sweetspot-pcm-capture', {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      outputChannelCount: [1],
-    })
-    this.silence = this.context.createGain()
-    this.silence.gain.value = 0
-    this.node.port.onmessage = (event: MessageEvent<unknown>) => this.onMessage(event.data)
-    this.source.connect(this.node)
-    this.node.connect(this.silence)
-    this.silence.connect(this.context.destination)
-    this.node.port.postMessage({ type: 'start' })
-    this.trackEndedHandler = () => this.options.onTrackEnded?.()
-    this.capture.track.addEventListener('ended', this.trackEndedHandler)
-    this.started = true
+    if (!this.graphStarted) {
+      this.source = this.context.createMediaStreamSource(this.capture.stream)
+      this.node = new AudioWorkletNode(this.context, 'sweetspot-pcm-capture', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      })
+      this.silence = this.context.createGain()
+      this.silence.gain.value = 0
+      this.node.port.onmessage = (event: MessageEvent<unknown>) => this.onMessage(event.data)
+      this.source.connect(this.node)
+      this.node.connect(this.silence)
+      this.silence.connect(this.context.destination)
+      this.trackEndedHandler = () => this.options.onTrackEnded?.()
+      this.capture.track.addEventListener('ended', this.trackEndedHandler)
+      this.graphStarted = true
+    }
+
+    this.chunks.length = 0
+    this.windowStartSample = this.streamSampleCount
+    this.windowActive = true
+    this.node?.port.postMessage({ type: 'start' })
   }
 
   async stop(): Promise<PcmRecording> {
-    if (!this.started) {
-      return {
-        samples: new Float32Array(0),
-        diagnostics: this.diagnostics(),
-      }
-    }
+    if (!this.windowActive) return this.emptyRecording()
     await this.flush()
     await waitForTurn()
-    this.started = false
-    this.disconnectGraph()
+    this.windowActive = false
     const samples = this.combineChunks()
-    const diagnostics = this.diagnostics()
+    const startSample = this.windowStartSample
     this.chunks.length = 0
-    return { samples, diagnostics: { ...diagnostics, sampleCount: samples.length } }
+    return {
+      samples,
+      startSample,
+      endSample: startSample + samples.length,
+      diagnostics: this.diagnostics(samples),
+    }
   }
 
   async dispose(): Promise<void> {
-    this.started = false
-    this.disconnectGraph()
+    this.windowActive = false
     this.chunks.length = 0
     this.flushResolve?.()
     this.flushResolve = null
+    this.disconnectGraph()
     if (this.context) {
       await this.context.close()
       this.context = null
     }
+    this.streamSampleCount = 0
+    this.windowStartSample = 0
   }
 
   private onMessage(data: unknown): void {
     if (isPcmMessage(data)) {
       const samples = new Float32Array(data.buffer)
-      this.chunks.push(samples)
-      for (const sample of samples) {
-        const absolute = Math.abs(sample)
-        this.sumSquares += sample * sample
-        this.peak = Math.max(this.peak, absolute)
-        if (absolute >= 0.999) this.clippedSamples++
-      }
-      this.sampleCount += samples.length
+      const startSample = this.streamSampleCount
+      this.streamSampleCount += samples.length
+      if (this.windowActive) this.chunks.push({ startSample, samples })
       return
     }
     if (isFlushedMessage(data)) {
@@ -185,40 +194,60 @@ class PcmRecorderImpl implements PcmRecorder {
   }
 
   private disconnectGraph(): void {
-    this.capture.track.removeEventListener('ended', this.trackEndedHandler ?? (() => undefined))
+    if (this.trackEndedHandler) this.capture.track.removeEventListener('ended', this.trackEndedHandler)
     this.trackEndedHandler = null
+    this.node?.port.postMessage({ type: 'pause' })
     this.source?.disconnect()
     this.node?.disconnect()
     this.silence?.disconnect()
     this.source = null
     this.node = null
     this.silence = null
+    this.graphStarted = false
   }
 
   private combineChunks(): Float32Array {
-    const samples = new Float32Array(this.sampleCount)
+    const sampleCount = this.chunks.reduce((total, chunk) => total + chunk.samples.length, 0)
+    const samples = new Float32Array(sampleCount)
     let offset = 0
     for (const chunk of this.chunks) {
-      samples.set(chunk, offset)
-      offset += chunk.length
+      samples.set(chunk.samples, offset)
+      offset += chunk.samples.length
     }
     return samples
   }
 
-  private diagnostics(): CaptureSignalDiagnostics {
+  private emptyRecording(): PcmRecording {
+    const samples = new Float32Array(0)
     return {
-      // The worklet receives PCM at the AudioContext rate. The track's
-      // reported rate may differ when the browser resamples the stream.
+      samples,
+      startSample: this.streamSampleCount,
+      endSample: this.streamSampleCount,
+      diagnostics: this.diagnostics(samples),
+    }
+  }
+
+  private diagnostics(samples: Float32Array): CaptureSignalDiagnostics {
+    let sumSquares = 0
+    let peak = 0
+    let clippedSamples = 0
+    for (const sample of samples) {
+      const absolute = Math.abs(sample)
+      sumSquares += sample * sample
+      peak = Math.max(peak, absolute)
+      if (absolute >= 0.999) clippedSamples++
+    }
+    return {
       sampleRate: this.context?.sampleRate ?? this.capture.settings.sampleRate ?? 0,
       channelCount: this.capture.settings.channelCount ?? 1,
       echoCancellation: this.capture.settings.echoCancellation,
       noiseSuppression: this.capture.settings.noiseSuppression,
       autoGainControl: this.capture.settings.autoGainControl,
-      rms: this.sampleCount > 0 ? Math.sqrt(this.sumSquares / this.sampleCount) : 0,
-      peak: this.peak,
-      clipped: this.clippedSamples > 0,
-      clippedSamples: this.clippedSamples,
-      sampleCount: this.sampleCount,
+      rms: samples.length > 0 ? Math.sqrt(sumSquares / samples.length) : 0,
+      peak,
+      clipped: clippedSamples > 0,
+      clippedSamples,
+      sampleCount: samples.length,
     }
   }
 }

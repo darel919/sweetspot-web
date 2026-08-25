@@ -44,16 +44,14 @@ function stageLabel(stage: CalibrationStage): string {
 
       <div class="calibration-progress" aria-live="polite">
         <p class="calibration-progress-count">
-          Sweep {{ Math.min(props.progress.current, props.progress.total) }} of {{ props.progress.total || '—' }}
+          Positions measured {{ Math.min(props.progress.current, props.progress.total) }} of {{ props.progress.total || '—' }}
         </p>
         <p class="calibration-progress-time">{{ remainingLabel(props.estimatedRemainingSeconds) }}</p>
       </div>
 
       <p v-if="props.currentContext" class="calibration-take" aria-live="polite">
         Position {{ props.currentContext.positionIndex + 1 }} of {{ props.currentContext.positionCount }} ·
-        {{ props.currentContext.channel === 'both' ? 'both channels' : props.currentContext.channel + ' channel' }} ·
-        Take {{ props.currentContext.takeIndex + 1 }} of {{ props.currentContext.takeCount }}
-        <span v-if="props.currentContext.attemptIndex > 0"> · Retry {{ props.currentContext.attemptIndex }} of {{ props.currentContext.attemptCount - 1 }}</span>
+        {{ props.currentContext.repairChannel === 'both' ? 'Keep the phone still' : 'Repeating this position' }}
       </p>
 
       <p v-if="props.message" class="calibration-message" aria-live="polite">{{ props.message }}</p>

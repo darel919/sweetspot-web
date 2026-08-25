@@ -5,10 +5,9 @@ import type { MeasurementAnalysis } from '~/lib/audio/measurement/response'
 import type { MicCalibrationProfile } from '~/lib/audio/mics/types'
 import type { CalibrationStage } from '~/composables/useCalibrationSession'
 import type { CorrectionStrength } from '~/lib/audio/correction/optimizer'
-import type { MeasurementContext, MeasurementDiagnosticsValues, StateSnapshot } from '#shared/types/protocol'
+import type { CalibrationValidationStatus, MeasurementContext, MeasurementDiagnosticsValues, StateSnapshot } from '#shared/types/protocol'
 import ConnectResponseGraph from './ConnectResponseGraph.vue'
 import type {
-  CalibrationValidationStatus,
   CalibrationCaptureInfo,
   CalibrationValidationMetrics,
   CalibrationResultStatus,
@@ -34,6 +33,9 @@ const props = defineProps<{
   measurementProgress: { current: number; total: number }
   measurementCaptureInfo: CalibrationCaptureInfo | null
   measurementFailedDiagnostics: ReadonlyArray<{ context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues }>
+  measurementResumeAvailable: boolean
+  measurementResumePositionCount: number
+  measurementResumeMessage: string
   measurementProfiles: readonly MicCalibrationProfile[]
   measurementSelectedProfileId: string
   measurementProfileError: string
@@ -52,6 +54,8 @@ const props = defineProps<{
   calibrationResultMessage: string
   calJson: string
   calStatus: string
+  calibrationFilePending: boolean
+  calibrationFileStatus: string
   validationMetrics: CalibrationValidationMetrics | null
 }>()
 
@@ -64,6 +68,7 @@ const emit = defineEmits<{
   (event: 'select-strength', strength: CorrectionStrength): void
   (event: 'edit-curve', value: string): void
   (event: 'start-measurement'): void
+  (event: 'resume-measurement'): void
   (event: 'cancel-measurement'): void
   (event: 'retry-failed-groups'): void
   (event: 'start-validation'): void
@@ -72,6 +77,8 @@ const emit = defineEmits<{
   (event: 'reset-calibration'): void
   (event: 'rollback-calibration'): void
   (event: 'accept-candidate'): void
+  (event: 'download-calibration'): void
+  (event: 'import-calibration', file: File): void
 }>()
 
 function selectProfile(event: Event) {
@@ -82,6 +89,13 @@ function editCurve(event: Event) {
   if (event.target instanceof HTMLTextAreaElement) emit('edit-curve', event.target.value)
 }
 
+function importCalibrationFile(event: Event) {
+  if (!(event.target instanceof HTMLInputElement)) return
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (file) emit('import-calibration', file)
+}
+
 function settingLabel(value: boolean | null): string {
   return value == null ? 'not exposed' : value ? 'on' : 'off'
 }
@@ -89,6 +103,25 @@ function settingLabel(value: boolean | null): string {
 function curveRange(curve: readonly number[] | undefined): string {
   if (!curve || curve.length === 0) return 'unknown'
   return `${Math.min(...curve).toFixed(1)} to ${Math.max(...curve).toFixed(1)} dB`
+}
+
+function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): string {
+  switch (diagnostics.analysisStatus) {
+    case 'sync_marker_not_found':
+      return "SweetSpot couldn't reliably identify the TV test signal."
+    case 'clock_drift_unreliable':
+      return 'The TV and iPhone timing was not stable enough for this reading.'
+    case 'capture_too_short':
+      return 'The recording ended before the complete test signal arrived.'
+    case 'capture_clipped':
+      return 'The microphone clipped during this reading.'
+    case 'signal_too_low':
+      return 'The reading was too quiet or noisy to trust.'
+    case 'sweep_not_found':
+      return 'The complete test signal was not clear enough to analyze.'
+    default:
+      return 'The reading was not clear enough to trust.'
+  }
 }
 </script>
 
@@ -132,29 +165,30 @@ function curveRange(curve: readonly number[] | undefined): string {
       >
         {{ measurementBusy ? measurementMessage : 'Start Auto Room Calibration' }}
       </button>
+      <button
+        v-if="measurementResumeAvailable"
+        :disabled="measurementBusy || correctionPending"
+        @click="emit('resume-measurement')"
+      >
+        Resume saved calibration ({{ measurementResumePositionCount }} positions)
+      </button>
       <button v-if="measurementBusy" @click="emit('cancel-measurement')">Cancel</button>
     </div>
+    <p v-if="measurementResumeMessage" class="note">{{ measurementResumeMessage }}</p>
     <p v-if="measurementMessage" class="note">{{ measurementMessage }}</p>
     <ul v-if="measurementFailedDiagnostics.length" class="calibration-failures">
-      <li v-for="failure in measurementFailedDiagnostics" :key="`${failure.context.positionId}:${failure.context.channel}:${failure.context.takeIndex}:${failure.context.attemptIndex}`">
-        Failed {{ failure.context.positionId }} / {{ failure.context.channel }} Take {{ failure.context.takeIndex + 1 }}<span v-if="failure.context.attemptIndex > 0"> retry {{ failure.context.attemptIndex }} of {{ failure.context.attemptCount - 1 }}</span>:
-        {{ failure.diagnostics.failureReason ?? failure.diagnostics.analysisStatus ?? 'measurement error' }};
-        marker {{ failure.diagnostics.syncMarkerConfidence.toFixed(2) }},
-        ending marker {{ failure.diagnostics.endingMarkerConfidence.toFixed(2) }},
-        drift {{ failure.diagnostics.clockDriftPpm == null ? 'unknown' : failure.diagnostics.clockDriftPpm.toFixed(0) + ' ppm' }},
-        SNR {{ failure.diagnostics.snrEstimateDb == null ? 'unknown' : failure.diagnostics.snrEstimateDb.toFixed(1) + ' dB' }},
-        clipping {{ failure.diagnostics.clipped ? 'yes' : 'no' }}.
+      <li v-for="failure in measurementFailedDiagnostics" :key="`${failure.context.positionId}:${failure.diagnostics.channel ?? failure.context.repairChannel}:${failure.context.attemptIndex}`">
+        {{ failure.context.positionId }} / {{ failure.diagnostics.channel ?? failure.context.repairChannel }}:
+        {{ captureFailureMessage(failure.diagnostics) }}
       </li>
     </ul>
     <p v-if="measurementProgress.total" class="note">
-      Sweep {{ measurementProgress.current }} of {{ measurementProgress.total }}
+      Positions measured {{ measurementProgress.current }} of {{ measurementProgress.total }}
       <span v-if="measurementCurrentPosition"> · {{ measurementCurrentPosition.label }}</span>
     </p>
     <p v-if="measurementCurrentContext" class="note calibration-take" aria-live="polite">
       Position {{ measurementCurrentContext.positionIndex + 1 }} of {{ measurementCurrentContext.positionCount }} ·
-      {{ measurementCurrentContext.channel === 'both' ? 'both channels' : measurementCurrentContext.channel + ' channel' }} ·
-      Take {{ measurementCurrentContext.takeIndex + 1 }} of {{ measurementCurrentContext.takeCount }}
-      <span v-if="measurementCurrentContext.attemptIndex > 0"> · Retry {{ measurementCurrentContext.attemptIndex }} of {{ measurementCurrentContext.attemptCount - 1 }}</span>
+      {{ measurementCurrentContext.repairChannel === 'both' ? 'Keep the phone still' : 'Repeating this position' }}
     </p>
 
     <dl v-if="measurementCaptureInfo" class="spec">
@@ -186,11 +220,11 @@ function curveRange(curve: readonly number[] | undefined): string {
       <dl class="spec">
         <dt>repeatability</dt>
         <dd>{{ measurementRepeatabilityPassed ? 'passed' : 'failed — do not apply correction' }}</dd>
-        <dt>left takes</dt><dd>{{ measurementAggregateLeft?.records.length ?? 0 }}</dd>
-        <dt>right takes</dt><dd>{{ measurementAggregateRight?.records.length ?? 0 }}</dd>
+        <dt>left readings</dt><dd>{{ measurementAggregateLeft?.records.length ?? 0 }}</dd>
+        <dt>right readings</dt><dd>{{ measurementAggregateRight?.records.length ?? 0 }}</dd>
         <dt>relative L/R broadband level</dt>
         <dd>
-          {{ measurementAggregateLeft?.broadbandLevelDb !== null && measurementAggregateRight?.broadbandLevelDb !== null
+          {{ measurementAggregateLeft && measurementAggregateRight && measurementAggregateLeft.broadbandLevelDb !== null && measurementAggregateRight.broadbandLevelDb !== null
             ? (measurementAggregateLeft.broadbandLevelDb - measurementAggregateRight.broadbandLevelDb).toFixed(1) + ' dB (left minus right; relative only)'
             : 'inconclusive' }}
         </dd>
@@ -198,11 +232,11 @@ function curveRange(curve: readonly number[] | undefined): string {
       </dl>
       <ul v-if="measurementFailedGroups.length" class="calibration-failures">
         <li v-for="failure in measurementFailedGroups" :key="`${failure.positionId}:${failure.channel}`">
-          <template v-if="failure.failureReason === 'insufficient_takes'">
-            {{ failure.positionId }} / {{ failure.channel }}. Only {{ failure.takeCount }} of {{ failure.expectedTakeCount }} takes were valid; failed takes {{ failure.failedTakeIndices.map((index) => index + 1).join(', ') }}.
+          <template v-if="failure.failureReason === 'capture_rejected'">
+            {{ failure.positionId }} / {{ failure.channel }} was not usable. A targeted retry may be needed.
           </template>
           <template v-else>
-            {{ failure.positionId }} / {{ failure.channel }}. Median spread {{ failure.medianSpreadDb.toFixed(1) }} dB, maximum {{ failure.maxSpreadDb.toFixed(1) }} dB, {{ Math.round(failure.withinTwoDbFraction * 100) }}% within 2 dB.
+            {{ failure.positionId }} / {{ failure.channel }}. Median spatial spread {{ failure.medianSpreadDb == null ? 'unknown' : failure.medianSpreadDb.toFixed(1) }} dB, maximum {{ failure.maxSpreadDb == null ? 'unknown' : failure.maxSpreadDb.toFixed(1) }} dB, {{ failure.withinTwoDbFraction == null ? 'unknown' : Math.round(failure.withinTwoDbFraction * 100) + '%' }} within 2 dB.
           </template>
         </li>
       </ul>
@@ -222,7 +256,7 @@ function curveRange(curve: readonly number[] | undefined): string {
           :disabled="correctionPending"
           @click="emit('retry-failed-groups')"
         >
-          Retry failed position/channel groups
+          Run calibration again
         </button>
       </div>
       <div class="actions">
@@ -258,7 +292,7 @@ function curveRange(curve: readonly number[] | undefined): string {
         Validation is unavailable after a browser refresh until a repeatable center baseline is measured again.
       </p>
       <dl v-if="measurementValidationAnalysis || candidatePending" class="spec">
-        <dt>validation</dt><dd>center position, adaptive repeated left/right sweeps</dd>
+        <dt>validation</dt><dd>one center-position left/right capture, with one confirmation only if inconclusive</dd>
         <dt>validation status</dt><dd>{{ (candidateValidationStatus ?? 'pending').toUpperCase() }}</dd>
         <dt v-if="snapshot.calibration.transaction.state === 'candidate_pending' && snapshot.calibration.transaction.reason">validation reason</dt>
         <dd v-if="snapshot.calibration.transaction.state === 'candidate_pending' && snapshot.calibration.transaction.reason">{{ snapshot.calibration.transaction.reason }}</dd>
@@ -270,11 +304,14 @@ function curveRange(curve: readonly number[] | undefined): string {
           <dt>validation decision</dt><dd class="error">Worse than the center-position baseline</dd>
         </template>
       </dl>
-      <p v-if="candidatePending && !calibrationFinalizationPending" class="note">
+      <p v-if="candidateValidationStatus === 'imported' && !calibrationFinalizationPending" class="note">
+        This imported calibration is live and DSP-verified. Acoustic validation was not run on this TV. Accept it to keep it or roll it back.
+      </p>
+      <p v-else-if="candidatePending && !calibrationFinalizationPending" class="note">
         The normal flow validates and finalizes this candidate automatically. The controls below are recovery-only.
       </p>
       <div v-if="candidatePending && !calibrationFinalizationPending" class="actions">
-        <button v-if="candidateValidationStatus === 'passed'" :disabled="correctionPending" @click="emit('accept-candidate')">
+        <button v-if="candidateValidationStatus === 'passed' || candidateValidationStatus === 'imported'" :disabled="correctionPending" @click="emit('accept-candidate')">
           Recovery-only accept
         </button>
         <button :disabled="correctionPending" @click="emit('rollback-calibration')">
@@ -293,6 +330,7 @@ function curveRange(curve: readonly number[] | undefined): string {
     <div v-if="candidatePending && measurementStage !== 'complete'" class="response-graph">
       <p class="calibration-result">CALIBRATION CANDIDATE · {{ (candidateValidationStatus ?? 'pending').toUpperCase() }}</p>
       <p v-if="candidateValidationStatus === 'rolling_back'" class="note">The TV is completing the rollback. Validation and acceptance are temporarily unavailable.</p>
+      <p v-else-if="candidateValidationStatus === 'imported'" class="note">This calibration came from a file. The TV verified the live DSP state, but room validation was not run here. Accept it to keep it or roll it back.</p>
       <p v-else-if="!calibrationFinalizationPending" class="note">The TV retained this candidate across the browser session. The normal flow validates it automatically. Recovery controls are available below.</p>
       <p v-else class="note">The TV is completing the calibration transaction. Keep this page open until it reports a final result.</p>
       <div class="actions">
@@ -303,7 +341,7 @@ function curveRange(curve: readonly number[] | undefined): string {
         >
           Recovery-only validate
         </button>
-        <button v-if="candidateValidationStatus === 'passed' && !calibrationFinalizationPending" :disabled="correctionPending" @click="emit('accept-candidate')">
+        <button v-if="(candidateValidationStatus === 'passed' || candidateValidationStatus === 'imported') && !calibrationFinalizationPending" :disabled="correctionPending" @click="emit('accept-candidate')">
           Recovery-only accept
         </button>
         <button v-if="!calibrationFinalizationPending" :disabled="correctionPending" @click="emit('rollback-calibration')">
@@ -311,6 +349,26 @@ function curveRange(curve: readonly number[] | undefined): string {
         </button>
       </div>
     </div>
+
+    <div class="actions calibration-file-actions">
+      <button
+        :disabled="calibrationFilePending || correctionPending || candidatePending || !snapshot.calibration.active"
+        @click="emit('download-calibration')"
+      >
+        {{ calibrationFilePending ? 'Preparing…' : 'Download TV calibration' }}
+      </button>
+      <label class="file-button" :class="{ disabled: calibrationFilePending || correctionPending || candidatePending }">
+        Upload calibration
+        <input
+          type="file"
+          accept="application/json,.json"
+          :disabled="calibrationFilePending || correctionPending || candidatePending"
+          @change="importCalibrationFile"
+        />
+      </label>
+    </div>
+    <p class="note">The file contains final TV EQ data only. Imported data is staged for explicit acceptance or rollback.</p>
+    <p v-if="calibrationFileStatus" class="note">{{ calibrationFileStatus }}</p>
 
     <dl class="spec">
       <dt>status</dt>
@@ -374,5 +432,32 @@ function curveRange(curve: readonly number[] | undefined): string {
   margin: 0.75rem 0;
   padding-left: 1.2rem;
   color: #ffb48a;
+}
+
+.calibration-file-actions {
+  align-items: center;
+}
+
+.file-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.1rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.file-button.disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
 }
 </style>

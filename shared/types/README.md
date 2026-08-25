@@ -37,7 +37,8 @@ Device-targeted (client -> device): `state.get`, `engine.enable`,
 `profile.save`, `profile.load`, `profile.delete`, `calibration.get`,
 `calibration.applyCandidate`, `calibration.acceptCandidate`,
 `calibration.rollbackCandidate`, `calibration.validation.result`,
-`calibration.reset`, `calibrationSession.begin`,
+`calibration.reset`, `calibration.export`, `calibration.import`,
+`calibrationSession.begin`,
 `calibrationSession.end`, `calibrationSession.abort`,
 `calibrationSession.loudness.start`, `calibrationSession.loudness.stop`,
 `calibrationSession.progress`, `measurement.prepare`,
@@ -48,7 +49,17 @@ Device-published (device -> clients): `state.snapshot`, `state.changed`,
 `calibrationSession.loudness.started`, `calibrationSession.loudness.stopped`,
 `calibrationSession.position.continued`,
 `measurement.ready`, `measurement.started`, `measurement.finished`,
-`measurement.error`.
+`measurement.error`, `calibration.exported`.
+
+`calibration.export` returns the active final EQ curve as a versioned
+`sweetspot.calibration` package. The package contains the TV frequency grid,
+the requested curve, optional effective DSP readback, and source-device
+metadata. It does not contain microphone PCM or room-measurement checkpoints.
+
+`calibration.import` accepts an active package on the TV's frequency grid. The
+TV applies and verifies the curve, then stores it as a candidate with
+`validationStatus: "imported"`. The client must accept or roll back that
+candidate. Imported data is not presented as an acoustic validation result.
 
 Diagnostics (dev builds only): `diagnostics.deviceInfo`, `diagnostics.probe`,
 `diagnostics.effects`, `probe.run`, `probe.status`,
