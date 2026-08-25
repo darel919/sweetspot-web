@@ -13,7 +13,7 @@ import { createPositionLedger } from './position-ledger'
 
 const checkpoint = createCalibrationCheckpoint({
   sessionId: 'session-1',
-  device: { id: 'tv-1', appVersion: '1.2.3' },
+  device: { id: 'tv-1', appVersion: '1.2.3', buildId: 'tv-build-1' },
   microphone: {
     profileId: 'iphone-test',
     sourceDate: '2026-08-24',
@@ -28,6 +28,7 @@ const checkpoint = createCalibrationCheckpoint({
 const identity = {
   deviceId: 'tv-1',
   appVersion: '1.2.3',
+  buildId: 'tv-build-1',
   profileId: 'iphone-test',
   profileSourceDate: '2026-08-24',
   capturePathStatus: 'unvalidated' as const,
@@ -64,5 +65,11 @@ describe('calibration checkpoint persistence contract', () => {
       ...checkpoint,
       validationStarted: true,
     }, identity)).toEqual({ compatible: false, reason: 'pending-transaction' })
+  })
+
+  test('does not reject resume when both stored and current track rates are initially unknown', () => {
+    const unknownRateCheckpoint = { ...checkpoint, microphone: { ...checkpoint.microphone, sampleRate: null } }
+    expect(checkCalibrationCheckpointCompatibility(unknownRateCheckpoint, { ...identity, sampleRate: null })).toEqual({ compatible: true })
+    expect(checkCalibrationCheckpointCompatibility(unknownRateCheckpoint, { ...identity, sampleRate: null }, { requireSampleRate: true })).toEqual({ compatible: true })
   })
 })

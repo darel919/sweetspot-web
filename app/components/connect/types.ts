@@ -54,8 +54,8 @@ export interface ProbeCaptureEvidence {
   cutChannel: 'common' | 'left' | 'right' | 'flat'
   bandIndex: number
   gainDb: number
-  repeatabilityPassed: boolean
+  qualityPassed: boolean
   capturedAt: string
   positionResponses: AggregateResponse['positionResponses']
-  repeatability: AggregateResponse['repeatability']
+  spatialConsistency: AggregateResponse['spatialConsistency']
 }

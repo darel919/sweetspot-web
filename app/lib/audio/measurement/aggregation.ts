@@ -41,7 +41,7 @@ export interface AggregateResponse {
   spreadDb: ResponsePoint[]
   positionResponses: PositionResponse[]
   records: MeasurementRecord[]
-  repeatability: RepeatabilitySummary[]
+  spatialConsistency: RepeatabilitySummary[]
   failedGroups: RepeatabilitySummary[]
   broadbandLevelDb: number | null
   relativeChannelLevelDb: number | null
@@ -242,18 +242,18 @@ export function aggregateResponse(
     spreadDb: spatial.spreadDb,
     positionResponses,
     records: records.filter((record) => channel === 'both' || record.channel === channel),
-    repeatability: summaries,
+    spatialConsistency: summaries,
     failedGroups: summaries.filter((summary) => !summary.passed),
     broadbandLevelDb: median(positionResponses.map((response) => response.broadbandLevelDb).filter((value): value is number => value !== null)),
     relativeChannelLevelDb: channel === 'both' && leftLevel !== null && rightLevel !== null ? leftLevel - rightLevel : null,
   }
 }
 
-export function allRepeatabilityPassed(aggregate: AggregateResponse | null): boolean {
+export function allCaptureQualityPassed(aggregate: AggregateResponse | null): boolean {
   return Boolean(
     aggregate
       && aggregate.points.length > 1
-      && aggregate.repeatability.length > 0
-      && aggregate.repeatability.every((summary) => summary.passed),
+      && aggregate.spatialConsistency.length > 0
+      && aggregate.spatialConsistency.every((summary) => summary.passed),
   )
 }

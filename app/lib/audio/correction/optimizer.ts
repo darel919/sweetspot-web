@@ -250,7 +250,7 @@ export function combineChannelAggregates(
     spreadDb,
     positionResponses,
     records: [...left.records, ...right.records],
-    repeatability: [...left.repeatability, ...right.repeatability],
+    spatialConsistency: [...left.spatialConsistency, ...right.spatialConsistency],
     failedGroups: [...left.failedGroups, ...right.failedGroups],
     broadbandLevelDb: left.broadbandLevelDb !== null && right.broadbandLevelDb !== null
       ? (left.broadbandLevelDb + right.broadbandLevelDb) / 2

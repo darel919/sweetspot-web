@@ -21,7 +21,7 @@ import { createPcmRecorder, type CaptureSignalDiagnostics, type PcmRecorder } fr
 import { analyzeInWorker } from '../lib/audio/measurement/worker-client'
 import {
   aggregateResponse,
-  allRepeatabilityPassed,
+  allCaptureQualityPassed,
   type AggregateResponse,
   type MeasurementRecord,
   type RepeatabilitySummary,
@@ -49,6 +49,7 @@ import {
   type PositionLedger,
 } from '../lib/audio/measurement/position-ledger'
 import { decideNextCapture, type ConvergenceAssessment } from '../lib/audio/measurement/adaptive-planner'
+import { validationRepairChannel } from '../lib/audio/measurement/validation-retry'
 import {
   CALIBRATION_ANALYSIS_REVISION,
   CALIBRATION_SWEEP_REVISION,
@@ -97,7 +98,7 @@ type Connection = {
 }
 
 interface CalibrationSessionOptions {
-  getDeviceIdentity?: () => { id: string; appVersion: string } | null
+  getDeviceIdentity?: () => { id: string; appVersion: string; buildId: string } | null
   debugCaptureExport?: boolean
 }
 
@@ -238,6 +239,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   let loadedResumeCheckpoint: CalibrationCheckpoint | null = null
   let previousConvergencePoints: readonly ResponsePoint[] | null = null
   const debugCaptures: CalibrationDebugCapture[] = []
+  let calibrationId: string | null = null
   const failedMeasurementAttemptCount = ref(0)
 
   const countFailedMeasurementAttempts = (ledger: PositionLedger | null): number => ledger?.captures.filter((capture) => {
@@ -248,22 +250,21 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     return channels.some((channel) => capture[channel].kind === 'rejected')
   }).length ?? 0
 
-  const acceptedMeasurementPositionCount = computed(() => new Set(records.value.map((record) => record.context.positionId)).size)
-  const repeatabilityPassed = computed(() =>
-    allRepeatabilityPassed(aggregateLeft.value)
-    && allRepeatabilityPassed(aggregateRight.value)
-    && acceptedMeasurementPositionCount.value >= 3
-    && failedMeasurementAttemptCount.value === 0
+  const completeAcceptedMeasurementPositionCount = computed(() => positionLedger ? acceptedPositionCount(positionLedger) : 0)
+  const measurementQualityPassed = computed(() =>
+    allCaptureQualityPassed(aggregateLeft.value)
+    && allCaptureQualityPassed(aggregateRight.value)
+    && completeAcceptedMeasurementPositionCount.value >= 3
     && failedTakeDiagnostics.value.length === 0)
-  const repeatabilitySummaries = computed<RepeatabilitySummary[]>(() => [
-    ...(aggregateLeft.value?.repeatability ?? []),
-    ...(aggregateRight.value?.repeatability ?? []),
+  const spatialConsistencySummaries = computed<RepeatabilitySummary[]>(() => [
+    ...(aggregateLeft.value?.spatialConsistency ?? []),
+    ...(aggregateRight.value?.spatialConsistency ?? []),
   ])
   const failedRepeatabilityGroups = computed(() =>
-    repeatabilitySummaries.value.filter((summary) => !summary.passed))
+    spatialConsistencySummaries.value.filter((summary) => !summary.passed))
   const probeRepeatabilitySummaries = computed<RepeatabilitySummary[]>(() =>
-    aggregateBoth.value?.repeatability ?? [])
-  const probeRepeatabilityPassed = computed(() => allRepeatabilityPassed(aggregateBoth.value))
+    aggregateBoth.value?.spatialConsistency ?? [])
+  const probeCaptureQualityPassed = computed(() => allCaptureQualityPassed(aggregateBoth.value))
   const probeFailedRepeatabilityGroups = computed(() =>
     probeRepeatabilitySummaries.value.filter((summary) => !summary.passed))
   const currentPosition = computed(() => activeContext.value ? positionForContext(activeContext.value) : null)
@@ -423,6 +424,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     return {
       deviceId: device.id,
       appVersion: device.appVersion,
+      buildId: device.buildId,
       profileId: currentProfile.id,
       profileSourceDate: currentProfile.sourceDate,
       capturePathStatus: currentProfile.capturePathStatus,
@@ -475,7 +477,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     if (!ledger || !identity || !sessionId || !profile) return
     const checkpoint = createCalibrationCheckpoint({
       sessionId,
-      device: { id: identity.deviceId, appVersion: identity.appVersion },
+      device: { id: identity.deviceId, appVersion: identity.appVersion, buildId: identity.buildId },
       microphone: {
         profileId: profile.id,
         sourceDate: profile.sourceDate,
@@ -508,10 +510,11 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }
 
   function exportDebugBundle(): void {
-    const exportSessionId = sessionId ?? completedMeasurementId.value
-    if (!options.debugCaptureExport || !exportSessionId || debugCaptures.length === 0) return
-    downloadCalibrationDebugBundle(createCalibrationDebugBundle(exportSessionId, debugCaptures, {
+    const exportCalibrationId = calibrationId ?? completedMeasurementId.value
+    if (!options.debugCaptureExport || !exportCalibrationId || debugCaptures.length === 0) return
+    downloadCalibrationDebugBundle(createCalibrationDebugBundle(exportCalibrationId, debugCaptures, {
       tvAppVersion: options.getDeviceIdentity?.()?.appVersion ?? null,
+      tvBuildId: options.getDeviceIdentity?.()?.buildId ?? null,
       webBuildSha: CALIBRATION_WEB_BUILD_SHA,
       analysisRevision: CALIBRATION_ANALYSIS_REVISION,
       sweepRevision: CALIBRATION_SWEEP_REVISION,
@@ -655,7 +658,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     connection.send('measurement.response', { sessionId, current, total, left, right })
   }
 
-  function repeatabilityFailureMessage(groups: readonly RepeatabilitySummary[]): string {
+  function spatialConsistencyFailureMessage(groups: readonly RepeatabilitySummary[]): string {
     if (groups.length === 0) return ''
     return groups.map((group) => {
       if (group.failureReason === 'capture_rejected') return `${group.positionId} ${group.channel} channel was not usable`
@@ -775,8 +778,13 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     }, 15_000)
   }
 
-  function setPreparingText(_context: MeasurementContext) {
-    message.value = 'Follow the instructions on the TV.'
+  function setPreparingText(context: MeasurementContext) {
+    message.value = sessionMode === 'measurement'
+      && positionLedger === null
+      && context.positionId === 'center'
+      && context.attemptIndex === 0
+      ? 'Running the center acoustic pilot. The room walkaround starts only after this signal is synchronized and analyzed.'
+      : 'Follow the instructions on the TV.'
   }
 
   function sendPrepare(context: MeasurementContext) {
@@ -902,7 +910,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     message.value = sessionMode === 'validation'
       ? 'Follow the instructions on the TV.'
       : failures.length > 0
-        ? `Some measurements need attention: ${repeatabilityFailureMessage(failures)}`
+        ? `Some measurements need attention: ${spatialConsistencyFailureMessage(failures)}`
         : 'Follow the instructions on the TV.'
     sendProgress('ending', message.value)
     connection.send('calibrationSession.end', { sessionId: currentSessionId })
@@ -987,7 +995,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     if (!resumingMeasurement) {
       takeDiagnostics.value = []
       failedTakeDiagnostics.value = []
-      debugCaptures.length = 0
+      if (mode !== 'validation') debugCaptures.length = 0
     }
     captureInfo.value = null
     captureMetadata.value = null
@@ -1038,6 +1046,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       }
       sessionId = newSessionId()
       if (mode === 'measurement') {
+        calibrationId = sessionId
         positionLedger = resumingMeasurement && resumeCheckpoint
           ? { ...resumeCheckpoint.ledger, sessionId }
           : createPositionLedger(sessionId)
@@ -1115,7 +1124,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   async function onReady(payload: unknown) {
     const operationGeneration = sessionGeneration
     const operationSessionId = sessionId
-    if (!isCurrentOperation(operationGeneration, operationSessionId) || !isMeasurementReadyPayload(payload) || payload.sessionId !== operationSessionId) return
+    if (!operationSessionId || !isCurrentOperation(operationGeneration, operationSessionId) || !isMeasurementReadyPayload(payload) || payload.sessionId !== operationSessionId) return
     const context = payload.context
     if (!context || !isMeasurementContext(context)) {
       if (stage.value !== 'preparing') return
@@ -1205,6 +1214,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       if (!currentProfile) throw new Error('Microphone calibration profile is unavailable.')
       const debugCaptureIndex = options.debugCaptureExport
         ? debugCaptures.push(createCalibrationDebugCapture({
+          sessionId: operationSessionId,
+          candidateId: validationCandidateId.value,
           context: currentContext,
           samples: recording.samples,
           sampleRate,
@@ -1338,9 +1349,10 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         const analysisChannel = requiredChannels.find((channel) => result[channel].status === 'ok') ?? requiredChannels[0]
         validationAnalysis.value = analysisChannel === 'left' ? result.left : result.right
         rebuildValidationAggregates()
-        const hasRequiredChannels = requiredChannels.every((channel) => result[channel].status === 'ok')
+        const failedChannels = requiredChannels.filter((channel) => result[channel].status !== 'ok')
+        const hasRequiredChannels = failedChannels.length === 0
         if (!hasRequiredChannels && currentContext.attemptIndex + 1 < currentContext.attemptCount) {
-          const failedChannel = requiredChannels.find((channel) => result[channel].status !== 'ok')
+          const failedChannel = validationRepairChannel(failedChannels)
           if (!failedChannel) return
           const confirmation = {
             ...currentContext,
@@ -1354,7 +1366,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
           return
         }
         if (!hasRequiredChannels) {
-          const failedChannel = requiredChannels.find((channel) => result[channel].status !== 'ok')
+          const failedChannel = failedChannels[0]
           if (!failedChannel) return
           await fail(analysisErrorCode(result[failedChannel].status), measurementFailureMessage(result[failedChannel]))
           return
@@ -1636,7 +1648,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         completedMeasurementId.value = endedSessionId
         if (hadAnalysis && positionLedger
           && acceptedPositionCount(positionLedger) >= 3
-          && repeatabilityPassed.value
+          && measurementQualityPassed.value
           && convergenceOutcome.value === 'sufficient') clearPersistedCheckpoint()
       }
       stage.value = hadAnalysis ? 'complete' : 'idle'
@@ -1644,14 +1656,14 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         ? endedMode === 'validation'
           ? 'Validation complete. Compare the measured result with the original response.'
           : endedMode === 'probe'
-            ? probeRepeatabilityPassed.value
+            ? probeCaptureQualityPassed.value
               ? 'Diagnostic probe complete. Export the captured response before changing the curve.'
-              : `Diagnostic probe repeatability is inconclusive at ${repeatabilityFailureMessage(probeFailedRepeatabilityGroups.value)}.`
-            : repeatabilityPassed.value
+              : `Diagnostic probe capture quality is inconclusive at ${spatialConsistencyFailureMessage(probeFailedRepeatabilityGroups.value)}.`
+            : measurementQualityPassed.value
               ? 'Advanced measurement complete. Review the response and room metrics below.'
               : failedMeasurementAttemptCount.value > 0
                 ? `Calibration needs review. ${failedMeasurementAttemptCount.value} capture attempt${failedMeasurementAttemptCount.value === 1 ? '' : 's'} failed before a retry.`
-                : `Calibration failed. Measurements were not repeatable at ${repeatabilityFailureMessage(failedRepeatabilityGroups.value)}.`
+                : `Calibration failed. Accepted position evidence was incomplete at ${spatialConsistencyFailureMessage(failedRepeatabilityGroups.value)}.`
         : 'Calibration cancelled.'
     }
   }
@@ -1729,11 +1741,12 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     aggregateBoth: readonly(aggregateBoth),
     validationAggregateLeft: readonly(validationAggregateLeft),
     validationAggregateRight: readonly(validationAggregateRight),
-    repeatabilityPassed,
+    measurementQualityPassed,
+    completeAcceptedPositionCount: completeAcceptedMeasurementPositionCount,
     failedMeasurementAttemptCount: readonly(failedMeasurementAttemptCount),
-    repeatabilitySummaries: readonly(repeatabilitySummaries),
+    spatialConsistencySummaries: readonly(spatialConsistencySummaries),
     failedRepeatabilityGroups: readonly(failedRepeatabilityGroups),
-    probeRepeatabilityPassed,
+    probeCaptureQualityPassed,
     probeRepeatabilitySummaries: readonly(probeRepeatabilitySummaries),
     probeFailedRepeatabilityGroups: readonly(probeFailedRepeatabilityGroups),
     currentContext: readonly(activeContext),

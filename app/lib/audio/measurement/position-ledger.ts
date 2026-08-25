@@ -265,9 +265,11 @@ export function projectAcceptedRecords(
     }))
 }
 
-export function acceptedPositionCount(ledger: PositionLedger): number {
+export function completeAcceptedPositionCount(ledger: PositionLedger): number {
   return projectPhysicalPositionLedger(ledger).positions.filter((position) =>
     channelMeasurement(position, 'left').kind === 'accepted'
     && channelMeasurement(position, 'right').kind === 'accepted',
   ).length
 }
+
+export const acceptedPositionCount = completeAcceptedPositionCount

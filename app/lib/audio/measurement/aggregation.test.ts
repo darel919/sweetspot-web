@@ -3,7 +3,7 @@ import { CALIBRATION_POSITION_TARGETS, type MeasurementContext } from '../../../
 import type { MeasurementAnalysis } from './response'
 import {
   aggregateResponse,
-  allRepeatabilityPassed,
+  allCaptureQualityPassed,
   calculateRepeatability,
   type MeasurementRecord,
 } from './aggregation'
@@ -188,6 +188,6 @@ describe('physical-position spatial aggregation', () => {
       record([8, 8, 8], { positionId: 'left', positionIndex: 1, channel: 'left' }),
     ], 'left')
     expect(aggregate).not.toBeNull()
-    expect(aggregate ? allRepeatabilityPassed(aggregate) : false).toBe(true)
+    expect(aggregate ? allCaptureQualityPassed(aggregate) : false).toBe(true)
   })
 })

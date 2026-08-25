@@ -3,6 +3,7 @@ import { generateSweepSignal, sweepSampleParts } from '../sweep-reference'
 import {
   decayTime,
   deconvolveSweep,
+  findDirectArrival,
   resampleCaptureForTest,
   summarizeImpulse,
   windowedImpulseResponse,
@@ -89,6 +90,56 @@ function applyTransferFunction(samples: Float32Array, transfer: Float32Array): F
 }
 
 describe('browser-local impulse analysis', () => {
+  test('accepts a clean supported direct impulse', () => {
+    const impulse = new Float32Array(8_000)
+    impulse[100] = 1
+    impulse[99] = 0.5
+    impulse[101] = 0.5
+    expect(findDirectArrival(impulse, 8_000, 0.001).rejectionReason).toBeNull()
+  })
+
+  test('rejects a direct peak below the measured noise gate', () => {
+    const impulse = new Float32Array(8_000)
+    impulse[100] = 0.05
+    expect(findDirectArrival(impulse, 8_000, 0.01).rejectionReason).toBe('peak_below_noise')
+  })
+
+  test('rejects an isolated candidate without local support', () => {
+    const impulse = new Float32Array(8_000)
+    impulse[100] = 1
+    expect(findDirectArrival(impulse, 8_000, 0.001).rejectionReason).toBe('candidate_not_sustained')
+  })
+
+  test('rejects an empty impulse as having no candidate', () => {
+    expect(findDirectArrival(new Float32Array(8_000), 8_000, 0.001).rejectionReason).toBe('no_candidate')
+  })
+
+  test('accepts a direct path barely above the measured noise gate', () => {
+    const impulse = new Float32Array(8_000)
+    impulse[100] = 0.081
+    impulse[99] = 0.04
+    impulse[101] = 0.04
+    expect(findDirectArrival(impulse, 8_000, 0.01).index).toBe(100)
+  })
+
+  test('keeps a strong late reflection from replacing an earlier direct path', () => {
+    const impulse = new Float32Array(8_000)
+    impulse[100] = 0.5
+    impulse[99] = 0.25
+    impulse[101] = 0.25
+    impulse[1_000] = 1
+    expect(findDirectArrival(impulse, 8_000, 0.001).index).toBe(100)
+  })
+
+  test('respects an external deconvolved noise estimate', () => {
+    const impulse = new Float32Array(8_000)
+    impulse[100] = 0.5
+    impulse[99] = 0.25
+    impulse[101] = 0.25
+    expect(findDirectArrival(impulse, 8_000, 0.1).rejectionReason).toBe('peak_below_noise')
+    expect(findDirectArrival(impulse, 8_000, 0.001).rejectionReason).toBeNull()
+  })
+
   test('keeps identity resampling sample-exact', () => {
     const input = Float32Array.from({ length: 128 }, (_, index) => Math.sin(index * 0.37))
 

@@ -400,7 +400,7 @@ function getReferenceFft(
   return cachedReferenceFft
 }
 
-function findDirectArrival(samples: Float32Array, sampleRate: number, externalNoiseRms: number | null = null): {
+export function findDirectArrival(samples: Float32Array, sampleRate: number, externalNoiseRms: number | null = null): {
   index: number | null
   peakIndex: number | null
   noiseRms: number
@@ -475,12 +475,16 @@ function findDirectArrival(samples: Float32Array, sampleRate: number, externalNo
     const supportStart = Math.max(0, index - supportRadius)
     const supportEnd = Math.min(searchEnd, index + supportRadius + 1)
     let supportEnergy = 0
+    let supportSamples = 0
     for (let cursor = supportStart; cursor < supportEnd; cursor++) {
+      if (cursor === index) continue
       const sample = samples[cursor] ?? 0
       supportEnergy += sample * sample
+      supportSamples++
     }
-    const supportRms = Math.sqrt(supportEnergy / Math.max(1, supportEnd - supportStart))
-    if (supportRms >= Math.max(noiseFloorRms * 1.5, threshold * 0.05)) return {
+    const supportRms = Math.sqrt(supportEnergy / Math.max(1, supportSamples))
+    if (supportRms >= Math.max(noiseFloorRms * 1.5, threshold * 0.05)
+      || (index === 0 && directPeak >= threshold)) return {
       index,
       peakIndex: directPeakIndex,
       noiseRms: noiseFloorRms,

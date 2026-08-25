@@ -1,7 +1,7 @@
 import { isMeasurementContext, type MeasurementCaptureMetadata, type MeasurementContext } from '../../../../shared/types/protocol'
 import type { PositionLedger } from './position-ledger'
 
-export const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 2 as const
+export const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 3 as const
 export const CALIBRATION_CHECKPOINT_ORIENTATION = 'iphone-upright-bottom-edge-to-tv' as const
 export const CALIBRATION_CHECKPOINT_STORE = 'sweetspot-calibration-checkpoints'
 const configuredBuildSha = import.meta.env.NUXT_PUBLIC_BUILD_SHA
@@ -14,6 +14,7 @@ export type CalibrationConvergenceOutcome = 'sufficient' | 'bounded' | 'insuffic
 export interface CalibrationCheckpointDevice {
   id: string
   appVersion: string
+  buildId: string
 }
 
 export interface CalibrationCheckpointMicrophone {
@@ -46,6 +47,7 @@ export interface CalibrationCheckpoint {
 export interface CalibrationCheckpointIdentity {
   deviceId: string
   appVersion: string
+  buildId: string
   profileId: string
   profileSourceDate: string
   capturePathStatus: CalibrationCheckpointMicrophone['capturePathStatus']
@@ -59,7 +61,7 @@ export type CalibrationCheckpointCompatibility =
   | { compatible: true }
   | {
       compatible: false
-      reason: 'schema' | 'device' | 'app-version' | 'web-build' | 'analysis-revision' | 'sweep-revision' | 'microphone-profile' | 'capture-path' | 'sample-rate' | 'orientation' | 'pending-transaction'
+      reason: 'schema' | 'device' | 'device-build' | 'app-version' | 'web-build' | 'analysis-revision' | 'sweep-revision' | 'microphone-profile' | 'capture-path' | 'sample-rate' | 'orientation' | 'pending-transaction'
     }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -160,6 +162,8 @@ export function parseCalibrationCheckpoint(value: unknown): CalibrationCheckpoin
     || typeof value.device.id !== 'string'
     || value.device.id.length === 0
     || typeof value.device.appVersion !== 'string'
+    || typeof value.device.buildId !== 'string'
+    || value.device.buildId.length === 0
     || !isRecord(value.microphone)
     || typeof value.microphone.profileId !== 'string'
     || typeof value.microphone.sourceDate !== 'string'
@@ -242,6 +246,7 @@ export function checkCalibrationCheckpointCompatibility(
     return { compatible: false, reason: 'pending-transaction' }
   }
   if (checkpoint.device.id !== expected.deviceId) return { compatible: false, reason: 'device' }
+  if (checkpoint.device.buildId !== expected.buildId) return { compatible: false, reason: 'device-build' }
   if (checkpoint.device.appVersion !== expected.appVersion) return { compatible: false, reason: 'app-version' }
   if (checkpoint.webBuildSha !== expected.webBuildSha) return { compatible: false, reason: 'web-build' }
   if (checkpoint.analysisRevision !== expected.analysisRevision) return { compatible: false, reason: 'analysis-revision' }

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { MeasurementSweep } from '#shared/types/protocol'
 import golden from '../../../test-vectors/measurement-sweep-golden.json'
-import { generateCompositeSweepStereoReference, generateSweepReference, generateSyncMarker, sweepSampleParts } from './sweep-reference'
+import { generateCompositeSweepStereoReference, generateSweepReference, generateSweepSignal, generateSyncMarker, sweepSampleParts } from './sweep-reference'
 
 const sweep: MeasurementSweep = {
   algorithm: 'exponential-sine-v1',
@@ -48,6 +48,15 @@ const androidDefaultSweep: MeasurementSweep = {
 }
 
 describe('sweep reference', () => {
+  test('evaluates candidate field levels without clipping the deterministic sweep', () => {
+    for (const levelDbfs of [-18, -15, -12, -9, -6]) {
+      const signal = generateSweepSignal({ ...sweep, levelDbfs })
+      const peak = signal.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0)
+      expect(peak).toBeLessThanOrEqual(1)
+      expect(peak).toBeGreaterThan(0)
+    }
+  })
+
   test('uses the reported timing and keeps the preroll silent', () => {
     const parts = sweepSampleParts(sweep)
     const reference = generateSweepReference(sweep)

@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 
 const bundlePath = Bun.argv[2]
+const assertStatuses = Bun.argv.includes('--assert-status')
 if (!bundlePath) {
   console.error('Usage: bun scripts/replay-calibration-debug.mjs <bundle.json>')
   process.exit(2)
 }
 
 const bundle = await Bun.file(bundlePath).json()
-if (bundle?.schemaVersion !== 1 || !Array.isArray(bundle.captures)) {
+if (bundle?.schemaVersion !== 2 || !Array.isArray(bundle.captures) || typeof bundle.calibrationId !== 'string') {
   throw new Error('Unsupported calibration debug bundle.')
 }
 
@@ -26,11 +27,15 @@ const results = bundle.captures.map((capture) => {
     capture.sweep,
     capture.microphoneProfile,
   )
+  const newStatus = `${analysis.left.status}/${analysis.right.status}`
   return {
     context: capture.context,
     startSample: capture.startSample,
     endSample: capture.endSample,
     status: analysis.status,
+    storedStatus: capture.analysisStatus,
+    newStatus,
+    statusChanged: capture.analysisStatus !== null && capture.analysisStatus !== newStatus,
     detection: analysis.detection,
     left: {
       status: analysis.left.status,
@@ -45,9 +50,20 @@ const results = bundle.captures.map((capture) => {
   }
 })
 
+const changed = results.filter((result) => result.statusChanged)
+if (assertStatuses && changed.length > 0) {
+  for (const result of changed) {
+    console.error(`Replay status changed at ${result.context.phase}/${result.context.positionId}/${result.context.attemptIndex}: ${result.storedStatus} -> ${result.newStatus}`)
+  }
+  process.exitCode = 1
+}
+
 process.stdout.write(`${JSON.stringify({
   schemaVersion: bundle.schemaVersion,
-  sessionId: bundle.sessionId,
+  calibrationId: bundle.calibrationId,
+  sessionIds: bundle.sessionIds,
+  validationSessionIds: bundle.validationSessionIds,
+  tvBuildId: bundle.tvBuildId,
   webBuildSha: bundle.webBuildSha,
   analysisRevision: bundle.analysisRevision,
   sweepRevision: bundle.sweepRevision,

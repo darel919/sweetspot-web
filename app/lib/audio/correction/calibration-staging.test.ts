@@ -24,7 +24,7 @@ const eligible: AutomaticCorrectionStageInput = {
   attemptedMeasurementId: null,
   failedMeasurementId: null,
   unresolvedFailureCount: 0,
-  failedAttemptCount: 0,
+
   acceptedPositionCount: 3,
 }
 
@@ -71,5 +71,10 @@ describe('automatic calibration staging guards', () => {
       measurementId: 'measurement-2',
       attemptedMeasurementId: 'measurement-1',
     })).toBe(true)
+  })
+
+  test('allows resolved historical failures when no failure remains unresolved', () => {
+    const historical = { ...eligible, failedAttemptCount: 2 } as AutomaticCorrectionStageInput & { failedAttemptCount: number }
+    expect(shouldStageAutomaticCorrection(historical)).toBe(true)
   })
 })

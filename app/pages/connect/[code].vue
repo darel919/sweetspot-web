@@ -43,7 +43,10 @@
           :measurement-aggregate-left="measurementAggregateLeft"
           :measurement-aggregate-right="measurementAggregateRight"
           :measurement-validation-analysis="measurementValidationAnalysis"
-          :measurement-repeatability-passed="measurementRepeatabilityPassed"
+          :measurement-quality-passed="measurementQualityPassed"
+          :measurement-failed-attempt-count="measurementFailedAttemptCount"
+          :measurement-complete-position-count="measurementCompletePositionCount"
+          :web-build-sha="CALIBRATION_WEB_BUILD_SHA"
           :measurement-convergence-outcome="measurementConvergenceOutcome"
           :measurement-failed-groups="measurementFailedGroups"
           :measurement-current-context="measurementCurrentContext"
@@ -215,7 +218,8 @@ import {
 import type {
   AggregateResponse,
 } from '~/lib/audio/measurement/aggregation'
-import { allRepeatabilityPassed } from '~/lib/audio/measurement/aggregation'
+import { allCaptureQualityPassed } from '~/lib/audio/measurement/aggregation'
+import { CALIBRATION_WEB_BUILD_SHA } from '~/lib/audio/measurement/checkpoint'
 import { EqCommandRevisionGate } from '~/lib/eq-command-revision'
 import type {
   CalibrationResultStatus,
@@ -248,7 +252,8 @@ const {
   validationActive: measurementValidationActive,
   validationAggregateLeft: measurementValidationAggregateLeft,
   validationAggregateRight: measurementValidationAggregateRight,
-  repeatabilityPassed: measurementRepeatabilityPassed,
+  measurementQualityPassed,
+  completeAcceptedPositionCount: measurementCompletePositionCount,
   failedMeasurementAttemptCount: measurementFailedAttemptCount,
   convergenceOutcome: measurementConvergenceOutcome,
   failedRepeatabilityGroups: measurementFailedGroups,
@@ -287,6 +292,7 @@ const {
   getDeviceIdentity: () => snapshot.value ? {
     id: snapshot.value.device.id,
     appVersion: snapshot.value.device.appVersion,
+    buildId: snapshot.value.device.buildId ?? 'unknown',
   } : null,
   debugCaptureExport: debugCaptureExportEnabled.value,
 })
@@ -500,7 +506,7 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
   if (!currentSnapshot || !profile) return null
   const bandCutoffs = currentSnapshot.calibration.frequenciesHz
   if (bandCutoffs.length !== 64) return null
-  if (measurementStage.value !== 'complete' || !measurementRepeatabilityPassed.value) return null
+  if (measurementStage.value !== 'complete' || !measurementQualityPassed.value) return null
   if (measurementConvergenceOutcome.value !== 'sufficient') return null
   if (currentSnapshot.capabilities.supportsCalibratedCorrection !== true) return null
   if (!isMicCalibrationProfileEligibleForCorrection(profile)) return null
@@ -549,8 +555,8 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
 
 const validationAggregate = computed<AggregateResponse | null>(() => {
   if (!measurementValidationAggregateLeft.value || !measurementValidationAggregateRight.value) return null
-  if (!allRepeatabilityPassed(measurementValidationAggregateLeft.value)
-    || !allRepeatabilityPassed(measurementValidationAggregateRight.value)) return null
+  if (!allCaptureQualityPassed(measurementValidationAggregateLeft.value)
+    || !allCaptureQualityPassed(measurementValidationAggregateRight.value)) return null
   return combineChannelAggregates(measurementValidationAggregateLeft.value, measurementValidationAggregateRight.value)
 })
 
@@ -559,8 +565,8 @@ const validationBaselineReady = computed(() => {
   const right = measurementAggregateRight.value
   return left !== null
     && right !== null
-    && allRepeatabilityPassed(left)
-    && allRepeatabilityPassed(right)
+    && allCaptureQualityPassed(left)
+    && allCaptureQualityPassed(right)
     && validationPositionIds.value.length >= 2
     && spatialBaselineAggregate.value?.points.length >= 2
 })
@@ -605,15 +611,15 @@ const validationOutcome = computed(() => {
   const transaction = candidateTransaction.value
   if (measurementStage.value !== 'complete' || !transaction || transaction.validationStatus !== 'pending') return null
   if (measurementValidationCandidateId.value !== transaction.candidateId) return null
-  const validationRepeatable = measurementValidationAggregateLeft.value !== null
+  const validationQualityValid = measurementValidationAggregateLeft.value !== null
     && measurementValidationAggregateRight.value !== null
-    && allRepeatabilityPassed(measurementValidationAggregateLeft.value)
-    && allRepeatabilityPassed(measurementValidationAggregateRight.value)
+    && allCaptureQualityPassed(measurementValidationAggregateLeft.value)
+    && allCaptureQualityPassed(measurementValidationAggregateRight.value)
   return classifyCalibrationValidation({
     beforeDb: validationMetrics.value?.before ?? null,
     afterDb: validationMetrics.value?.after ?? null,
-    baselineRepeatable: validationBaselineReady.value,
-    validationRepeatable,
+    baselineQualityValid: validationBaselineReady.value,
+    validationQualityValid,
   })
 })
 
@@ -960,11 +966,11 @@ async function sendValidationResultOnce(candidateId: string, outcome: Validation
 }
 
 watch(
-  [measurementStage, measurementCompletedId, recommendedCorrection, measurementRepeatabilityPassed, measurementFailedAttemptCount, deviceOnline, correctionPending, candidateTransaction],
-  ([stage, measurementId, correction, repeatabilityPassed, failedAttemptCount, online, applying, transaction]) => {
+  [measurementStage, measurementCompletedId, recommendedCorrection, measurementQualityPassed, deviceOnline, correctionPending, candidateTransaction],
+  ([stage, measurementId, correction, qualityPassed, online, applying, transaction]) => {
     const currentSnapshot = snapshot.value
     if (!shouldStageAutomaticCorrection({
-      measurementComplete: stage === 'complete' && repeatabilityPassed,
+      measurementComplete: stage === 'complete' && qualityPassed,
       convergenceSufficient: measurementConvergenceOutcome.value === 'sufficient',
       measurementId,
       correction,
@@ -976,8 +982,7 @@ watch(
       attemptedMeasurementId: automaticStagingMeasurementId.value,
       failedMeasurementId: automaticStagingFailedMeasurementId.value,
       unresolvedFailureCount: measurementFailedDiagnostics.value.length,
-      failedAttemptCount,
-      acceptedPositionCount: new Set(measurementRecords.value.map((record) => record.context.positionId)).size,
+      acceptedPositionCount: measurementCompletePositionCount.value,
     })) return
     if (!measurementId || !correction) return
     void stageRecommendedCorrectionAutomatically(measurementId, correction)
@@ -987,13 +992,13 @@ watch(
 
 watch(
   [measurementStage, measurementCompletedId, validationBaselineReady, deviceValidationReady, validationCapturePathEligible, candidateTransaction, deviceOnline, measurementValidationActive, measurementAbortRecovery, automaticStagingFailedMeasurementId],
-  ([stage, measurementId, baselineRepeatable, deviceReady, capturePathEligible, transaction, online, validationActive, abortRecovery, stagingFailedMeasurementId]) => {
+  ([stage, measurementId, baselineQualityValid, deviceReady, capturePathEligible, transaction, online, validationActive, abortRecovery, stagingFailedMeasurementId]) => {
     const candidateId = transaction?.validationStatus === 'pending' ? transaction.candidateId : null
     if (calibrationFinalizationPending.value || abortRecovery.state !== 'idle' || !shouldStartAutomaticValidation({
       measurementComplete: stage === 'complete',
       measurementId,
       candidateId,
-      baselineRepeatable,
+      baselineQualityValid,
       deviceValidationReady: deviceReady,
       capturePathEligible,
       deviceOnline: online,
@@ -1337,7 +1342,7 @@ async function applyCalibration() {
 
 async function applyRecommendedCorrection() {
   const correction = recommendedCorrection.value
-  if (measurementStage.value !== 'complete' || !correction || !measurementRepeatabilityPassed.value || correctionPending.value) return
+  if (measurementStage.value !== 'complete' || !correction || !measurementQualityPassed.value || correctionPending.value) return
   if (snapshot.value?.capabilities.supportsCalibratedCorrection !== true) {
     showToast('The TV EQ readback is degraded, so automatic correction is unavailable.')
     return
@@ -1523,7 +1528,7 @@ function startValidation() {
     return
   }
   if (!validationBaselineReady.value) {
-    showToast('Validation requires a repeatable spatial baseline from this browser session. Re-measure before validating.')
+    showToast('Validation requires a stable spatial baseline from this browser session. Re-measure before validating.')
     return
   }
   calibrationResult.value = null
@@ -1653,10 +1658,10 @@ function snapshotProbeEvidence(
     cutChannel,
     bandIndex,
     gainDb,
-    repeatabilityPassed: allRepeatabilityPassed(aggregate),
+    qualityPassed: allCaptureQualityPassed(aggregate),
     capturedAt: new Date().toISOString(),
     positionResponses: JSON.parse(JSON.stringify(aggregate.positionResponses)) as AggregateResponse['positionResponses'],
-    repeatability: JSON.parse(JSON.stringify(aggregate.repeatability)) as AggregateResponse['repeatability'],
+    spatialConsistency: JSON.parse(JSON.stringify(aggregate.spatialConsistency)) as AggregateResponse['spatialConsistency'],
   }
 }
 

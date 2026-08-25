@@ -2,9 +2,11 @@ import type { MeasurementContext, MeasurementCaptureMetadata, MeasurementSweep }
 import type { CaptureSignalDiagnostics } from '../capture/pcm-recorder'
 import type { MicCalibrationProfile } from '../mics/types'
 
-export const CALIBRATION_DEBUG_BUNDLE_SCHEMA_VERSION = 1 as const
+export const CALIBRATION_DEBUG_BUNDLE_SCHEMA_VERSION = 2 as const
 
 export interface CalibrationDebugCapture {
+  sessionId: string
+  candidateId: string | null
   context: MeasurementContext
   sampleRate: number
   channelCount: number
@@ -25,8 +27,11 @@ export interface CalibrationDebugCapture {
 
 export interface CalibrationDebugBundle {
   schemaVersion: typeof CALIBRATION_DEBUG_BUNDLE_SCHEMA_VERSION
-  sessionId: string
+  calibrationId: string
+  sessionIds: readonly string[]
+  validationSessionIds: readonly string[]
   tvAppVersion: string | null
+  tvBuildId: string | null
   webBuildSha: string
   analysisRevision: string
   sweepRevision: string
@@ -45,10 +50,11 @@ function float32Base64(samples: Float32Array): string {
 }
 
 export function createCalibrationDebugBundle(
-  sessionId: string,
+  calibrationId: string,
   captures: readonly CalibrationDebugCapture[],
   identity: {
     tvAppVersion: string | null
+    tvBuildId: string | null
     webBuildSha: string
     analysisRevision: string
     sweepRevision: string
@@ -56,7 +62,9 @@ export function createCalibrationDebugBundle(
 ): CalibrationDebugBundle {
   return {
     schemaVersion: CALIBRATION_DEBUG_BUNDLE_SCHEMA_VERSION,
-    sessionId,
+    calibrationId,
+    sessionIds: [...new Set(captures.map((capture) => capture.sessionId))],
+    validationSessionIds: [...new Set(captures.filter((capture) => capture.context.phase === 'validation').map((capture) => capture.sessionId))],
     ...identity,
     exportedAt: new Date().toISOString(),
     captures,
@@ -68,6 +76,8 @@ export function serializeCalibrationDebugBundle(bundle: CalibrationDebugBundle):
 }
 
 export function createCalibrationDebugCapture(input: {
+  sessionId: string
+  candidateId: string | null
   context: MeasurementContext
   samples: Float32Array
   sampleRate: number
@@ -85,6 +95,8 @@ export function createCalibrationDebugCapture(input: {
   positionLedger: unknown
 }): CalibrationDebugCapture {
   return {
+    sessionId: input.sessionId,
+    candidateId: input.candidateId,
     context: input.context,
     sampleRate: input.sampleRate,
     channelCount: input.channelCount,
@@ -109,7 +121,7 @@ export function downloadCalibrationDebugBundle(bundle: CalibrationDebugBundle): 
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = `sweetspot-calibration-debug-${bundle.sessionId}.json`
+  anchor.download = `sweetspot-calibration-debug-${bundle.calibrationId}.json`
   anchor.click()
   URL.revokeObjectURL(url)
 }

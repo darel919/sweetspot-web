@@ -9,7 +9,7 @@ import {
 } from './calibration-validation'
 import type { AggregateResponse } from '../measurement/aggregation'
 
-const quality = { baselineRepeatable: true, validationRepeatable: true }
+const quality = { baselineQualityValid: true, validationQualityValid: true }
 
 function aggregate(positionIds: readonly CalibrationPositionId[], magnitudeDb: number): AggregateResponse {
   const points = [
@@ -31,7 +31,7 @@ function aggregate(positionIds: readonly CalibrationPositionId[], magnitudeDb: n
     spreadDb: points.map((point) => ({ ...point, magnitudeDb: 0 })),
     positionResponses,
     records: [],
-    repeatability: [],
+    spatialConsistency: [],
     failedGroups: [],
     broadbandLevelDb: null,
     relativeChannelLevelDb: null,
@@ -44,7 +44,7 @@ describe('calibration validation classification', () => {
       measurementComplete: true,
       measurementId: 'measurement-1',
       candidateId: 'candidate-1',
-      baselineRepeatable: true,
+      baselineQualityValid: true,
       deviceValidationReady: true,
       capturePathEligible: true,
       deviceOnline: true,
@@ -54,7 +54,7 @@ describe('calibration validation classification', () => {
     }
     expect(shouldStartAutomaticValidation(eligible)).toBe(true)
     expect(shouldStartAutomaticValidation({ ...eligible, startedCandidateId: 'candidate-1' })).toBe(false)
-    expect(shouldStartAutomaticValidation({ ...eligible, baselineRepeatable: false })).toBe(false)
+    expect(shouldStartAutomaticValidation({ ...eligible, baselineQualityValid: false })).toBe(false)
     expect(shouldStartAutomaticValidation({ ...eligible, deviceValidationReady: false })).toBe(false)
     expect(shouldStartAutomaticValidation({ ...eligible, capturePathEligible: false })).toBe(false)
     expect(shouldStartAutomaticValidation({ ...eligible, deviceOnline: false })).toBe(false)
@@ -91,8 +91,8 @@ describe('calibration validation classification', () => {
 
   test('treats missing or non-repeatable quality as inconclusive', () => {
     expect(classifyCalibrationValidation({ ...quality, beforeDb: null, afterDb: 2 }).status).toBe('inconclusive')
-    expect(classifyCalibrationValidation({ ...quality, baselineRepeatable: false, beforeDb: 4, afterDb: 1 }).status).toBe('inconclusive')
-    expect(classifyCalibrationValidation({ ...quality, validationRepeatable: false, beforeDb: 4, afterDb: 1 }).status).toBe('inconclusive')
+    expect(classifyCalibrationValidation({ ...quality, baselineQualityValid: false, beforeDb: 4, afterDb: 1 }).status).toBe('inconclusive')
+    expect(classifyCalibrationValidation({ ...quality, validationQualityValid: false, beforeDb: 4, afterDb: 1 }).status).toBe('inconclusive')
   })
 
   test('allows exactly one confirmation capture for a borderline candidate', () => {

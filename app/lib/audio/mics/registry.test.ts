@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { readdir } from 'node:fs/promises'
-import { parseMicCalibrationProfile } from './profile'
+import { isMicCalibrationProfileEligibleForCorrection, parseMicCalibrationProfile } from './profile'
 import { parseMicCalibrationFileList } from './registry'
 
 describe('microphone profile catalog', () => {
@@ -33,5 +33,12 @@ describe('microphone profile catalog', () => {
         expect(profile.points[index].frequencyHz).toBeGreaterThan(profile.points[index - 1].frequencyHz)
       }
     }
+  })
+
+  test('the shipped iPhone 17 Pro profile is correction eligible', async () => {
+    const input: unknown = JSON.parse(await Bun.file('public/calibration/profiles/apple_iphone17pro_2025.json').text())
+    const profile = parseMicCalibrationProfile(input)
+    expect(profile.capturePathStatus).toBe('validated')
+    expect(isMicCalibrationProfileEligibleForCorrection(profile)).toBe(true)
   })
 })

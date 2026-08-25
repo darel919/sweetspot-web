@@ -135,7 +135,7 @@ function fmtBytes(bytes: number): string {
       <li v-for="capture in probeEvidence" :key="capture.id">
         {{ capture.mode }} · {{ capture.cutChannel }} · band {{ capture.bandIndex }} · {{ capture.gainDb.toFixed(1) }} dB ·
         {{ capture.positionResponses.map((position) => position.positionId).join(', ') }} ·
-        {{ capture.repeatabilityPassed ? 'repeatable' : 'inconclusive' }}
+        {{ capture.qualityPassed ? 'usable' : 'inconclusive' }}
       </li>
     </ul>
 

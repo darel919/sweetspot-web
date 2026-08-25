@@ -19,7 +19,6 @@ export interface AutomaticCorrectionStageInput {
   attemptedMeasurementId: string | null
   failedMeasurementId: string | null
   unresolvedFailureCount: number
-  failedAttemptCount: number
   acceptedPositionCount: number
 }
 
@@ -45,7 +44,6 @@ export function shouldStageAutomaticCorrection(input: AutomaticCorrectionStageIn
     && input.supportsCalibratedCorrection
     && input.capturePathEligible
     && input.unresolvedFailureCount === 0
-    && input.failedAttemptCount === 0
     && input.acceptedPositionCount >= 3
     && input.deviceOnline
     && !input.candidatePending

@@ -84,7 +84,7 @@ function aggregateForCorrection(points: readonly ResponsePoint[]): AggregateResp
     positionResponses: [],
     spreadDb: points.map((point) => ({ ...point, magnitudeDb: 0.5 })),
     records: [],
-    repeatability: [],
+    spatialConsistency: [],
     failedGroups: [],
     broadbandLevelDb: null,
     relativeChannelLevelDb: null,

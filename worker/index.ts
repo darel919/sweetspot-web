@@ -1,5 +1,7 @@
 import { isValidPairCode } from '../shared/types/protocol'
-export { RoomDO } from './room'
+import { RoomDO } from './room'
+export { RoomDO }
+import { addNoIndexHeader } from './asset-response'
 
 export interface Env {
   ROOM: DurableObjectNamespace
@@ -23,9 +25,7 @@ export default {
 
     if (!path.startsWith('/api/')) {
       const res = await env.ASSETS.fetch(request)
-      const headers = new Headers(res.headers)
-      headers.set('x-robots-tag', 'noindex')
-      return new Response(res.body, { ...res, headers })
+      return addNoIndexHeader(res)
     }
 
     const m = path.match(/^\/api\/room\/([A-Za-z0-9-]{6,14})\/ws$/)

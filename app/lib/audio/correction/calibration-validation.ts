@@ -7,8 +7,8 @@ import { targetPointsFor } from './target'
 export interface CalibrationValidationInput {
   beforeDb: number | null
   afterDb: number | null
-  baselineRepeatable: boolean
-  validationRepeatable: boolean
+  baselineQualityValid: boolean
+  validationQualityValid: boolean
 }
 
 export type CalibrationValidationOutcome =
@@ -80,7 +80,7 @@ export interface AutomaticValidationStartInput {
   measurementComplete: boolean
   measurementId: string | null
   candidateId: string | null
-  baselineRepeatable: boolean
+  baselineQualityValid: boolean
   deviceValidationReady: boolean
   capturePathEligible: boolean
   deviceOnline: boolean
@@ -93,7 +93,7 @@ export function shouldStartAutomaticValidation(input: AutomaticValidationStartIn
   return input.measurementComplete
     && input.measurementId !== null
     && input.candidateId !== null
-    && input.baselineRepeatable
+    && input.baselineQualityValid
     && input.deviceValidationReady
     && input.capturePathEligible
     && input.deviceOnline
@@ -104,10 +104,10 @@ export function shouldStartAutomaticValidation(input: AutomaticValidationStartIn
 
 export function classifyCalibrationValidation(input: CalibrationValidationInput): CalibrationValidationOutcome {
   const { beforeDb, afterDb } = input
-  if (!input.baselineRepeatable || !input.validationRepeatable) {
+  if (!input.baselineQualityValid || !input.validationQualityValid) {
     return {
       status: 'inconclusive',
-      reason: 'Validation measurements were not repeatable.',
+      reason: 'Validation measurements did not provide complete, usable position evidence.',
     }
   }
   if (beforeDb === null || afterDb === null || !Number.isFinite(beforeDb) || !Number.isFinite(afterDb)) {

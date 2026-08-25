@@ -58,6 +58,7 @@ export interface DeviceInfo {
   id: string
   name: string
   appVersion: string
+  buildId?: string
 }
 
 export const CALIBRATION_PACKAGE_FORMAT = 'sweetspot.calibration' as const

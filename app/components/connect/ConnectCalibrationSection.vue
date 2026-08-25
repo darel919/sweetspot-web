@@ -27,7 +27,10 @@ const props = defineProps<{
   measurementAggregateLeft: AggregateResponse | null
   measurementAggregateRight: AggregateResponse | null
   measurementValidationAnalysis: MeasurementAnalysis | null
-  measurementRepeatabilityPassed: boolean
+  measurementQualityPassed: boolean
+  measurementFailedAttemptCount: number
+  measurementCompletePositionCount: number
+  webBuildSha: string
   measurementConvergenceOutcome: 'sufficient' | 'bounded' | 'insufficient' | null
   measurementFailedGroups: readonly RepeatabilitySummary[]
   measurementCurrentContext: MeasurementContext | null
@@ -216,6 +219,8 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
 
     <dl v-if="measurementCaptureInfo" class="spec">
       <dt>sample rate</dt><dd>{{ measurementCaptureInfo.settings.sampleRate ?? 'unknown' }} Hz</dd>
+      <dt>web build</dt><dd>{{ webBuildSha }}</dd>
+      <dt>TV build</dt><dd>{{ snapshot.device.buildId ?? 'unknown' }}</dd>
       <dt>channels</dt><dd>{{ measurementCaptureInfo.settings.channelCount ?? 'unknown' }}</dd>
       <dt>expected capture</dt><dd>{{ measurementCaptureInfo.expectedSampleCount ?? 'unknown' }} samples{{ measurementCaptureInfo.expectedDurationMs == null ? '' : ` / ${Math.round(measurementCaptureInfo.expectedDurationMs)} ms` }}</dd>
       <dt>echo cancellation</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.echoCancellation) }}</dd>
@@ -235,10 +240,12 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
       <p v-if="calibrationResult && !candidatePending" :class="`calibration-result calibration-result-${calibrationResult}`">
         {{ calibrationResult.toUpperCase() }}
       </p>
-      <p v-else :class="measurementRepeatabilityPassed ? 'calibration-result calibration-result-good' : 'calibration-result calibration-result-failed'">
+      <p v-else :class="measurementQualityPassed && measurementConvergenceOutcome === 'sufficient' ? 'calibration-result calibration-result-good' : 'calibration-result calibration-result-failed'">
         {{ candidatePending
           ? `VALIDATION ${(candidateValidationStatus ?? 'pending').toUpperCase()}`
-          : measurementRepeatabilityPassed ? 'CALIBRATION COMPLETE' : 'CALIBRATION FAILED — measurements were not repeatable' }}
+          : measurementConvergenceOutcome === 'bounded' ? 'INCONCLUSIVE — CONVERGENCE NOT REACHED'
+            : measurementQualityPassed && measurementConvergenceOutcome === 'sufficient' ? 'CALIBRATION COMPLETE'
+              : 'CALIBRATION FAILED — accepted position evidence was incomplete' }}
       </p>
       <p v-if="calibrationResultMessage" class="note">{{ calibrationResultMessage }}</p>
       <dl v-if="calibrationResult && !candidatePending" class="spec">
@@ -249,8 +256,11 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
         <dd>{{ calibrationResult === 'improved' ? 'Candidate accepted' : calibrationResult === 'error' ? 'Final state not verified' : 'Candidate removed; original live state kept' }}</dd>
       </dl>
       <dl class="spec">
-        <dt>repeatability</dt>
-        <dd>{{ measurementRepeatabilityPassed ? 'passed' : 'failed — do not apply correction' }}</dd>
+        <dt>capture quality</dt>
+        <dd>{{ measurementQualityPassed ? 'complete' : 'incomplete — do not apply correction' }}</dd>
+        <dt>historical rejected attempts</dt><dd>{{ measurementFailedAttemptCount }}</dd>
+        <dt>unresolved failures</dt><dd>{{ measurementFailedDiagnostics.length }}</dd>
+        <dt>complete L/R positions</dt><dd>{{ measurementCompletePositionCount }}</dd>
         <dt>planner convergence</dt><dd>{{ measurementConvergenceOutcome ?? 'not available' }}</dd>
         <dt>left readings</dt><dd>{{ measurementAggregateLeft?.records.length ?? 0 }}</dd>
         <dt>right readings</dt><dd>{{ measurementAggregateRight?.records.length ?? 0 }}</dd>
@@ -277,7 +287,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
         <div class="table-scroll">
           <table>
             <thead>
-              <tr><th>position</th><th>channel</th><th>attempt</th><th>peak</th><th>SNR</th><th>start marker</th><th>end marker</th><th>drift</th><th>direct ratio</th><th>status</th></tr>
+              <tr><th>position</th><th>channel</th><th>attempt</th><th>peak</th><th>SNR</th><th>start marker</th><th>end marker</th><th>drift</th><th>direct ratio</th><th>candidate / accepted</th><th>decision</th><th>status</th></tr>
             </thead>
             <tbody>
               <template v-for="take in measurementTakeDiagnostics" :key="`${take.context.positionId}:${take.context.attemptIndex}`">
@@ -291,6 +301,8 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
                   <td>{{ channel.rawTrailingMarkerConfidence == null ? 'unknown' : channel.rawTrailingMarkerConfidence.toFixed(2) }}</td>
                   <td>{{ channel.clockDriftPpm == null ? 'unknown' : `${channel.clockDriftPpm.toFixed(1)} ppm` }}</td>
                   <td>{{ channel.directPeakToNoiseDb == null ? 'unknown' : `${channel.directPeakToNoiseDb.toFixed(1)} dB` }}</td>
+                  <td>{{ channel.directArrivalCandidateSample ?? 'none' }} / {{ channel.directArrivalAcceptedSample ?? 'none' }}</td>
+                  <td>{{ channel.directArrivalRejectionReason ?? 'accepted' }}</td>
                   <td>{{ channel.analysisStatus }}</td>
                 </tr>
               </template>
@@ -319,7 +331,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
       </div>
       <div class="actions">
         <button
-          :disabled="!recommendedCorrection || !measurementRepeatabilityPassed || correctionPending || candidatePending || snapshot.capabilities.supportsCalibratedCorrection !== true"
+          :disabled="!recommendedCorrection || !measurementQualityPassed || measurementConvergenceOutcome !== 'sufficient' || correctionPending || candidatePending || snapshot.capabilities.supportsCalibratedCorrection !== true"
           @click="emit('apply-recommended-correction')"
         >
           {{ correctionPending ? 'Staging…' : 'Stage recommended candidate' }}
@@ -347,7 +359,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
         Live DSP readback is degraded. Validation is blocked until the TV reports a verified calibration state.
       </p>
       <p v-if="candidatePending && !validationReady" class="note">
-        Validation is unavailable after a browser refresh until a repeatable spatial baseline is measured again.
+        Validation is unavailable after a browser refresh until a stable spatial baseline is measured again.
       </p>
       <dl v-if="measurementValidationAnalysis || candidatePending || calibrationResult" class="spec">
         <dt>validation</dt><dd>matched physical-position left/right captures using the robust spatial objective</dd>
