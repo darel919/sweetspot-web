@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { isCalibrationOperationCurrent, isSameMeasurementContext } from '../lib/audio/measurement/session-guard'
-import type { MeasurementContext } from '#shared/types/protocol'
+import { CALIBRATION_POSITION_TARGETS, type MeasurementContext } from '../../shared/types/protocol'
 
 const context: MeasurementContext = {
   positionId: 'center',
+  ...CALIBRATION_POSITION_TARGETS.center,
   positionIndex: 0,
   positionCount: 1,
   channel: 'both',

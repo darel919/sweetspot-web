@@ -3,6 +3,7 @@ import type {
   CalibrationTransaction,
   CalibrationSessionAbortPayload,
 } from '../../../../shared/types/protocol'
+import { verifiedRollbackStateMessage } from './calibration-result'
 
 export interface CalibrationAbortDetails {
   sessionId: string
@@ -145,16 +146,16 @@ export function evaluateCalibrationAbortRecovery(
   return { kind: 'waiting' }
 }
 
-export function formatCalibrationAbortCompletion(details: CalibrationAbortDetails): CalibrationAbortCompletion {
+export function formatCalibrationAbortCompletion(details: CalibrationAbortDetails, calibrationActive: boolean): CalibrationAbortCompletion {
   if (details.code === 'calibration_aborted') {
     return {
       kind: 'cancelled',
-      message: 'Calibration cancelled. Previous settings were restored.',
+      message: `Calibration cancelled. ${calibrationActive ? 'The previously active calibration was restored.' : 'The candidate was removed, and calibration remains off. Your pre-calibration audio settings are unchanged.'}`,
     }
   }
   return {
     kind: 'validation-failure',
-    message: `Validation failed [${details.code}]. ${details.message} Previous settings were restored.`,
+    message: `Validation failed [${details.code}]. ${details.message} ${verifiedRollbackStateMessage(calibrationActive)}`,
   }
 }
 
@@ -163,9 +164,9 @@ export function formatCalibrationAbortRecoveryFailure(failure: CalibrationAbortR
     case 'candidate-mismatch':
       return `Calibration recovery conflict. The TV reports pending candidate ${failure.actualCandidateId ?? 'unknown'}, so the browser did not roll it back. Recovery controls remain available.`
     case 'unverified-readback':
-      return `Calibration recovery could not be verified. ${failure.applicationError ?? 'The TV finished rollback without verified live DSP readback.'} Previous settings may not have been restored correctly.`
+      return 'The candidate could not be finalized safely. SweetSpot could not verify the restored DSP state.'
     case 'timeout':
-      return 'Calibration recovery could not be verified. The TV did not confirm a resolved transaction with verified live DSP readback. Previous settings may not have been restored correctly.'
+      return 'The candidate could not be finalized safely. SweetSpot could not verify the restored DSP state.'
     default: {
       const _exhaustive: never = failure
       return _exhaustive

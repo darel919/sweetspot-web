@@ -125,6 +125,8 @@ export type CalibrationTransaction =
       state: 'candidate_pending'
       candidateId: string
       validationStatus: CalibrationValidationStatus
+      /** Whether the live calibration snapshot captured before staging was active. */
+      previousActive: boolean
       beforeDb: number | null
       afterDb: number | null
       reason: string | null
@@ -177,6 +179,27 @@ export type CalibrationChannel = 'both' | 'left' | 'right'
 
 export type CalibrationPositionId = 'center' | 'left' | 'right' | 'forward' | 'backward'
 
+export type CalibrationPositionReference = 'center'
+
+/** Absolute microphone target from the original center listening point. */
+export interface CalibrationPositionTarget {
+  reference: CalibrationPositionReference
+  /** Horizontal offset in cm. Negative is left; positive is right. */
+  xCm: number
+  /** Vertical offset in cm. Negative is down; positive is up. */
+  yCm: number
+  /** Depth offset in cm. Positive is toward the TV; negative is away. */
+  zCm: number
+}
+
+export const CALIBRATION_POSITION_TARGETS = {
+  center: { reference: 'center', xCm: 0, yCm: 0, zCm: 0 },
+  left: { reference: 'center', xCm: -35, yCm: 0, zCm: 0 },
+  right: { reference: 'center', xCm: 35, yCm: 0, zCm: 0 },
+  forward: { reference: 'center', xCm: 0, yCm: 10, zCm: 35 },
+  backward: { reference: 'center', xCm: 0, yCm: -10, zCm: -35 },
+} as const satisfies Record<CalibrationPositionId, CalibrationPositionTarget>
+
 export type MeasurementPhase = 'measurement' | 'validation'
 
 export type MeasurementRepairChannel = 'both' | 'left' | 'right'
@@ -194,6 +217,10 @@ export type CalibrationProgressStage =
 
 export interface MeasurementContext {
   positionId: CalibrationPositionId
+  reference: CalibrationPositionReference
+  xCm: number
+  yCm: number
+  zCm: number
   positionIndex: number
   positionCount: number
   channel: CalibrationChannel
@@ -349,6 +376,8 @@ export interface MeasurementDiagnosticsValues {
   markerSeparationError?: number | null
   markerTimingAgreement?: number | null
   syncMarkerFailureReason?: MeasurementSyncMarkerFailureReason | null
+  /** Raw marker-separation estimate; it is not necessarily oscillator drift. */
+  markerSeparationPpm?: number | null
   clockDriftPpm: number | null
   clipped: boolean
   clippedSamples: number
@@ -485,6 +514,7 @@ function isCalibrationTransaction(value: unknown): value is CalibrationTransacti
       || value.validationStatus === 'inconclusive'
       || value.validationStatus === 'failed'
       || value.validationStatus === 'imported')
+    && typeof value.previousActive === 'boolean'
     && isNullableFiniteNumber(value.beforeDb)
     && isNullableFiniteNumber(value.afterDb)
     && (value.reason === null || typeof value.reason === 'string')
@@ -779,6 +809,14 @@ function isCalibrationPositionId(value: unknown): value is CalibrationPositionId
     || value === 'backward'
 }
 
+function isCalibrationPositionTarget(value: Record<string, unknown>, positionId: CalibrationPositionId): boolean {
+  const target = CALIBRATION_POSITION_TARGETS[positionId]
+  return value.reference === target.reference
+    && value.xCm === target.xCm
+    && value.yCm === target.yCm
+    && value.zCm === target.zCm
+}
+
 function isMeasurementPhase(value: unknown): value is MeasurementPhase {
   return value === 'measurement' || value === 'validation'
 }
@@ -796,6 +834,7 @@ function isCalibrationProgressStage(value: unknown): value is CalibrationProgres
 export function isMeasurementContext(value: unknown): value is MeasurementContext {
   if (!isRecord(value)) return false
   if (!isCalibrationPositionId(value.positionId)) return false
+  if (!isCalibrationPositionTarget(value, value.positionId)) return false
   if (!isInteger(value.positionIndex) || value.positionIndex < 0 || value.positionIndex >= 16) return false
   if (!isInteger(value.positionCount) || value.positionCount < 1 || value.positionCount > 16) return false
   if (value.positionIndex >= value.positionCount) return false
@@ -955,6 +994,7 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
       || diagnostics.syncMarkerFailureReason === 'marker_pair_bad_timing'
       || diagnostics.syncMarkerFailureReason === 'end_marker_missing'
       || diagnostics.syncMarkerFailureReason === 'clock_drift_unreliable')
+    && (!('markerSeparationPpm' in diagnostics) || isNullableFiniteNumber(diagnostics.markerSeparationPpm))
     && (diagnostics.captureMetadata === undefined || isMeasurementCaptureMetadata(diagnostics.captureMetadata))
     && isFiniteNumber(diagnostics.syncMarkerConfidence)
     && diagnostics.syncMarkerConfidence >= 0

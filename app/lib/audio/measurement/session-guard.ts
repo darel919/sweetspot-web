@@ -3,6 +3,10 @@ import type { MeasurementContext } from '../../../../shared/types/protocol'
 export function isSameMeasurementContext(left: MeasurementContext | null, right: MeasurementContext | null): boolean {
   if (!left || !right) return left === right
   return left.positionId === right.positionId
+    && left.reference === right.reference
+    && left.xCm === right.xCm
+    && left.yCm === right.yCm
+    && left.zCm === right.zCm
     && left.positionIndex === right.positionIndex
     && left.positionCount === right.positionCount
     && left.channel === right.channel

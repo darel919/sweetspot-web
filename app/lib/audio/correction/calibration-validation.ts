@@ -1,4 +1,8 @@
 import { CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB } from '../../../../shared/types/protocol'
+import type { CalibrationPositionId } from '../../../../shared/types/protocol'
+import type { AggregateResponse } from '../measurement/aggregation'
+import { targetErrorRms } from './optimizer'
+import { targetPointsFor } from './target'
 
 export interface CalibrationValidationInput {
   beforeDb: number | null
@@ -11,6 +15,56 @@ export type CalibrationValidationOutcome =
   | { status: 'improved'; beforeDb: number; afterDb: number }
   | { status: 'worse'; beforeDb: number; afterDb: number }
   | { status: 'inconclusive'; reason: string; beforeDb?: number; afterDb?: number }
+
+export interface SpatialValidationMetrics {
+  before: number
+  after: number
+  objective: 'spatial'
+  positionIds: CalibrationPositionId[]
+}
+
+function comparablePositionIds(
+  baseline: AggregateResponse,
+  candidate: AggregateResponse,
+): CalibrationPositionId[] | null {
+  const baselineById = new Map(baseline.positionResponses.map((response) => [response.positionId, response]))
+  const candidateById = new Map(candidate.positionResponses.map((response) => [response.positionId, response]))
+  if (baselineById.size === 0 || baselineById.size !== candidateById.size) return null
+  const positionIds = [...baselineById.keys()]
+  for (const positionId of positionIds) {
+    const baselineResponse = baselineById.get(positionId)
+    const candidateResponse = candidateById.get(positionId)
+    if (!baselineResponse || !candidateResponse
+      || baselineResponse.points.length !== candidateResponse.points.length
+      || baselineResponse.points.some((point, index) => point.frequencyHz !== candidateResponse.points[index]?.frequencyHz)) {
+      return null
+    }
+  }
+  return positionIds.sort((left, right) => left.localeCompare(right))
+}
+
+/**
+ * Scores the same robust spatial objective used to generate a correction.
+ * The baseline supplies the target and both aggregates must cover the same
+ * physical positions and frequency grid.
+ */
+export function matchedSpatialValidationMetrics(
+  baseline: AggregateResponse | null,
+  candidate: AggregateResponse | null,
+): SpatialValidationMetrics | null {
+  if (!baseline || !candidate || baseline.points.length < 2 || candidate.points.length < 2) return null
+  if (baseline.points.length !== candidate.points.length
+    || baseline.points.some((point, index) => point.frequencyHz !== candidate.points[index]?.frequencyHz)) return null
+  const positionIds = comparablePositionIds(baseline, candidate)
+  if (!positionIds) return null
+  const target = targetPointsFor(baseline.points)
+  return {
+    before: targetErrorRms(baseline.points, target),
+    after: targetErrorRms(candidate.points, target),
+    objective: 'spatial',
+    positionIds,
+  }
+}
 
 export function shouldRunValidationConfirmation(input: {
   outcome: CalibrationValidationOutcome | null

@@ -254,18 +254,98 @@ describe('measurement response analysis', () => {
     expect(detection.markerTimingAgreement).toBe(1)
   })
 
-  test('rejects moderate marker correlation when the pair timing exceeds the hard drift limit', () => {
+  test('hard-rejects high-confidence marker pairs when the pair timing exceeds the hard drift limit', () => {
     const capture = generateMeasurementReference(sweep)
     const parts = sweepSampleParts(sweep)
     capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
-    setMarkerCorrelation(capture, sweep, 'start', 0.36)
-    setMarkerCorrelation(capture, sweep, 'end', 0.40, parts.trailingMarkerStartSamples + 32)
+    setMarkerCorrelation(capture, sweep, 'start', 0.90)
+    setMarkerCorrelation(capture, sweep, 'end', 0.90, parts.trailingMarkerStartSamples + 32)
 
     const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
 
     expect(detection.found).toBe(false)
     expect(detection.failureReason).toBe('clock_drift_unreliable')
+    expect(detection.rawLeadingMarkerConfidence).toBeGreaterThan(0.8)
+    expect(detection.rawTrailingMarkerConfidence).toBeGreaterThan(0.8)
     expect(Math.abs(detection.driftPpm ?? 0)).toBeGreaterThan(CLOCK_DRIFT_HARD_REJECT_PPM)
+  })
+
+  test('keeps Android marker separation and clock drift distinct at -107 ppm', () => {
+    const parts = sweepSampleParts(androidCalibrationSweep)
+    const capture = generateMeasurementReference(androidCalibrationSweep)
+    capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
+    setMarkerCorrelation(capture, androidCalibrationSweep, 'start', 0.36)
+    setMarkerCorrelation(
+      capture,
+      androidCalibrationSweep,
+      'end',
+      0.40,
+      parts.trailingMarkerStartSamples - 17,
+    )
+
+    const detection = detectSweepStart(capture, androidCalibrationSweep, androidCalibrationSweep.sampleRate)
+
+    expect(detection.found).toBe(true)
+    expect(detection.expectedMarkerSeparationSamples).toBe(158_400)
+    expect(detection.observedMarkerSeparationSamples).toBe(158_383)
+    expect(detection.driftPpm).toBeCloseTo(-107.323, 3)
+    expect(detection.markerSeparationError).toBeCloseTo(17 / 158_400, 9)
+    expect(detection.markerTimingAgreement).toBe(1)
+  })
+
+  test('reports low-confidence Android markers near 1100 ppm as insufficient timing', () => {
+    const parts = sweepSampleParts(androidCalibrationSweep)
+    const capture = generateMeasurementReference(androidCalibrationSweep)
+    capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
+    setMarkerCorrelation(capture, androidCalibrationSweep, 'start', 0.24)
+    setMarkerCorrelation(
+      capture,
+      androidCalibrationSweep,
+      'end',
+      0.26,
+      parts.trailingMarkerStartSamples + 174,
+    )
+
+    const detection = detectSweepStart(capture, androidCalibrationSweep, androidCalibrationSweep.sampleRate)
+
+    expect(detection.found).toBe(false)
+    expect(detection.failureReason).toBe('marker_pair_low_confidence')
+    expect(detection.expectedMarkerSeparationSamples).toBe(158_400)
+    expect(detection.observedMarkerSeparationSamples).toBe(158_574)
+    expect(detection.driftPpm).toBeNull()
+    expect(detection.markerSeparationPpm).toBeCloseTo(1_098.485, 3)
+    expect(detection.rawLeadingMarkerConfidence).toBeGreaterThan(0.2)
+    expect(detection.rawLeadingMarkerConfidence).toBeLessThan(0.25)
+    expect(detection.rawTrailingMarkerConfidence).toBeGreaterThan(0.2)
+    expect(detection.rawTrailingMarkerConfidence).toBeLessThan(0.27)
+  })
+
+  test('does not call a field-shaped 1100 ppm separation oscillator drift', () => {
+    const parts = sweepSampleParts(androidCalibrationSweep)
+    const capture = generateMeasurementReference(androidCalibrationSweep)
+    capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
+    setMarkerCorrelation(capture, androidCalibrationSweep, 'start', 0.48)
+    setMarkerCorrelation(
+      capture,
+      androidCalibrationSweep,
+      'end',
+      0.31,
+      parts.trailingMarkerStartSamples + 178,
+    )
+
+    const detection = detectSweepStart(capture, androidCalibrationSweep, androidCalibrationSweep.sampleRate)
+
+    expect(detection.found).toBe(false)
+    expect(detection.failureReason).toBe('marker_pair_low_confidence')
+    expect(detection.observedMarkerSeparationSamples).toBeGreaterThanOrEqual(158_576)
+    expect(detection.observedMarkerSeparationSamples).toBeLessThanOrEqual(158_580)
+    expect(detection.markerSeparationPpm).toBeGreaterThan(1_000)
+    expect(detection.markerSeparationPpm).toBeLessThan(1_200)
+    expect(detection.rawLeadingMarkerConfidence).toBeGreaterThan(0.27)
+    expect(detection.rawLeadingMarkerConfidence).toBeLessThan(0.56)
+    expect(detection.rawTrailingMarkerConfidence).toBeGreaterThan(0.27)
+    expect(detection.rawTrailingMarkerConfidence).toBeLessThan(0.56)
+    expect(detection.driftPpm).toBeNull()
   })
 
   test('classifies an ordered marker pair outside the timing search window', () => {
@@ -279,7 +359,8 @@ describe('measurement response analysis', () => {
 
     expect(detection.found).toBe(false)
     expect(detection.failureReason).toBe('marker_pair_bad_timing')
-    expect(Math.abs(detection.driftPpm ?? 0)).toBeGreaterThan(5_000)
+    expect(Math.abs(detection.markerSeparationPpm ?? 0)).toBeGreaterThan(5_000)
+    expect(detection.driftPpm).toBeNull()
   })
 
   test('selects the valid temporal pair instead of two stronger independent peaks', () => {

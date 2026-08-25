@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { MeasurementContext } from '#shared/types/protocol'
+import { CALIBRATION_POSITION_TARGETS, type MeasurementContext } from '../../../../shared/types/protocol'
 import { decideNextCapture, type ConvergenceAssessment } from './adaptive-planner'
 import {
   acceptedPositionCount,
@@ -108,6 +108,7 @@ function context(
 ): MeasurementContext {
   return {
     positionId,
+    ...CALIBRATION_POSITION_TARGETS[positionId],
     positionIndex,
     positionCount: 3,
     channel: 'both',

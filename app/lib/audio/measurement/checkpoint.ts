@@ -1,4 +1,4 @@
-import type { MeasurementCaptureMetadata, MeasurementContext } from '#shared/types/protocol'
+import { isMeasurementContext, type MeasurementCaptureMetadata, type MeasurementContext } from '../../../../shared/types/protocol'
 import type { PositionLedger } from './position-ledger'
 
 export const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 1 as const
@@ -51,31 +51,6 @@ export type CalibrationCheckpointCompatibility =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
-}
-
-function isMeasurementContext(value: unknown): value is MeasurementContext {
-  return isRecord(value)
-    && (value.positionId === 'center' || value.positionId === 'left' || value.positionId === 'right' || value.positionId === 'forward' || value.positionId === 'backward')
-    && typeof value.positionIndex === 'number'
-    && Number.isInteger(value.positionIndex)
-    && typeof value.positionCount === 'number'
-    && Number.isInteger(value.positionCount)
-    && value.positionIndex >= 0
-    && value.positionIndex < value.positionCount
-    && value.positionCount >= 1
-    && value.positionCount <= 16
-    && value.channel === 'both'
-    && value.captureKind === 'position-composite'
-    && (value.repairChannel === 'both' || value.repairChannel === 'left' || value.repairChannel === 'right')
-    && typeof value.attemptIndex === 'number'
-    && Number.isInteger(value.attemptIndex)
-    && typeof value.attemptCount === 'number'
-    && Number.isInteger(value.attemptCount)
-    && value.attemptIndex >= 0
-    && value.attemptIndex < value.attemptCount
-    && value.attemptCount >= 1
-    && value.attemptCount <= 2
-    && (value.phase === 'measurement' || value.phase === 'validation')
 }
 
 function isFiniteOrNull(value: unknown): value is number | null {

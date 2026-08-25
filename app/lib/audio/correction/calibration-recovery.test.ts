@@ -37,6 +37,7 @@ function candidateTransaction(candidateId: string) {
     state: 'candidate_pending' as const,
     candidateId,
     validationStatus: 'rolling_back' as const,
+    previousActive: true,
     beforeDb: null,
     afterDb: null,
     reason: null,
@@ -165,16 +166,16 @@ describe('validation abort recovery guards', () => {
   })
 
   test('reports validation failure after rollback succeeds without calling it a recovery failure', () => {
-    expect(formatCalibrationAbortCompletion(details('signal_too_low'))).toEqual({
+    expect(formatCalibrationAbortCompletion(details('signal_too_low'), true)).toEqual({
       kind: 'validation-failure',
-      message: 'Validation failed [signal_too_low]. The validation sweep was too quiet. Previous settings were restored.',
+      message: 'Validation failed [signal_too_low]. The validation sweep was too quiet. The previously active calibration was restored.',
     })
   })
 
   test('reports ordinary cancellation separately after rollback succeeds', () => {
-    expect(formatCalibrationAbortCompletion(details('calibration_aborted'))).toEqual({
+    expect(formatCalibrationAbortCompletion(details('calibration_aborted'), false)).toEqual({
       kind: 'cancelled',
-      message: 'Calibration cancelled. Previous settings were restored.',
+      message: 'Calibration cancelled. The candidate was removed, and calibration remains off. Your pre-calibration audio settings are unchanged.',
     })
   })
 
@@ -183,8 +184,7 @@ describe('validation abort recovery guards', () => {
     expect(result.kind).toBe('failed')
     if (result.kind !== 'failed') return
     expect(result.failure.kind).toBe('unverified-readback')
-    expect(formatCalibrationAbortRecoveryFailure(result.failure)).toContain('Calibration recovery could not be verified.')
-    expect(formatCalibrationAbortRecoveryFailure(result.failure)).not.toContain('Previous settings were restored.')
+    expect(formatCalibrationAbortRecoveryFailure(result.failure)).toBe('The candidate could not be finalized safely. SweetSpot could not verify the restored DSP state.')
   })
 
   test('reports a pending candidate mismatch without resolving or rolling it back', () => {
@@ -209,7 +209,7 @@ describe('validation abort recovery guards', () => {
 
   test('formats bounded recovery timeout as an explicit restoration failure', () => {
     expect(formatCalibrationAbortRecoveryFailure({ kind: 'timeout' })).toBe(
-      'Calibration recovery could not be verified. The TV did not confirm a resolved transaction with verified live DSP readback. Previous settings may not have been restored correctly.',
+      'The candidate could not be finalized safely. SweetSpot could not verify the restored DSP state.',
     )
   })
 

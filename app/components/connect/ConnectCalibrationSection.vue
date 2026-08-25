@@ -14,6 +14,7 @@ import type {
   CorrectionStrengthOption,
   RecommendedCorrection,
 } from './types'
+import { calibrationValidationStatusLabel } from '~/lib/audio/correction/calibration-result'
 import { computed } from 'vue'
 
 const props = defineProps<{
@@ -52,6 +53,7 @@ const props = defineProps<{
   calibrationFinalizationPending: boolean
   calibrationResult: CalibrationResultStatus | null
   calibrationResultMessage: string
+  calibrationRollbackTargetActive: boolean | null
   calJson: string
   calStatus: string
   calibrationFilePending: boolean
@@ -62,6 +64,12 @@ const props = defineProps<{
 const selectedCapturePathStatus = computed(() =>
   props.measurementProfiles.find((profile) => profile.id === props.measurementSelectedProfileId)?.capturePathStatus ?? null,
 )
+
+const validationStatusLabel = computed(() => calibrationValidationStatusLabel({
+  candidatePending: props.candidatePending,
+  candidateValidationStatus: props.candidateValidationStatus,
+  calibrationResult: props.calibrationResult,
+}))
 
 const emit = defineEmits<{
   (event: 'select-profile', profileId: string): void
@@ -106,6 +114,9 @@ function curveRange(curve: readonly number[] | undefined): string {
 }
 
 function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): string {
+  if (typeof diagnostics.markerSeparationPpm === 'number' && diagnostics.clockDriftPpm === null) {
+    return 'The marker timing was ambiguous, so SweetSpot did not call it clock drift. Keep the phone still and retry.'
+  }
   switch (diagnostics.analysisStatus) {
     case 'sync_marker_not_found':
       return "SweetSpot couldn't reliably identify the TV test signal."
@@ -177,7 +188,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
     <p v-if="measurementResumeMessage" class="note">{{ measurementResumeMessage }}</p>
     <p v-if="measurementMessage" class="note">{{ measurementMessage }}</p>
     <ul v-if="measurementFailedDiagnostics.length" class="calibration-failures">
-      <li v-for="failure in measurementFailedDiagnostics" :key="`${failure.context.positionId}:${failure.diagnostics.channel ?? failure.context.repairChannel}:${failure.context.attemptIndex}`">
+      <li v-for="failure in measurementFailedDiagnostics" :key="`${failure.context.positionId}:${failure.diagnostics.channel ?? failure.context.repairChannel}`">
         {{ failure.context.positionId }} / {{ failure.diagnostics.channel ?? failure.context.repairChannel }}:
         {{ captureFailureMessage(failure.diagnostics) }}
       </li>
@@ -208,7 +219,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
 
     <div v-if="measurementStage === 'complete' && (measurementAggregateLeft || measurementAggregateRight)" class="response-graph">
       <p class="mini-label">Advanced result: left/right robust spatial aggregates</p>
-      <p v-if="calibrationResult" :class="`calibration-result calibration-result-${calibrationResult}`">
+      <p v-if="calibrationResult && !candidatePending" :class="`calibration-result calibration-result-${calibrationResult}`">
         {{ calibrationResult.toUpperCase() }}
       </p>
       <p v-else :class="measurementRepeatabilityPassed ? 'calibration-result calibration-result-good' : 'calibration-result calibration-result-failed'">
@@ -217,6 +228,13 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
           : measurementRepeatabilityPassed ? 'CALIBRATION COMPLETE' : 'CALIBRATION FAILED — measurements were not repeatable' }}
       </p>
       <p v-if="calibrationResultMessage" class="note">{{ calibrationResultMessage }}</p>
+      <dl v-if="calibrationResult && !candidatePending" class="spec">
+        <dt>calibration status</dt><dd>{{ snapshot.calibration.active ? 'ACTIVE' : 'OFF' }}</dd>
+        <dt>pre-candidate state</dt>
+        <dd>{{ calibrationRollbackTargetActive === null ? 'unknown' : calibrationRollbackTargetActive ? 'Previously committed calibration was active' : 'No calibration was active' }}</dd>
+        <dt>result</dt>
+        <dd>{{ calibrationResult === 'improved' ? 'Candidate accepted' : calibrationResult === 'error' ? 'Final state not verified' : 'Candidate removed; original live state kept' }}</dd>
+      </dl>
       <dl class="spec">
         <dt>repeatability</dt>
         <dd>{{ measurementRepeatabilityPassed ? 'passed' : 'failed — do not apply correction' }}</dd>
@@ -264,7 +282,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
           :disabled="!recommendedCorrection || !measurementRepeatabilityPassed || correctionPending || candidatePending || snapshot.capabilities.supportsCalibratedCorrection !== true"
           @click="emit('apply-recommended-correction')"
         >
-          {{ correctionPending ? 'Applying…' : 'Apply recommended correction' }}
+          {{ correctionPending ? 'Staging…' : 'Stage recommended candidate' }}
         </button>
         <button v-if="calibrationApplied && candidatePending && !calibrationFinalizationPending" :disabled="measurementBusy || !validationReady || snapshot.calibration.liveDspStatus !== 'verified'" @click="emit('start-validation')">
           Recovery validation sweep
@@ -289,19 +307,19 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
         Live DSP readback is degraded. Validation is blocked until the TV reports a verified calibration state.
       </p>
       <p v-if="candidatePending && !validationReady" class="note">
-        Validation is unavailable after a browser refresh until a repeatable center baseline is measured again.
+        Validation is unavailable after a browser refresh until a repeatable spatial baseline is measured again.
       </p>
-      <dl v-if="measurementValidationAnalysis || candidatePending" class="spec">
-        <dt>validation</dt><dd>one center-position left/right capture, with one confirmation only if inconclusive</dd>
-        <dt>validation status</dt><dd>{{ (candidateValidationStatus ?? 'pending').toUpperCase() }}</dd>
+      <dl v-if="measurementValidationAnalysis || candidatePending || calibrationResult" class="spec">
+        <dt>validation</dt><dd>matched physical-position left/right captures using the robust spatial objective</dd>
+        <dt>validation status</dt><dd>{{ validationStatusLabel ?? 'unknown' }}</dd>
         <dt v-if="snapshot.calibration.transaction.state === 'candidate_pending' && snapshot.calibration.transaction.reason">validation reason</dt>
         <dd v-if="snapshot.calibration.transaction.state === 'candidate_pending' && snapshot.calibration.transaction.reason">{{ snapshot.calibration.transaction.reason }}</dd>
-        <dt>target error before</dt><dd>{{ validationMetrics?.before.toFixed(2) ?? 'unknown' }} dB RMS</dd>
-        <dt>target error after</dt><dd>{{ validationMetrics?.after.toFixed(2) ?? 'unknown' }} dB RMS</dd>
+        <dt>baseline spatial error</dt><dd>{{ validationMetrics?.before.toFixed(2) ?? 'unknown' }} dB RMS</dd>
+        <dt>candidate spatial error</dt><dd>{{ validationMetrics?.after.toFixed(2) ?? 'unknown' }} dB RMS</dd>
         <dt v-if="measurementValidationAnalysis">validation SNR</dt>
         <dd v-if="measurementValidationAnalysis">{{ measurementValidationAnalysis.diagnostics.snrEstimateDb == null ? 'unknown' : measurementValidationAnalysis.diagnostics.snrEstimateDb.toFixed(1) + ' dB' }}</dd>
         <template v-if="validationWorse && rollbackAvailable">
-          <dt>validation decision</dt><dd class="error">Worse than the center-position baseline</dd>
+          <dt>validation decision</dt><dd class="error">Worse than the selected spatial objective</dd>
         </template>
       </dl>
       <p v-if="candidateValidationStatus === 'imported' && !calibrationFinalizationPending" class="note">
@@ -388,7 +406,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
       <summary>Curve JSON</summary>
       <textarea :value="calJson" rows="4" spellcheck="false" @input="editCurve"></textarea>
       <div class="actions">
-        <button :disabled="snapshot.capabilities.supportsCalibratedCorrection !== true || candidatePending" @click="emit('apply-calibration')">Apply curve</button>
+        <button :disabled="snapshot.capabilities.supportsCalibratedCorrection !== true || candidatePending" @click="emit('apply-calibration')">Stage curve candidate</button>
         <button @click="emit('reset-calibration')">Reset to flat</button>
       </div>
       <p v-if="calStatus" class="note">{{ calStatus }}</p>

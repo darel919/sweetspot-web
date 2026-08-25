@@ -7,6 +7,7 @@ import {
   isMeasurementSweep,
   isRoomSocketServerMessage,
   isStateSnapshot,
+  CALIBRATION_POSITION_TARGETS,
   validatePayload,
 } from './protocol'
 
@@ -34,6 +35,7 @@ const sweep = {
 
 const context = {
   positionId: 'center',
+  ...CALIBRATION_POSITION_TARGETS.center,
   positionIndex: 0,
   positionCount: 5,
   channel: 'both',
@@ -180,6 +182,7 @@ describe('measurement protocol boundary', () => {
           state: 'candidate_pending',
           candidateId: 'candidate-test',
           validationStatus: 'rolling_back',
+          previousActive: false,
           beforeDb: null,
           afterDb: null,
           reason: 'rollback is in progress',
@@ -195,12 +198,29 @@ describe('measurement protocol boundary', () => {
           state: 'candidate_pending',
           candidateId: 'candidate-imported',
           validationStatus: 'imported',
+          previousActive: false,
           beforeDb: null,
           afterDb: null,
           reason: 'Imported calibration is staged',
         },
       },
     })).toBe(true)
+    const pendingWithoutRollbackTarget = {
+      state: 'candidate_pending' as const,
+      candidateId: 'candidate-missing-target',
+      validationStatus: 'worse' as const,
+      beforeDb: 7,
+      afterDb: 8,
+      reason: null,
+    }
+    expect(isStateSnapshot({
+      ...snapshot,
+      calibration: {
+        ...snapshot.calibration,
+        active: true,
+        transaction: pendingWithoutRollbackTarget,
+      },
+    })).toBe(false)
     expect(isStateSnapshot({ ...snapshot, calibration: { ...snapshot.calibration, bandsDb: [0] } })).toBe(false)
     expect(isEnvelope({ v: 1, id: 'message', type: 'state.get', ts: 1_000, expiresAt: 31_000, payload: {} })).toBe(true)
     expect(isEnvelope({ v: 1, id: 'message', type: 'state.get', ts: 1_000, expiresAt: 1_000, payload: {} })).toBe(false)
@@ -293,6 +313,7 @@ describe('measurement protocol boundary', () => {
       sessionId: 'cal_test',
       context: {
         positionId: 'center',
+        ...CALIBRATION_POSITION_TARGETS.center,
         positionIndex: 0,
         positionCount: 1,
         channel: 'both',
@@ -307,6 +328,18 @@ describe('measurement protocol boundary', () => {
       sessionId: 'cal_test',
       context: { ...context, attemptIndex: 2 },
     })).not.toBeNull()
+  })
+
+  test('rejects a target whose geometry does not match its position id', () => {
+    expect(isMeasurementContext({
+      ...context,
+      positionId: 'backward',
+    })).toBe(false)
+    expect(isMeasurementContext({
+      ...context,
+      positionId: 'backward',
+      ...CALIBRATION_POSITION_TARGETS.backward,
+    })).toBe(true)
   })
 
   test('accepts compact measurement diagnostics without accepting a response curve', () => {

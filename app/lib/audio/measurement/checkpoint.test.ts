@@ -32,6 +32,12 @@ describe('calibration checkpoint persistence contract', () => {
     expect(restored?.orientation).toBe(CALIBRATION_CHECKPOINT_ORIENTATION)
   })
 
+  test('keeps an incomplete measurement checkpoint outside the DSP transaction', () => {
+    expect(checkpoint.correctionState).toEqual({ generated: false, candidateId: null })
+    expect('previousActive' in checkpoint).toBe(false)
+    expect('candidate' in checkpoint).toBe(false)
+  })
+
   test('rejects malformed or incompatible checkpoints before resume', () => {
     expect(parseSerializedCalibrationCheckpoint('{"schemaVersion":1}')).toBeNull()
     expect(checkCalibrationCheckpointCompatibility(checkpoint, {

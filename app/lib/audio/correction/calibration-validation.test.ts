@@ -1,12 +1,42 @@
 import { describe, expect, test } from 'bun:test'
 import { CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB } from '../../../../shared/types/protocol'
+import type { CalibrationPositionId } from '../../../../shared/types/protocol'
 import {
   classifyCalibrationValidation,
+  matchedSpatialValidationMetrics,
   shouldRunValidationConfirmation,
   shouldStartAutomaticValidation,
 } from './calibration-validation'
+import type { AggregateResponse } from '../measurement/aggregation'
 
 const quality = { baselineRepeatable: true, validationRepeatable: true }
+
+function aggregate(positionIds: readonly CalibrationPositionId[], magnitudeDb: number): AggregateResponse {
+  const points = [
+    { frequencyHz: 100, magnitudeDb },
+    { frequencyHz: 1_000, magnitudeDb },
+    { frequencyHz: 10_000, magnitudeDb },
+  ]
+  const positionResponses = positionIds.map((positionId, positionIndex) => ({
+    positionId,
+    positionIndex,
+    positionCount: positionIds.length,
+    channel: 'both' as const,
+    points: points.map((point) => ({ ...point })),
+    broadbandLevelDb: null,
+  }))
+  return {
+    channel: 'both',
+    points,
+    spreadDb: points.map((point) => ({ ...point, magnitudeDb: 0 })),
+    positionResponses,
+    records: [],
+    repeatability: [],
+    failedGroups: [],
+    broadbandLevelDb: null,
+    relativeChannelLevelDb: null,
+  }
+}
 
 describe('calibration validation classification', () => {
   test('starts automatic validation only once for an eligible candidate', () => {
@@ -70,5 +100,20 @@ describe('calibration validation classification', () => {
     expect(shouldRunValidationConfirmation({ outcome, candidateId: 'candidate-1', confirmedCandidateId: null })).toBe(true)
     expect(shouldRunValidationConfirmation({ outcome, candidateId: 'candidate-1', confirmedCandidateId: 'candidate-1' })).toBe(false)
     expect(shouldRunValidationConfirmation({ outcome: { status: 'improved', beforeDb: 4, afterDb: 2 }, candidateId: 'candidate-1', confirmedCandidateId: null })).toBe(false)
+  })
+
+  test('uses matched physical positions for the spatial validation objective', () => {
+    const metrics = matchedSpatialValidationMetrics(
+      aggregate(['center', 'left', 'right'], 1),
+      aggregate(['center', 'left', 'right'], 0),
+    )
+
+    expect(metrics?.objective).toBe('spatial')
+    expect(metrics?.positionIds).toEqual(['center', 'left', 'right'])
+    expect(metrics?.after).toBeLessThan(metrics?.before ?? 0)
+    expect(matchedSpatialValidationMetrics(
+      aggregate(['center', 'left', 'right'], 1),
+      aggregate(['center', 'left'], 0),
+    )).toBeNull()
   })
 })

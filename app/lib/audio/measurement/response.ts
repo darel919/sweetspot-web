@@ -22,6 +22,8 @@ export const CLOCK_DRIFT_HARD_REJECT_PPM = 1_000
 const MARKER_DISCOVERY_FLOOR = 0.22
 /** Per-marker floor used with the combined pair score, not as a standalone acceptance rule. */
 const MARKER_MIN_CORRELATION = 0.25
+/** Below this pair confidence, separation error is not enough evidence of oscillator drift. */
+const CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION = 0.55
 /** Exact timing contributes half of the pair score, so timing can promote acoustic peaks. */
 const MARKER_PAIR_SCORE_THRESHOLD = 0.63
 const MARKER_PAIR_SEARCH_MAX_DRIFT_PPM = 5_000
@@ -56,9 +58,11 @@ export interface SweepDetection {
   markerPairScore: number | null
   markerSeparationError: number | null
   markerTimingAgreement: number | null
+  /** Raw marker separation expressed in ppm; it may be acoustic localization bias. */
+  markerSeparationPpm: number | null
   /** Recorded samples per nominal TV sample, estimated from marker separation. */
   clockRatio: number | null
-  /** (clockRatio - 1) * 1e6; recorder clock drift relative to the TV. */
+  /** Robust clock-ratio estimate; null when marker separation evidence is ambiguous. */
   driftPpm: number | null
   expectedMarkerSeparationSamples: number | null
   observedMarkerSeparationSamples: number | null
@@ -83,6 +87,7 @@ export interface MeasurementAnalysisDiagnostics {
   markerPairScore: number | null
   markerSeparationError: number | null
   markerTimingAgreement: number | null
+  markerSeparationPpm: number | null
   syncMarkerFailureReason: SyncMarkerFailureReason | null
   clockDriftPpm: number | null
   signalRms: number
@@ -224,6 +229,7 @@ function emptySweepDetection(failureReason: SweepDetection['failureReason'] = 'm
     markerPairScore: null,
     markerSeparationError: null,
     markerTimingAgreement: null,
+    markerSeparationPpm: null,
     clockRatio: null,
     driftPpm: null,
     expectedMarkerSeparationSamples: null,
@@ -319,7 +325,7 @@ interface MarkerPair {
   trailing: number
   leadingConfidence: number
   trailingConfidence: number
-  separation: number
+  observedSeparationSamples: number
   clockRatio: number
   driftPpm: number
   separationError: number
@@ -364,13 +370,13 @@ function createMarkerPair(
   const driftPpm = (clockRatio - 1) * 1_000_000
   if (!Number.isFinite(clockRatio) || !Number.isFinite(driftPpm)) return null
   const separationError = Math.abs(separation - expectedSeparation) / expectedSeparation
-  const timingScore = timingAgreement(driftPpm)
+  const timingScore = timingAgreement(separationError)
   return {
     leading,
     trailing,
     leadingConfidence,
     trailingConfidence,
-    separation,
+    observedSeparationSamples: separation,
     clockRatio,
     driftPpm,
     separationError,
@@ -403,6 +409,11 @@ function detectionWithPair(
   const rightSweepOffsetInTvFrames = tvParts.rightSweepStartSamples - tvParts.leadingMarkerStartSamples
   const startSample = pair.leading + Math.round(activeSweepOffsetInTvFrames * nominalCapturePerTvFrame * pair.clockRatio)
   const rightStartSample = pair.leading + Math.round(rightSweepOffsetInTvFrames * nominalCapturePerTvFrame * pair.clockRatio)
+  const clockEstimateTrusted = accepted || (
+    Math.min(pair.leadingConfidence, pair.trailingConfidence)
+      >= CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION
+      && failureReason === 'clock_drift_unreliable'
+  )
   return {
     ...base,
     found: accepted,
@@ -416,9 +427,10 @@ function detectionWithPair(
     markerPairScore: pair.score,
     markerSeparationError: pair.separationError,
     markerTimingAgreement: pair.timingAgreement,
+    markerSeparationPpm: pair.driftPpm,
     clockRatio: pair.clockRatio,
-    driftPpm: pair.driftPpm,
-    observedMarkerSeparationSamples: pair.separation,
+    driftPpm: clockEstimateTrusted ? pair.driftPpm : null,
+    observedMarkerSeparationSamples: pair.observedSeparationSamples,
     failureReason,
   }
 }
@@ -430,6 +442,12 @@ function detectionFailureForPeaks(
   if (leadingConfidence < MARKER_DISCOVERY_FLOOR && trailingConfidence < MARKER_DISCOVERY_FLOOR) return 'marker_absent'
   if (leadingConfidence >= MARKER_MIN_CORRELATION && trailingConfidence < MARKER_MIN_CORRELATION) return 'end_marker_missing'
   return 'marker_pair_low_confidence'
+}
+
+function detectionFailureForTimingPair(pair: MarkerPair): SyncMarkerFailureReason {
+  return Math.min(pair.leadingConfidence, pair.trailingConfidence) < CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION
+    ? 'marker_pair_low_confidence'
+    : 'clock_drift_unreliable'
 }
 
 function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampleRate: number): SweepDetection {
@@ -466,9 +484,10 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
     markerPairScore: rawPair?.score ?? null,
     markerSeparationError: rawPair?.separationError ?? null,
     markerTimingAgreement: rawPair?.timingAgreement ?? null,
+    markerSeparationPpm: rawPair?.driftPpm ?? null,
     clockRatio: rawPair?.clockRatio ?? null,
-    driftPpm: rawPair?.driftPpm ?? null,
-    observedMarkerSeparationSamples: rawPair?.separation ?? null,
+    driftPpm: null,
+    observedMarkerSeparationSamples: rawPair?.observedSeparationSamples ?? null,
   }
   if (startCorrelation.length === 0 || endCorrelation.length === 0) return base
 
@@ -533,7 +552,7 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       sampleRate,
       tvParts,
       false,
-      'clock_drift_unreliable',
+      detectionFailureForTimingPair(bestWithinSearchWindow),
     )
   }
   if (bestOrdered) {
@@ -712,6 +731,7 @@ function analyzeMeasurementWindow(
     markerPairScore: detection.markerPairScore,
     markerSeparationError: detection.markerSeparationError,
     markerTimingAgreement: detection.markerTimingAgreement,
+    markerSeparationPpm: detection.markerSeparationPpm,
     syncMarkerFailureReason: detection.failureReason,
     clockDriftPpm: detection.driftPpm,
     signalRms: signal.rms,

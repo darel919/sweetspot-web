@@ -77,3 +77,9 @@ reviewed.
 
 Canonical shape in `protocol.ts` (`StateSnapshot`). The TV answers
 `state.get` with a `state.snapshot` carrying `replyTo`.
+
+When `calibration.transaction.state` is `candidate_pending`, `previousActive`
+describes whether calibration was active in the TV's live DSP state immediately
+before the candidate was staged. It is the rollback target summary. Browser
+measurement checkpoints and generated-but-uncommitted corrections are not
+calibration transactions and must never be used as rollback state.

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   createMeasurementPlan,
+  createMeasurementPlanForGroups,
   createProbeMeasurementPlan,
   createRepairContext,
   createRetryContext,
@@ -39,6 +40,25 @@ describe('physical-position measurement sequencing', () => {
       attemptCount: 2,
     })
     expect(createRetryContext(retry!)).toBeNull()
+  })
+
+  test('keeps absolute geometry when adaptive order skips from right to backward', () => {
+    const plan = createMeasurementPlanForGroups([
+      { positionId: 'center', positionIndex: 0, positionCount: 3, channel: 'both' },
+      { positionId: 'right', positionIndex: 1, positionCount: 3, channel: 'both' },
+      { positionId: 'backward', positionIndex: 2, positionCount: 3, channel: 'both' },
+    ])
+
+    expect(plan.map((context) => context.positionId)).toEqual(['center', 'right', 'backward'])
+    expect(plan[2]).toMatchObject({ reference: 'center', xCm: 0, yCm: -10, zCm: -35 })
+  })
+
+  test('uses the center target for validation', () => {
+    const [validation] = createMeasurementPlanForGroups([
+      { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'both' },
+    ], 'validation')
+
+    expect(validation).toMatchObject({ phase: 'validation', reference: 'center', xCm: 0, yCm: 0, zCm: 0 })
   })
 
   test('probe plans remain composite and do not add duplicate takes', () => {

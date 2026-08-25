@@ -2,6 +2,7 @@ import type { CorrectionStrength } from '~/lib/audio/correction/optimizer'
 import type { SharedLfAssessment } from '~/lib/audio/correction/shared-lf'
 import type { CaptureTrackSettings } from '~/lib/audio/capture/microphone'
 import type { AggregateResponse } from '~/lib/audio/measurement/aggregation'
+import type { CalibrationPositionId } from '#shared/types/protocol'
 
 export interface RecommendedCorrection {
   bandsDb: number[]
@@ -28,6 +29,8 @@ export interface CalibrationCaptureInfo {
 export interface CalibrationValidationMetrics {
   before: number
   after: number
+  objective: 'spatial'
+  positionIds: CalibrationPositionId[]
 }
 
 export type CalibrationResultStatus = 'improved' | 'inconclusive' | 'worse' | 'cancelled' | 'error'

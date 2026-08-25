@@ -40,7 +40,7 @@ export function measurementGroupKey(group: {
   return group.positionId
 }
 
-function compositeContext(
+export function measurementContextForPosition(
   position: PositionSpec,
   positionIndex: number,
   positionCount: number,
@@ -50,6 +50,10 @@ function compositeContext(
 ): MeasurementContext {
   return {
     positionId: position.id,
+    reference: position.target.reference,
+    xCm: position.target.xCm,
+    yCm: position.target.yCm,
+    zCm: position.target.zCm,
     positionIndex,
     positionCount,
     channel: 'both',
@@ -66,7 +70,7 @@ export function createMeasurementPlan(
   phase: MeasurementContext['phase'] = 'measurement',
 ): MeasurementContext[] {
   return DEFAULT_POSITION_SPECS.slice(0, MIN_POSITION_COUNT)
-    .map((position, positionIndex) => compositeContext(position, positionIndex, MIN_POSITION_COUNT, phase))
+    .map((position, positionIndex) => measurementContextForPosition(position, positionIndex, MIN_POSITION_COUNT, phase))
 }
 
 export function createMeasurementPlanForGroups(
@@ -78,7 +82,7 @@ export function createMeasurementPlanForGroups(
     .filter((position): position is PositionSpec => position !== undefined)
     .filter((position, index, all) => all.findIndex((candidate) => candidate.id === position.id) === index)
   const positionCount = Math.max(1, Math.min(MAX_POSITION_COUNT, positions.length))
-  return positions.map((position, positionIndex) => compositeContext(position, positionIndex, positionCount, phase))
+  return positions.map((position, positionIndex) => measurementContextForPosition(position, positionIndex, positionCount, phase))
 }
 
 export type ProbePlanKind = 'transfer' | 'routing'
@@ -90,7 +94,7 @@ export function createProbeMeasurementPlan(
   const positions = kind === 'transfer'
     ? [DEFAULT_POSITION_SPECS[0]!]
     : [DEFAULT_POSITION_SPECS[1]!, DEFAULT_POSITION_SPECS[2]!]
-  return positions.map((position, positionIndex) => compositeContext(position, positionIndex, positions.length, 'measurement'))
+  return positions.map((position, positionIndex) => measurementContextForPosition(position, positionIndex, positions.length, 'measurement'))
 }
 
 export function createRetryContext(context: MeasurementContext): MeasurementContext | null {

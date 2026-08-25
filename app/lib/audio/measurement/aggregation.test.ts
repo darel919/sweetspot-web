@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { MeasurementContext } from '#shared/types/protocol'
+import { CALIBRATION_POSITION_TARGETS, type MeasurementContext } from '../../../../shared/types/protocol'
 import type { MeasurementAnalysis } from './response'
 import {
   aggregateResponse,
@@ -62,8 +62,10 @@ function analysis(
 }
 
 function context(options: Partial<MeasurementContext> = {}): MeasurementContext {
+  const { positionId = 'center', ...overrides } = options
   return {
-    positionId: 'center',
+    positionId,
+    ...CALIBRATION_POSITION_TARGETS[positionId],
     positionIndex: 0,
     positionCount: 3,
     channel: 'both',
@@ -72,7 +74,7 @@ function context(options: Partial<MeasurementContext> = {}): MeasurementContext 
     attemptIndex: 0,
     attemptCount: 2,
     phase: 'measurement',
-    ...options,
+    ...overrides,
   }
 }
 

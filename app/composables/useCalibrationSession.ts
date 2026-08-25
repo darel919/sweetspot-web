@@ -2,6 +2,7 @@ import { computed, onScopeDispose, readonly, ref, shallowRef } from 'vue'
 import type {
   CalibrationProgressStage,
   CalibrationErrorCode,
+  CalibrationPositionId,
   Envelope,
   MeasurementContext,
   MeasurementDiagnosticsValues,
@@ -30,10 +31,15 @@ import {
   createMeasurementPlan,
   createMeasurementPlanForGroups,
   createProbeMeasurementPlan,
+  measurementContextForPosition,
   positionForContext,
   requiresRemoteContinue,
   type ProbePlanKind,
 } from '../lib/audio/measurement/plan'
+import {
+  reconcileFailedTakeDiagnostics,
+  type FailedTakeDiagnostic,
+} from '../lib/audio/measurement/failure-diagnostics'
 import {
   appendCompositeCapture,
   acceptedPositionCount,
@@ -153,7 +159,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   const validationAggregateLeft = shallowRef<AggregateResponse | null>(null)
   const validationAggregateRight = shallowRef<AggregateResponse | null>(null)
   const captureDiagnostics = shallowRef<CaptureSignalDiagnostics | null>(null)
-  const failedTakeDiagnostics = shallowRef<Array<{ context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues }>>([])
+  const failedTakeDiagnostics = shallowRef<FailedTakeDiagnostic[]>([])
   const profiles = shallowRef<MicCalibrationProfile[]>([])
   const selectedProfileId = ref('')
   const profileError = ref('')
@@ -227,7 +233,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       if (context.positionId === 'right') return 'Move the same microphone to the fixed right-speaker position and keep its orientation unchanged.'
       return 'Place the single microphone at the fixed center listening position and keep its orientation unchanged.'
     }
-    return positionForContext(context).instruction
+    const position = positionForContext(context)
+    return context.attemptIndex > 0 ? position.retryInstruction : position.instruction
   })
 
   async function loadProfiles(): Promise<MicCalibrationProfile[]> {
@@ -522,17 +529,14 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }
 
   function contextForAdaptiveDecision(decision: Extract<ReturnType<typeof decideNextCapture>, { kind: 'capture' }>): MeasurementContext {
-    return {
-      positionId: decision.position.id,
-      positionIndex: decision.positionIndex,
-      positionCount: decision.requestedPositionCount,
-      channel: 'both',
-      captureKind: 'position-composite',
-      repairChannel: decision.repairChannel,
-      attemptIndex: decision.attemptIndex,
-      attemptCount: 2,
-      phase: 'measurement',
-    }
+    return measurementContextForPosition(
+      decision.position,
+      decision.positionIndex,
+      decision.requestedPositionCount,
+      'measurement',
+      decision.repairChannel,
+      decision.attemptIndex,
+    )
   }
 
   function scheduleAdaptiveNext(): void {
@@ -865,7 +869,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
 
   async function startMode(
     mode: 'measurement' | 'validation' | 'probe',
-    _retryGroups: readonly unknown[] | null = null,
+    validationPositionIds: readonly CalibrationPositionId[] | null = null,
     candidateId: string | null = null,
     nextProbePlanKind: ProbePlanKind | null = null,
     resumeCheckpoint: CalibrationCheckpoint | null = null,
@@ -875,6 +879,12 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     if (mode === 'validation' && !candidateId) {
       stage.value = 'error'
       message.value = 'Validation requires a pending calibration candidate.'
+      return
+    }
+    if (mode === 'validation' && (!validationPositionIds || validationPositionIds.length === 0)) {
+      stage.value = 'error'
+      validationFailed.value = true
+      message.value = 'Validation requires the accepted physical positions from the baseline measurement.'
       return
     }
     sessionMode = mode
@@ -911,9 +921,15 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     captureInfo.value = null
     captureMetadata.value = null
     plan = mode === 'validation'
-      ? createMeasurementPlanForGroups([
-          { positionId: 'center', positionIndex: 0, positionCount: 1, channel: 'both' },
-        ], 'validation')
+      ? createMeasurementPlanForGroups(
+          validationPositionIds?.map((positionId, positionIndex) => ({
+            positionId,
+            positionIndex,
+            positionCount: validationPositionIds.length,
+            channel: 'both' as const,
+          })) ?? [],
+          'validation',
+        )
       : mode === 'probe'
         ? createProbeMeasurementPlan(probePlanKind as ProbePlanKind)
         : [createMeasurementPlan()[0]!]
@@ -999,8 +1015,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     void startMode('measurement', null, null, null, loadedResumeCheckpoint)
   }
 
-  function startValidation(candidateId: string) {
-    void startMode('validation', null, candidateId)
+  function startValidation(candidateId: string, positionIds: readonly CalibrationPositionId[] = []) {
+    void startMode('validation', positionIds, candidateId)
   }
 
   function startProbe(kind: ProbePlanKind) {
@@ -1102,6 +1118,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         markerPairScore: child.diagnostics.markerPairScore,
         markerSeparationError: child.diagnostics.markerSeparationError,
         markerTimingAgreement: child.diagnostics.markerTimingAgreement,
+        markerSeparationPpm: child.diagnostics.markerSeparationPpm,
         syncMarkerFailureReason: child.diagnostics.syncMarkerFailureReason,
         clockDriftPpm: Number.isFinite(child.diagnostics.clockDriftPpm ?? Number.NaN) ? child.diagnostics.clockDriftPpm : null,
         clipped: child.diagnostics.clipped,
@@ -1139,11 +1156,14 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         child.status === 'ok' && child.correctedPoints.length > 1
           ? [{ context: currentContext, channel, analysis: child }]
           : []
-      const rejectedDiagnostics = [
-        result.left.status === 'ok' ? null : { context: currentContext, diagnostics: leftDiagnostics },
-        result.right.status === 'ok' ? null : { context: currentContext, diagnostics: rightDiagnostics },
-      ].filter((value): value is { context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues } => value !== null)
-      if (rejectedDiagnostics.length > 0) failedTakeDiagnostics.value = [...failedTakeDiagnostics.value, ...rejectedDiagnostics]
+      failedTakeDiagnostics.value = reconcileFailedTakeDiagnostics(
+        failedTakeDiagnostics.value,
+        currentContext,
+        [
+          { channel: 'left', failed: result.left.status !== 'ok', diagnostics: leftDiagnostics },
+          { channel: 'right', failed: result.right.status !== 'ok', diagnostics: rightDiagnostics },
+        ],
+      )
 
       if (sessionMode === 'validation') {
         const nextRecords = [
@@ -1405,7 +1425,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       validationActive.value = true
       estimatedRemainingSeconds.value = null
       stage.value = 'ending'
-      message.value = 'Waiting for the TV to restore the previous calibration.'
+      message.value = 'Waiting for the TV to remove the candidate and verify the original audio state.'
       return
     }
     finishCancelled('Calibration cancelled.', true)
