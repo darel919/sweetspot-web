@@ -250,6 +250,14 @@ const {
   isDeviceOnline: () => deviceOnline.value,
 })
 const snapshot = ref<StateSnapshot | null>(null)
+const candidateTransaction = computed<Extract<CalibrationTransaction, { state: 'candidate_pending' }> | null>(() => {
+  const transaction = snapshot.value?.calibration.transaction
+  return transaction?.state === 'candidate_pending' ? transaction : null
+})
+const automaticValidationCandidateId = ref<string | null>(null)
+const automaticStagingMeasurementId = ref<string | null>(null)
+const automaticStagingFailedMeasurementId = ref<string | null>(null)
+const correctionPending = ref(false)
 const measurementBusy = computed(() => isCalibrationActiveStage(measurementStage.value))
 let stateSnapshotRevision = 0
 let recoverySnapshotBaselineRevision = 0
@@ -403,7 +411,6 @@ const calJson = ref('')
 const calStatus = ref('')
 const calIsError = ref(false)
 const profileName = ref('')
-const correctionPending = ref(false)
 const calibrationApplied = ref(false)
 const calibrationResult = ref<CalibrationResultStatus | null>(null)
 const calibrationResultMessage = ref('')
@@ -525,11 +532,6 @@ const validationWorse = computed(() => {
   return metrics !== null && metrics.after > metrics.before + CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB
 })
 
-const candidateTransaction = computed<Extract<CalibrationTransaction, { state: 'candidate_pending' }> | null>(() => {
-  const transaction = snapshot.value?.calibration.transaction
-  return transaction?.state === 'candidate_pending' ? transaction : null
-})
-
 const deviceValidationReady = computed(() => {
   const current = snapshot.value
   return current !== null
@@ -570,9 +572,6 @@ const validationOutcomeKey = computed(() => {
 })
 type ValidationDecision = CalibrationValidationOutcome | { status: 'error'; reason: string }
 
-const automaticValidationCandidateId = ref<string | null>(null)
-const automaticStagingMeasurementId = ref<string | null>(null)
-const automaticStagingFailedMeasurementId = ref<string | null>(null)
 const sentValidationOutcomeKeys = new Set<string>()
 let validationResultInFlight = false
 
