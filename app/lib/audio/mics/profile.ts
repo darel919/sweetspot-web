@@ -124,6 +124,8 @@ export function parseMicCalibrationProfile(input: unknown): MicCalibrationProfil
 
 export function isMicCalibrationProfileEligibleForCorrection(profile: MicCalibrationProfile): boolean {
   return profile.capturePathStatus === 'validated'
+    || profile.capturePathStatus === 'provisional'
+    || profile.capturePathStatus === 'unvalidated'
 }
 
 export function interpolateLogResponseDb(profile: MicCalibrationProfile, frequencyHz: number): number {

@@ -1119,7 +1119,7 @@ async function stageRecommendedCorrectionAutomatically(
 async function applyCalibration() {
   if (snapshot.value?.capabilities.supportsCalibratedCorrection !== true) {
     calIsError.value = true
-    calStatus.value = 'The TV has not characterized its calibration transfer functions.'
+    calStatus.value = 'The TV EQ readback is degraded, so automatic correction is unavailable.'
     return
   }
   if (!deviceOnline.value) {
@@ -1157,7 +1157,7 @@ async function applyRecommendedCorrection() {
   const correction = recommendedCorrection.value
   if (measurementStage.value !== 'complete' || !correction || !measurementRepeatabilityPassed.value || correctionPending.value) return
   if (snapshot.value?.capabilities.supportsCalibratedCorrection !== true) {
-    showToast('The TV has not characterized its calibration transfer functions.')
+    showToast('The TV EQ readback is degraded, so automatic correction is unavailable.')
     return
   }
   if (!deviceOnline.value) {

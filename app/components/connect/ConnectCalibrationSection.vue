@@ -112,7 +112,7 @@ function curveRange(curve: readonly number[] | undefined): string {
     <p v-if="selectedCapturePathStatus" class="note">
       Capture profile status:
       {{ selectedCapturePathStatus.toUpperCase() }}.
-      Only validated capture paths can produce automatic correction; unvalidated paths remain diagnostic-only.
+      <span v-if="selectedCapturePathStatus !== 'validated'">Automatic correction is enabled, but this capture path has not been independently validated.</span>
     </p>
     <p v-if="measurementProfileError" class="error">{{ measurementProfileError }}</p>
     <p v-else-if="!measurementProfiles.length" class="note">Loading microphone profiles…</p>
@@ -120,7 +120,10 @@ function curveRange(curve: readonly number[] | undefined): string {
       This TV build does not advertise a target-validated sweep yet. Calibration is unavailable until the real TV output path has been tested.
     </p>
     <p v-if="snapshot.capabilities.supportsCalibratedCorrection !== true" class="note">
-      Automatic correction is withheld until this TV's 64-band transfer functions have been characterized on the real playback path. Measurement remains available for diagnostics; independent L/R correction also requires acoustic routing verification.
+      Automatic correction is unavailable because the TV's EQ readback is degraded. Measurement remains available for diagnostics.
+    </p>
+    <p v-else-if="snapshot.capabilities.supportsIndependentCalibration !== true" class="note">
+      Common automatic correction is available. Independent left/right correction is not enabled for this TV.
     </p>
     <div class="actions">
       <button
@@ -227,7 +230,7 @@ function curveRange(curve: readonly number[] | undefined): string {
           :disabled="!recommendedCorrection || !measurementRepeatabilityPassed || correctionPending || candidatePending || snapshot.capabilities.supportsCalibratedCorrection !== true"
           @click="emit('apply-recommended-correction')"
         >
-          {{ correctionPending ? 'Applying…' : 'Recovery-only apply recommended correction' }}
+          {{ correctionPending ? 'Applying…' : 'Apply recommended correction' }}
         </button>
         <button v-if="calibrationApplied && candidatePending && !calibrationFinalizationPending" :disabled="measurementBusy || !validationReady || snapshot.calibration.liveDspStatus !== 'verified'" @click="emit('start-validation')">
           Recovery validation sweep

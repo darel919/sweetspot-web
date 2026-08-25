@@ -89,12 +89,13 @@ describe('microphone profile math', () => {
     expect(micCompensationDbAtHz(syntheticProfile, 13_000)).toBeCloseTo(0, 6)
   })
 
-  test('keeps unvalidated capture paths diagnostic-only', () => {
+  test('allows unvalidated capture paths to produce a correction while retaining their status', () => {
     expect(isMicCalibrationProfileEligibleForCorrection(profile)).toBe(true)
     const unvalidated = parseMicCalibrationProfile({
       ...profile,
       capturePathStatus: 'unvalidated',
     })
-    expect(isMicCalibrationProfileEligibleForCorrection(unvalidated)).toBe(false)
+    expect(unvalidated.capturePathStatus).toBe('unvalidated')
+    expect(isMicCalibrationProfileEligibleForCorrection(unvalidated)).toBe(true)
   })
 })
