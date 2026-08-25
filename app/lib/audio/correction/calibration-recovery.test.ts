@@ -2,11 +2,56 @@ import { describe, expect, test } from 'bun:test'
 import {
   canIssueStandaloneCandidateRollback,
   createCalibrationAbortCommand,
+  evaluateCalibrationAbortRecovery,
+  formatCalibrationAbortCompletion,
+  formatCalibrationAbortRecoveryFailure,
   hasVerifiedAbortRecoveryReadback,
   mergeValidationAbortDetails,
+  shouldContinueCalibrationAbortRecoveryPoll,
   shouldKeepCalibrationLockedDuringAbort,
   shouldReportValidationFailure,
+  type CalibrationAbortDetails,
+  type CalibrationAbortRecovery,
+  type CalibrationAbortRecoverySnapshot,
 } from './calibration-recovery'
+
+function details(code: CalibrationAbortDetails['code'] = 'signal_too_low'): CalibrationAbortDetails {
+  return {
+    sessionId: 'session-1',
+    mode: 'validation',
+    candidateId: 'candidate-1',
+    code,
+    message: code === 'calibration_aborted' ? 'Calibration cancelled.' : 'The validation sweep was too quiet.',
+  }
+}
+
+function recovery(
+  state: 'pending' | 'awaiting-readback',
+  code: CalibrationAbortDetails['code'] = 'signal_too_low',
+): Extract<CalibrationAbortRecovery, { state: 'pending' | 'awaiting-readback' }> {
+  return { state, details: details(code) }
+}
+
+function candidateTransaction(candidateId: string) {
+  return {
+    state: 'candidate_pending' as const,
+    candidateId,
+    validationStatus: 'rolling_back' as const,
+    beforeDb: null,
+    afterDb: null,
+    reason: null,
+  }
+}
+
+function snapshot(overrides: Partial<CalibrationAbortRecoverySnapshot> = {}): CalibrationAbortRecoverySnapshot {
+  return {
+    authoritative: true,
+    transaction: { state: 'none' },
+    liveDspStatus: 'verified',
+    applicationError: null,
+    ...overrides,
+  }
+}
 
 describe('validation abort recovery guards', () => {
   test('active validation cancellation has only the abort command', () => {
@@ -60,24 +105,29 @@ describe('validation abort recovery guards', () => {
       abortState: 'awaiting-readback',
       transactionState: 'none',
       liveDspStatus: 'verified',
-    })).toBe(false)
+    })).toBe(true)
     expect(shouldKeepCalibrationLockedDuringAbort({
       abortState: 'awaiting-readback',
       transactionState: 'none',
       liveDspStatus: 'degraded',
-    })).toBe(false)
+    })).toBe(true)
   })
 
-  test('recognizes the final verified readback', () => {
+  test('recognizes a verified readback before the transient ended event arrives', () => {
     expect(hasVerifiedAbortRecoveryReadback({
-      abortState: 'awaiting-readback',
+      abortState: 'pending',
       transactionState: 'none',
       liveDspStatus: 'verified',
     })).toBe(true)
     expect(hasVerifiedAbortRecoveryReadback({
       abortState: 'awaiting-readback',
       transactionState: 'none',
-      liveDspStatus: 'degraded',
+      liveDspStatus: 'verified',
+    })).toBe(true)
+    expect(hasVerifiedAbortRecoveryReadback({
+      abortState: 'failed',
+      transactionState: 'none',
+      liveDspStatus: 'verified',
     })).toBe(false)
   })
 
@@ -91,5 +141,80 @@ describe('validation abort recovery guards', () => {
     }
     expect(mergeValidationAbortDetails(original, 'calibration_aborted', 'Calibration cancelled.'))
       .toEqual(original)
+  })
+
+  test('completes pending recovery from a fresh verified snapshot when ended was lost', () => {
+    const current = recovery('pending')
+    expect(evaluateCalibrationAbortRecovery(current, snapshot())).toEqual({
+      kind: 'completed',
+      details: current.details,
+    })
+  })
+
+  test('completes normal ended recovery after verified readback', () => {
+    const current = recovery('awaiting-readback')
+    expect(evaluateCalibrationAbortRecovery(current, snapshot())).toEqual({
+      kind: 'completed',
+      details: current.details,
+    })
+  })
+
+  test('does not resolve a recovery from a non-authoritative cached snapshot', () => {
+    const current = recovery('pending')
+    expect(evaluateCalibrationAbortRecovery(current, snapshot({ authoritative: false }))).toEqual({ kind: 'waiting' })
+  })
+
+  test('reports validation failure after rollback succeeds without calling it a recovery failure', () => {
+    expect(formatCalibrationAbortCompletion(details('signal_too_low'))).toEqual({
+      kind: 'validation-failure',
+      message: 'Validation failed [signal_too_low]. The validation sweep was too quiet. Previous settings were restored.',
+    })
+  })
+
+  test('reports ordinary cancellation separately after rollback succeeds', () => {
+    expect(formatCalibrationAbortCompletion(details('calibration_aborted'))).toEqual({
+      kind: 'cancelled',
+      message: 'Calibration cancelled. Previous settings were restored.',
+    })
+  })
+
+  test('reports degraded DSP as a recovery failure', () => {
+    const result = evaluateCalibrationAbortRecovery(recovery('pending'), snapshot({ liveDspStatus: 'degraded' }))
+    expect(result.kind).toBe('failed')
+    if (result.kind !== 'failed') return
+    expect(result.failure.kind).toBe('unverified-readback')
+    expect(formatCalibrationAbortRecoveryFailure(result.failure)).toContain('Calibration recovery could not be verified.')
+    expect(formatCalibrationAbortRecoveryFailure(result.failure)).not.toContain('Previous settings were restored.')
+  })
+
+  test('reports a pending candidate mismatch without resolving or rolling it back', () => {
+    const result = evaluateCalibrationAbortRecovery(recovery('pending'), snapshot({
+      transaction: candidateTransaction('candidate-2'),
+    }))
+    expect(result.kind).toBe('failed')
+    if (result.kind !== 'failed') return
+    expect(result.failure).toEqual({ kind: 'candidate-mismatch', actualCandidateId: 'candidate-2' })
+    expect(formatCalibrationAbortRecoveryFailure(result.failure)).toContain('recovery conflict')
+  })
+
+  test('keeps an unresolved same-candidate transaction pending', () => {
+    expect(evaluateCalibrationAbortRecovery(recovery('pending'), snapshot({
+      transaction: candidateTransaction('candidate-1'),
+    }))).toEqual({ kind: 'waiting' })
+  })
+
+  test('ignores duplicate snapshots after the recovery has been settled', () => {
+    expect(evaluateCalibrationAbortRecovery({ state: 'idle' }, snapshot())).toEqual({ kind: 'ignored' })
+  })
+
+  test('formats bounded recovery timeout as an explicit restoration failure', () => {
+    expect(formatCalibrationAbortRecoveryFailure({ kind: 'timeout' })).toBe(
+      'Calibration recovery could not be verified. The TV did not confirm a resolved transaction with verified live DSP readback. Previous settings may not have been restored correctly.',
+    )
+  })
+
+  test('stops state polling at the recovery retry bound', () => {
+    expect(shouldContinueCalibrationAbortRecoveryPoll(29)).toBe(true)
+    expect(shouldContinueCalibrationAbortRecoveryPoll(30)).toBe(false)
   })
 })

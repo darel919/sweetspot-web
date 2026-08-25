@@ -177,7 +177,9 @@ import {
 } from '~/lib/audio/correction/calibration-validation'
 import {
   canIssueStandaloneCandidateRollback,
-  hasVerifiedAbortRecoveryReadback,
+  formatCalibrationAbortCompletion,
+  formatCalibrationAbortRecoveryFailure,
+  isAbortRecoveryActive,
   shouldKeepCalibrationLockedDuringAbort,
   shouldReportValidationFailure,
 } from '~/lib/audio/correction/calibration-recovery'
@@ -236,10 +238,27 @@ const {
   completedMeasurementId: measurementCompletedId,
   abortRecovery: measurementAbortRecovery,
   cancel: cancelMeasurement,
-  acknowledgeAbortRecovery: acknowledgeMeasurementAbortRecovery,
-} = useCalibrationSession(connection)
+  observeAbortRecoverySnapshot,
+} = useCalibrationSession({
+  send: connection.send,
+  onMessage: connection.onMessage,
+  isDeviceOnline: () => deviceOnline.value,
+})
 const snapshot = ref<StateSnapshot | null>(null)
 const measurementBusy = computed(() => isCalibrationActiveStage(measurementStage.value))
+let stateSnapshotRevision = 0
+let recoverySnapshotBaselineRevision = 0
+let recoveryIdentity = ''
+
+watch(measurementAbortRecovery, (recovery) => {
+  const nextIdentity = isAbortRecoveryActive(recovery.state)
+    ? `${recovery.state}:${recovery.details.sessionId}:${recovery.details.candidateId ?? ''}:${recovery.details.code}`
+    : ''
+  if (nextIdentity === recoveryIdentity) return
+  recoveryIdentity = nextIdentity
+  recoverySnapshotBaselineRevision = stateSnapshotRevision
+}, { immediate: true, flush: 'sync' })
+
 const calibrationFinalization = ref<{
   candidateId: string
   outcome: ValidationDecision
@@ -252,25 +271,9 @@ const calibrationFinalizationPending = computed(() =>
 )
 const validationAbortRecoveryError = computed(() => {
   const recovery = measurementAbortRecovery.value
-  if (recovery.state === 'idle') return null
-  const currentSnapshot = snapshot.value
-  if (recovery.state === 'pending') {
-    return currentSnapshot?.calibration.transaction.state === 'none'
-      && currentSnapshot.calibration.liveDspStatus !== 'verified'
-      ? 'The TV finished the validation rollback without verified live DSP readback. Recovery is required.'
-      : null
-  }
-  if (recovery.state === 'failed') {
-    return `Validation recovery failed [${recovery.details.code}]. ${recovery.details.message} Recovery controls remain available.`
-  }
-  if (recovery.details.code !== 'calibration_aborted' && currentSnapshot !== null) {
-    return `Validation recovery failed [${recovery.details.code}]. ${recovery.details.message} Recovery controls remain available.`
-  }
-  if (currentSnapshot?.calibration.transaction.state === 'none'
-    && currentSnapshot.calibration.liveDspStatus !== 'verified') {
-    return 'The TV finished the validation rollback without verified live DSP readback. Recovery is required.'
-  }
-  return null
+  return recovery.state === 'failed'
+    ? formatCalibrationAbortRecoveryFailure(recovery.failure)
+    : null
 })
 const validationAbortRecoveryPending = computed(() => shouldKeepCalibrationLockedDuringAbort({
   abortState: measurementAbortRecovery.value.state,
@@ -612,8 +615,16 @@ onMessage((env) => {
     return
   }
   const next: StateSnapshot = env.payload
-  if (JSON.stringify(next) === JSON.stringify(snapshot.value)) return
-  snapshot.value = next
+  stateSnapshotRevision += 1
+  const recoveryActive = isAbortRecoveryActive(measurementAbortRecovery.value.state)
+  const recoveryObservation = observeAbortRecoverySnapshot({
+    authoritative: recoveryActive && stateSnapshotRevision > recoverySnapshotBaselineRevision,
+    transaction: next.calibration.transaction,
+    liveDspStatus: next.calibration.liveDspStatus ?? null,
+    applicationError: next.calibration.applicationError ?? null,
+  })
+  if (JSON.stringify(next) !== JSON.stringify(snapshot.value)) snapshot.value = next
+  if (recoveryObservation.kind === 'completed') applyAbortRecoveryCompletion(recoveryObservation.details)
 })
 
 const eqDraft = ref<number[]>([])
@@ -742,21 +753,27 @@ function showAbortRecoveryError(message: string) {
   showToast(message)
 }
 
-watch([snapshot, measurementAbortRecovery], () => {
-  const recovery = measurementAbortRecovery.value
-  if (recovery.state === 'idle' || recovery.state === 'pending') return
-  if (hasVerifiedAbortRecoveryReadback({
-    abortState: recovery.state,
-    transactionState: snapshot.value?.calibration.transaction.state ?? null,
-    liveDspStatus: snapshot.value?.calibration.liveDspStatus ?? null,
-  })) {
-    if (recovery.details.code !== 'calibration_aborted') {
-      showAbortRecoveryError(`Validation failed [${recovery.details.code}]. ${recovery.details.message} Previous settings were restored.`)
-    }
-    acknowledgeMeasurementAbortRecovery()
+function applyAbortRecoveryCompletion(details: Parameters<typeof formatCalibrationAbortCompletion>[0]) {
+  const result = formatCalibrationAbortCompletion(details)
+  calibrationResult.value = result.kind === 'cancelled' ? 'cancelled' : 'error'
+  calibrationResultMessage.value = result.message
+  calIsError.value = result.kind !== 'cancelled'
+  calStatus.value = result.message
+  if (result.kind === 'validation-failure') showToast(result.message)
+}
+
+let reportedAbortRecoveryFailure = ''
+watch(measurementAbortRecovery, (recovery) => {
+  if (recovery.state === 'idle') {
+    reportedAbortRecoveryFailure = ''
     return
   }
-  if (validationAbortRecoveryError.value) showAbortRecoveryError(validationAbortRecoveryError.value)
+  if (recovery.state !== 'failed') return
+  const message = formatCalibrationAbortRecoveryFailure(recovery.failure)
+  const key = JSON.stringify(recovery)
+  if (key === reportedAbortRecoveryFailure) return
+  reportedAbortRecoveryFailure = key
+  showAbortRecoveryError(message)
 })
 
 async function performCandidateFinalization(candidateId: string) {

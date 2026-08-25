@@ -342,6 +342,10 @@ function curveRange(curve: readonly number[] | undefined): string {
   color: #f2d28c;
 }
 
+.calibration-result-cancelled {
+  color: #f2d28c;
+}
+
 .calibration-result-worse,
 .calibration-result-error {
   color: #ffb48a;

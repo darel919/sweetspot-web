@@ -44,15 +44,25 @@ import { discoverMicCalibrationProfiles } from '../lib/audio/mics/registry'
 import type { MicCalibrationProfile } from '../lib/audio/mics/types'
 import {
   createCalibrationAbortCommand,
+  evaluateCalibrationAbortRecovery,
+  formatCalibrationAbortRecoveryFailure,
+  isAbortRecoveryActive,
   mergeValidationAbortDetails,
+  shouldContinueCalibrationAbortRecoveryPoll,
   type CalibrationAbortDetails,
   type CalibrationAbortRecovery,
+  type CalibrationAbortRecoveryFailure,
+  type CalibrationAbortRecoveryObservation,
+  type CalibrationAbortRecoverySnapshot,
 } from '../lib/audio/correction/calibration-recovery'
 
 type Connection = {
   send: (type: string, payload?: unknown) => string
   onMessage: (handler: (env: Envelope) => void) => () => void
+  isDeviceOnline: () => boolean
 }
+
+const ABORT_RECOVERY_POLL_INTERVAL_MS = 400
 
 export type CalibrationStage =
   | 'idle'
@@ -152,6 +162,8 @@ export function useCalibrationSession(connection: Connection) {
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null
   let positionKeepAlive: ReturnType<typeof setInterval> | null = null
   let sessionKeepAlive: ReturnType<typeof setInterval> | null = null
+  let abortRecoveryPollTimer: ReturnType<typeof setTimeout> | null = null
+  let abortRecoveryPollAttempts = 0
   let plan: MeasurementContext[] = []
   let planIndex = 0
   let sessionMode: 'measurement' | 'validation' | 'probe' = 'measurement'
@@ -235,6 +247,69 @@ export function useCalibrationSession(connection: Connection) {
     sessionKeepAlive = null
   }
 
+  function clearAbortRecoveryPolling() {
+    if (abortRecoveryPollTimer !== null) clearTimeout(abortRecoveryPollTimer)
+    abortRecoveryPollTimer = null
+    abortRecoveryPollAttempts = 0
+  }
+
+  function clearValidationSessionState() {
+    clearTimeoutTimer()
+    clearPositionKeepAlive()
+    clearSessionKeepAlive()
+    clearAbortRecoveryPolling()
+    void closeCapture()
+    sessionId = null
+    sweep = null
+    profile = null
+    activeContext.value = null
+    preparedContext = null
+    validationActive.value = false
+    estimatedRemainingSeconds.value = null
+  }
+
+  function markAbortRecoveryFailed(failure: CalibrationAbortRecoveryFailure): CalibrationAbortRecoveryObservation {
+    const current = abortRecovery.value
+    if (current.state === 'idle' || current.state === 'failed') return { kind: 'ignored' }
+    const messageText = formatCalibrationAbortRecoveryFailure(failure)
+    const failed = { state: 'failed' as const, details: current.details, failure }
+    abortRecovery.value = failed
+    clearValidationSessionState()
+    stage.value = 'error'
+    message.value = messageText
+    return { kind: 'failed', details: failed.details, failure }
+  }
+
+  function scheduleAbortRecoveryPoll(resetAttempts = false) {
+    if (resetAttempts) {
+      clearAbortRecoveryPolling()
+    }
+    if (disposed || abortRecoveryPollTimer !== null || !isAbortRecoveryActive(abortRecovery.value.state)) return
+    abortRecoveryPollTimer = setTimeout(() => {
+      abortRecoveryPollTimer = null
+      if (disposed || !isAbortRecoveryActive(abortRecovery.value.state)) return
+      if (!shouldContinueCalibrationAbortRecoveryPoll(abortRecoveryPollAttempts)) {
+        markAbortRecoveryFailed({ kind: 'timeout' })
+        return
+      }
+      abortRecoveryPollAttempts += 1
+      if (connection.isDeviceOnline()) connection.send('state.get')
+      scheduleAbortRecoveryPoll()
+    }, ABORT_RECOVERY_POLL_INTERVAL_MS)
+  }
+
+  function observeAbortRecoverySnapshot(snapshot: CalibrationAbortRecoverySnapshot): CalibrationAbortRecoveryObservation {
+    const current = abortRecovery.value
+    const observation = evaluateCalibrationAbortRecovery(current, snapshot)
+    if (observation.kind === 'failed') return markAbortRecoveryFailed(observation.failure)
+    if (observation.kind !== 'completed') return observation
+    clearValidationSessionState()
+    abortRecovery.value = { state: 'idle' }
+    stage.value = 'error'
+    message.value = observation.details.message
+    return observation
+  }
+
   async function closeCapture() {
     const currentRecorder = recorder
     const currentCapture = capture
@@ -315,6 +390,7 @@ export function useCalibrationSession(connection: Connection) {
     if (!currentSessionId) return
     const current = abortRecovery.value
     const messageText = boundedAbortMessage(text)
+    if (current.state === 'failed') return
     if (current.state !== 'idle') {
       abortRecovery.value = {
         state: current.state,
@@ -333,6 +409,7 @@ export function useCalibrationSession(connection: Connection) {
     const abort = createCalibrationAbortCommand(details.sessionId, details.code, details.message)
     connection.send(abort.type, abort.payload)
     connection.send('state.get')
+    scheduleAbortRecoveryPoll(true)
   }
 
   async function fail(code: CalibrationErrorCode, text: string) {
@@ -898,12 +975,13 @@ export function useCalibrationSession(connection: Connection) {
       preparedContext = null
       validationActive.value = false
       estimatedRemainingSeconds.value = null
-      if (endedMode === 'validation' && endedAbort.state !== 'idle') {
+      if (endedMode === 'validation' && (endedAbort.state === 'pending' || endedAbort.state === 'awaiting-readback')) {
         abortRecovery.value = {
           state: 'awaiting-readback',
           details: endedAbort.details,
         }
         connection.send('state.get')
+        scheduleAbortRecoveryPoll(true)
         stage.value = 'error'
         message.value = endedAbort.details.message
         return
@@ -973,29 +1051,13 @@ export function useCalibrationSession(connection: Connection) {
     message.value = 'Calibration cancelled.'
   }
 
-  function acknowledgeAbortRecovery() {
-    const current = abortRecovery.value
-    if (current.state !== 'pending' && current.state !== 'awaiting-readback') return
-    abortRecovery.value = { state: 'idle' }
-    clearTimeoutTimer()
-    clearPositionKeepAlive()
-    clearSessionKeepAlive()
-    void closeCapture()
-    sessionId = null
-    sweep = null
-    profile = null
-    activeContext.value = null
-    preparedContext = null
-    validationActive.value = false
-    estimatedRemainingSeconds.value = null
-  }
-
   onScopeDispose(() => {
     disposed = true
     off()
     clearTimeoutTimer()
     clearPositionKeepAlive()
     clearSessionKeepAlive()
+    clearAbortRecoveryPolling()
     if (sessionId && abortRecovery.value.state === 'idle') {
       const abort = createCalibrationAbortCommand(sessionId, 'calibration_aborted')
       connection.send(abort.type, abort.payload)
@@ -1052,6 +1114,6 @@ export function useCalibrationSession(connection: Connection) {
     startProbe,
     retryFailedGroups,
     cancel,
-    acknowledgeAbortRecovery,
+    observeAbortRecoverySnapshot,
   }
 }
