@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { MeasurementSweep } from '#shared/types/protocol'
 import golden from '../../../test-vectors/measurement-sweep-golden.json'
-import { generateCompositeSweepStereoReference, generateSweepReference, sweepSampleParts } from './sweep-reference'
+import { generateCompositeSweepStereoReference, generateSweepReference, generateSyncMarker, sweepSampleParts } from './sweep-reference'
 
 const sweep: MeasurementSweep = {
   algorithm: 'exponential-sine-v1',
@@ -25,6 +25,28 @@ const sweep: MeasurementSweep = {
   fadeOutMs: 20,
 }
 
+const androidDefaultSweep: MeasurementSweep = {
+  algorithm: 'exponential-sine-v1',
+  captureKind: 'position-composite',
+  sampleRate: 48_000,
+  startHz: 20,
+  endHz: 20_000,
+  durationMs: 1_500,
+  preRollMs: 500,
+  postRollMs: 500,
+  syncMarkerStartHz: 700,
+  syncMarkerEndHz: 2_600,
+  syncMarkerDurationMs: 150,
+  syncMarkerGapMs: 50,
+  endMarkerStartHz: 3_500,
+  endMarkerEndHz: 1_500,
+  endMarkerDurationMs: 150,
+  interSweepGapMs: 50,
+  levelDbfs: -12,
+  fadeInMs: 20,
+  fadeOutMs: 20,
+}
+
 describe('sweep reference', () => {
   test('uses the reported timing and keeps the preroll silent', () => {
     const parts = sweepSampleParts(sweep)
@@ -36,6 +58,45 @@ describe('sweep reference', () => {
     expect(reference.every(Number.isFinite)).toBe(true)
     const peak = reference.reduce((maximum, sample) => Math.max(maximum, sample), 0)
     expect(peak).toBeLessThanOrEqual(10 ** (-12 / 20) + 0.001)
+  })
+
+  test('keeps the Android calibration marker and sweep layout aligned', () => {
+    const parts = sweepSampleParts(androidDefaultSweep)
+    const reference = generateCompositeSweepStereoReference(androidDefaultSweep)
+
+    expect(parts.syncMarkerSamples).toBe(7_200)
+    expect(parts.endMarkerSamples).toBe(7_200)
+    expect(parts.leadingMarkerStartSamples).toBe(14_400)
+    expect(parts.sweepStartSamples).toBe(24_000)
+    expect(parts.rightSweepStartSamples).toBe(98_400)
+    expect(parts.trailingMarkerStartSamples).toBe(172_800)
+    expect(parts.totalSamples).toBe(204_000)
+    expect(reference.length).toBe(parts.totalSamples * 2)
+
+    const start = generateSyncMarker(androidDefaultSweep, androidDefaultSweep.sampleRate, 'start')
+    const end = generateSyncMarker(androidDefaultSweep, androidDefaultSweep.sampleRate, 'end')
+    const startMidpoint = Math.floor(start.length / 2)
+    const endMidpoint = Math.floor(end.length / 2)
+    expect(reference[(parts.leadingMarkerStartSamples + startMidpoint) * 2]).toBe(start[startMidpoint])
+    expect(reference[(parts.leadingMarkerStartSamples + startMidpoint) * 2 + 1]).toBe(start[startMidpoint])
+    expect(reference[(parts.trailingMarkerStartSamples + endMidpoint) * 2]).toBe(end[endMidpoint])
+    expect(reference[(parts.trailingMarkerStartSamples + endMidpoint) * 2 + 1]).toBe(end[endMidpoint])
+    let leftOnlyFrame = false
+    for (let frame = parts.sweepStartSamples; frame < parts.rightSweepStartSamples; frame++) {
+      if (reference[frame * 2] !== 0 && reference[frame * 2 + 1] === 0) {
+        leftOnlyFrame = true
+        break
+      }
+    }
+    let rightOnlyFrame = false
+    for (let frame = parts.rightSweepStartSamples; frame < parts.trailingMarkerStartSamples; frame++) {
+      if (reference[frame * 2] === 0 && reference[frame * 2 + 1] !== 0) {
+        rightOnlyFrame = true
+        break
+      }
+    }
+    expect(leftOnlyFrame).toBe(true)
+    expect(rightOnlyFrame).toBe(true)
   })
 
   test('matches the deterministic cross-language PCM golden vector', () => {

@@ -319,6 +319,13 @@ export interface MeasurementErrorPayload extends CalibrationSessionPayload {
   message?: string
 }
 
+export type MeasurementSyncMarkerFailureReason =
+  | 'marker_absent'
+  | 'marker_pair_low_confidence'
+  | 'marker_pair_bad_timing'
+  | 'end_marker_missing'
+  | 'clock_drift_unreliable'
+
 export interface MeasurementDiagnosticsValues {
   channel?: 'left' | 'right' | 'both'
   analysisStatus?: 'ok' | 'signal_too_low' | 'sweep_not_found' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
@@ -334,6 +341,14 @@ export interface MeasurementDiagnosticsValues {
   observedMarkerSeparationSamples?: number | null
   syncMarkerConfidence: number
   endingMarkerConfidence: number
+  rawLeadingMarkerConfidence?: number
+  rawTrailingMarkerConfidence?: number
+  bestLeadingMarkerSample?: number | null
+  bestTrailingMarkerSample?: number | null
+  markerPairScore?: number | null
+  markerSeparationError?: number | null
+  markerTimingAgreement?: number | null
+  syncMarkerFailureReason?: MeasurementSyncMarkerFailureReason | null
   clockDriftPpm: number | null
   clipped: boolean
   clippedSamples: number
@@ -902,6 +917,44 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
     && (!('endMarkerSample' in diagnostics) || isNullableFiniteNumber(diagnostics.endMarkerSample))
     && (!('expectedMarkerSeparationSamples' in diagnostics) || isNullableFiniteNumber(diagnostics.expectedMarkerSeparationSamples))
     && (!('observedMarkerSeparationSamples' in diagnostics) || isNullableFiniteNumber(diagnostics.observedMarkerSeparationSamples))
+    && (!('rawLeadingMarkerConfidence' in diagnostics) || (
+      isFiniteNumber(diagnostics.rawLeadingMarkerConfidence)
+      && diagnostics.rawLeadingMarkerConfidence >= 0
+      && diagnostics.rawLeadingMarkerConfidence <= 1
+    ))
+    && (!('rawTrailingMarkerConfidence' in diagnostics) || (
+      isFiniteNumber(diagnostics.rawTrailingMarkerConfidence)
+      && diagnostics.rawTrailingMarkerConfidence >= 0
+      && diagnostics.rawTrailingMarkerConfidence <= 1
+    ))
+    && (!('bestLeadingMarkerSample' in diagnostics) || (
+      isNullableFiniteNumber(diagnostics.bestLeadingMarkerSample)
+      && (diagnostics.bestLeadingMarkerSample === null || diagnostics.bestLeadingMarkerSample >= 0)
+    ))
+    && (!('bestTrailingMarkerSample' in diagnostics) || (
+      isNullableFiniteNumber(diagnostics.bestTrailingMarkerSample)
+      && (diagnostics.bestTrailingMarkerSample === null || diagnostics.bestTrailingMarkerSample >= 0)
+    ))
+    && (!('markerPairScore' in diagnostics) || (
+      isNullableFiniteNumber(diagnostics.markerPairScore)
+      && (diagnostics.markerPairScore === null || (diagnostics.markerPairScore >= 0 && diagnostics.markerPairScore <= 1))
+    ))
+    && (!('markerSeparationError' in diagnostics) || (
+      isNullableFiniteNumber(diagnostics.markerSeparationError)
+      && (diagnostics.markerSeparationError === null || diagnostics.markerSeparationError >= 0)
+    ))
+    && (!('markerTimingAgreement' in diagnostics) || (
+      isNullableFiniteNumber(diagnostics.markerTimingAgreement)
+      && (diagnostics.markerTimingAgreement === null
+        || (diagnostics.markerTimingAgreement >= 0 && diagnostics.markerTimingAgreement <= 1))
+    ))
+    && (!('syncMarkerFailureReason' in diagnostics)
+      || diagnostics.syncMarkerFailureReason === null
+      || diagnostics.syncMarkerFailureReason === 'marker_absent'
+      || diagnostics.syncMarkerFailureReason === 'marker_pair_low_confidence'
+      || diagnostics.syncMarkerFailureReason === 'marker_pair_bad_timing'
+      || diagnostics.syncMarkerFailureReason === 'end_marker_missing'
+      || diagnostics.syncMarkerFailureReason === 'clock_drift_unreliable')
     && (diagnostics.captureMetadata === undefined || isMeasurementCaptureMetadata(diagnostics.captureMetadata))
     && isFiniteNumber(diagnostics.syncMarkerConfidence)
     && diagnostics.syncMarkerConfidence >= 0

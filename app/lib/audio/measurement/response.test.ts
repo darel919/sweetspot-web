@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { MeasurementSweep } from '#shared/types/protocol'
 import { analyzeCompositeMeasurement, analyzeMeasurement, detectSweepStart, normalizeResponsePoints, CLOCK_DRIFT_HARD_REJECT_PPM } from './response'
 import { windowedImpulseResponse } from './impulse'
-import { generateCompositeSweepReference, generateSweepReference, sweepSampleParts } from '../sweep-reference'
+import { generateCompositeSweepReference, generateSweepReference, generateSyncMarker, sweepSampleParts } from '../sweep-reference'
 import { parseMicCalibrationProfile } from '../mics/profile'
 import type { MicCalibrationProfile } from '../mics/types'
 import { calculateCorrection, targetErrorRms, type AggregateResponse } from '../correction/optimizer'
@@ -29,6 +29,28 @@ const sweep: MeasurementSweep = {
   levelDbfs: -12,
   fadeInMs: 10,
   fadeOutMs: 10,
+}
+
+const androidCalibrationSweep: MeasurementSweep = {
+  algorithm: 'exponential-sine-v1',
+  captureKind: 'position-composite',
+  sampleRate: 48_000,
+  startHz: 20,
+  endHz: 20_000,
+  durationMs: 1_500,
+  preRollMs: 500,
+  postRollMs: 500,
+  syncMarkerStartHz: 700,
+  syncMarkerEndHz: 2_600,
+  syncMarkerDurationMs: 150,
+  syncMarkerGapMs: 50,
+  endMarkerStartHz: 3_500,
+  endMarkerEndHz: 1_500,
+  endMarkerDurationMs: 150,
+  interSweepGapMs: 50,
+  levelDbfs: -12,
+  fadeInMs: 20,
+  fadeOutMs: 20,
 }
 
 function generateMeasurementReference(measurementSweep: MeasurementSweep): Float32Array {
@@ -79,6 +101,58 @@ function stretchCapture(samples: Float32Array, ratio: number): Float32Array {
     stretched[index] = (samples[lower] ?? 0) + ((samples[upper] ?? 0) - (samples[lower] ?? 0)) * fraction
   }
   return stretched
+}
+
+function setMarkerCorrelation(
+  capture: Float32Array,
+  measurementSweep: MeasurementSweep,
+  kind: 'start' | 'end',
+  targetCorrelation: number,
+  markerStartOverride?: number,
+): void {
+  const marker = generateSyncMarker(measurementSweep, measurementSweep.sampleRate, kind)
+  const parts = sweepSampleParts(measurementSweep)
+  const start = markerStartOverride ?? (kind === 'start' ? parts.leadingMarkerStartSamples : parts.trailingMarkerStartSamples)
+  const centeredMarker = new Float64Array(marker.length)
+  const markerMean = marker.reduce((sum, value) => sum + value, 0) / marker.length
+  let markerEnergy = 0
+  for (let index = 0; index < marker.length; index++) {
+    const value = marker[index] - markerMean
+    centeredMarker[index] = value
+    markerEnergy += value * value
+  }
+  const noise = new Float64Array(marker.length)
+  let noiseMean = 0
+  for (let index = 0; index < marker.length; index++) {
+    noiseMean += Math.sin(index * 0.731 + (kind === 'start' ? 0.37 : 1.13))
+  }
+  noiseMean /= marker.length
+  let markerNoiseProjection = 0
+  let noiseEnergy = 0
+  for (let index = 0; index < marker.length; index++) {
+    noise[index] = Math.sin(index * 0.731 + (kind === 'start' ? 0.37 : 1.13)) - noiseMean
+    markerNoiseProjection += noise[index] * centeredMarker[index]
+    noiseEnergy += noise[index] * noise[index]
+  }
+  markerNoiseProjection /= markerEnergy
+  noiseEnergy = 0
+  for (let index = 0; index < marker.length; index++) {
+    noise[index] -= markerNoiseProjection * centeredMarker[index]
+    noiseEnergy += noise[index] * noise[index]
+  }
+  const noiseScale = Math.sqrt(markerEnergy * (1 - targetCorrelation ** 2) / (targetCorrelation ** 2 * noiseEnergy))
+  for (let index = 0; index < marker.length; index++) {
+    capture[start + index] = centeredMarker[index] + noise[index] * noiseScale
+  }
+}
+
+function setExactMarker(
+  capture: Float32Array,
+  measurementSweep: MeasurementSweep,
+  kind: 'start' | 'end',
+  markerStart: number,
+): void {
+  capture.set(generateSyncMarker(measurementSweep, measurementSweep.sampleRate, kind), markerStart)
 }
 
 function makeProfile(points: MicCalibrationProfile['points'] = [
@@ -136,6 +210,168 @@ describe('measurement response analysis', () => {
     expect(detection.startSample).toBe(delay + parts.sweepStartSamples)
     expect(detection.trailingMarkerSample).toBe(delay + parts.trailingMarkerStartSamples)
     expect(detection.confidence).toBeGreaterThan(0.8)
+    expect(detection.driftPpm).toBeCloseTo(0, 3)
+  })
+
+  test('accepts moderate acoustic marker correlation when marker timing is exact', () => {
+    const capture = generateMeasurementReference(sweep)
+    setMarkerCorrelation(capture, sweep, 'start', 0.36)
+    setMarkerCorrelation(capture, sweep, 'end', 0.40)
+
+    const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(true)
+    expect(detection.rawLeadingMarkerConfidence).toBeGreaterThan(0.3)
+    expect(detection.rawLeadingMarkerConfidence).toBeLessThan(0.45)
+    expect(detection.rawTrailingMarkerConfidence).toBeGreaterThan(0.35)
+    expect(detection.rawTrailingMarkerConfidence).toBeLessThan(0.45)
+    expect(detection.observedMarkerSeparationSamples).toBe(detection.expectedMarkerSeparationSamples)
+    expect(detection.markerTimingAgreement).toBe(1)
+    expect(detection.confidence).toBeGreaterThan(0)
+  })
+
+  test('accepts field-shaped moderate marker correlations on the Android calibration layout', () => {
+    const parts = sweepSampleParts(androidCalibrationSweep)
+    const capture = generateMeasurementReference(androidCalibrationSweep)
+    setMarkerCorrelation(capture, androidCalibrationSweep, 'start', 0.36)
+    setMarkerCorrelation(capture, androidCalibrationSweep, 'end', 0.40)
+
+    const detection = detectSweepStart(capture, androidCalibrationSweep, androidCalibrationSweep.sampleRate)
+    const analysis = analyzeMeasurement(capture, androidCalibrationSweep.sampleRate, androidCalibrationSweep, profile)
+
+    expect(parts.trailingMarkerStartSamples - parts.leadingMarkerStartSamples).toBe(158_400)
+    expect(detection.found).toBe(true)
+    expect(analysis.status).toBe('ok')
+    expect(detection.leadingMarkerSample).toBe(parts.leadingMarkerStartSamples)
+    expect(detection.trailingMarkerSample).toBe(parts.trailingMarkerStartSamples)
+    expect(detection.expectedMarkerSeparationSamples).toBe(158_400)
+    expect(detection.observedMarkerSeparationSamples).toBe(158_400)
+    expect(detection.rawLeadingMarkerConfidence).toBeGreaterThan(0.3)
+    expect(detection.rawLeadingMarkerConfidence).toBeLessThan(0.45)
+    expect(detection.rawTrailingMarkerConfidence).toBeGreaterThan(0.35)
+    expect(detection.rawTrailingMarkerConfidence).toBeLessThan(0.45)
+    expect(detection.markerSeparationError).toBe(0)
+    expect(detection.markerTimingAgreement).toBe(1)
+  })
+
+  test('rejects moderate marker correlation when the pair timing exceeds the hard drift limit', () => {
+    const capture = generateMeasurementReference(sweep)
+    const parts = sweepSampleParts(sweep)
+    capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
+    setMarkerCorrelation(capture, sweep, 'start', 0.36)
+    setMarkerCorrelation(capture, sweep, 'end', 0.40, parts.trailingMarkerStartSamples + 32)
+
+    const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(false)
+    expect(detection.failureReason).toBe('clock_drift_unreliable')
+    expect(Math.abs(detection.driftPpm ?? 0)).toBeGreaterThan(CLOCK_DRIFT_HARD_REJECT_PPM)
+  })
+
+  test('classifies an ordered marker pair outside the timing search window', () => {
+    const capture = generateMeasurementReference(sweep)
+    const parts = sweepSampleParts(sweep)
+    capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
+    setMarkerCorrelation(capture, sweep, 'start', 0.65)
+    setMarkerCorrelation(capture, sweep, 'end', 0.65, parts.trailingMarkerStartSamples + 100)
+
+    const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(false)
+    expect(detection.failureReason).toBe('marker_pair_bad_timing')
+    expect(Math.abs(detection.driftPpm ?? 0)).toBeGreaterThan(5_000)
+  })
+
+  test('selects the valid temporal pair instead of two stronger independent peaks', () => {
+    const capture = generateMeasurementReference(sweep)
+    const parts = sweepSampleParts(sweep)
+    capture.fill(0, parts.leadingMarkerStartSamples, parts.leadingMarkerStartSamples + parts.syncMarkerSamples)
+    capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
+    setMarkerCorrelation(capture, sweep, 'start', 0.65)
+    setMarkerCorrelation(capture, sweep, 'end', 0.65)
+    setExactMarker(capture, sweep, 'start', 0)
+    setExactMarker(capture, sweep, 'end', parts.trailingMarkerStartSamples + parts.endMarkerSamples + 200)
+
+    const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(true)
+    expect(detection.leadingMarkerSample).toBe(parts.leadingMarkerStartSamples)
+    expect(detection.trailingMarkerSample).toBe(parts.trailingMarkerStartSamples)
+  })
+
+  test('prefers exact timing over a stronger pair near the drift limit', () => {
+    const capture = generateMeasurementReference(sweep)
+    const parts = sweepSampleParts(sweep)
+    capture.fill(0, parts.leadingMarkerStartSamples, parts.sweepStartSamples)
+    capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
+    setMarkerCorrelation(capture, sweep, 'start', 0.36)
+    setMarkerCorrelation(capture, sweep, 'end', 0.40)
+    setMarkerCorrelation(capture, sweep, 'start', 0.90, parts.leadingMarkerStartSamples + 500)
+    setMarkerCorrelation(capture, sweep, 'end', 0.90, parts.trailingMarkerStartSamples + 512)
+
+    const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(true)
+    expect(detection.leadingMarkerSample).toBe(parts.leadingMarkerStartSamples)
+    expect(detection.trailingMarkerSample).toBe(parts.trailingMarkerStartSamples)
+  })
+
+  test('keeps detecting markers through low-level room coloration, reflections, noise, and clock mismatch', () => {
+    const reference = generateMeasurementReference(sweep)
+    const roomImpulse = new Float32Array(32)
+    roomImpulse[0] = 1
+    roomImpulse[5] = 0.25
+    roomImpulse[31] = 0.1
+    const stretched = stretchCapture(convolve(reference, roomImpulse), 1.0005)
+    for (let index = 0; index < stretched.length; index++) {
+      stretched[index] = stretched[index] * 0.35 + Math.sin(index * 0.173) * 0.002
+    }
+
+    const detection = detectSweepStart(stretched, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(true)
+    expect(detection.driftPpm).toBeGreaterThan(200)
+    expect(detection.driftPpm).toBeLessThan(800)
+  })
+
+  test('keeps the Android calibration layout detectable after acoustic degradation', () => {
+    const roomImpulse = new Float32Array(174)
+    roomImpulse[0] = 1
+    roomImpulse[7] = 0.25
+    roomImpulse[61] = 0.12
+    roomImpulse[173] = 0.08
+    const stretched = stretchCapture(
+      convolve(generateMeasurementReference(androidCalibrationSweep), roomImpulse),
+      1.0005,
+    )
+    for (let index = 0; index < stretched.length; index++) {
+      stretched[index] = stretched[index] * 0.35 + Math.sin(index * 0.173) * 0.0015
+    }
+
+    const detection = detectSweepStart(
+      stretched,
+      androidCalibrationSweep,
+      androidCalibrationSweep.sampleRate,
+    )
+
+    expect(detection.found).toBe(true)
+    expect(detection.rawLeadingMarkerConfidence).toBeGreaterThan(0.25)
+    expect(detection.rawTrailingMarkerConfidence).toBeGreaterThan(0.25)
+    expect(detection.driftPpm).toBeGreaterThan(200)
+    expect(detection.driftPpm).toBeLessThan(800)
+  })
+
+  test('scales marker timing for a 44.1 kHz recorder against the Android sweep', () => {
+    const recorderRate = 44_100
+    const recorderCapture = generateSweepReference(androidCalibrationSweep, recorderRate)
+    const recorderParts = sweepSampleParts(androidCalibrationSweep, recorderRate)
+    const detection = detectSweepStart(recorderCapture, androidCalibrationSweep, recorderRate)
+
+    expect(detection.found).toBe(true)
+    expect(detection.expectedMarkerSeparationSamples).toBe(
+      recorderParts.trailingMarkerStartSamples - recorderParts.leadingMarkerStartSamples,
+    )
+    expect(detection.observedMarkerSeparationSamples).toBe(detection.expectedMarkerSeparationSamples)
     expect(detection.driftPpm).toBeCloseTo(0, 3)
   })
 
@@ -328,8 +564,26 @@ describe('measurement response analysis', () => {
 
     expect(result.status).toBe('sync_marker_not_found')
     expect(result.diagnostics.detected).toBe(false)
-    expect(result.diagnostics.endingMarkerConfidence).toBe(0)
+    expect(result.diagnostics.rawLeadingMarkerConfidence).toBeGreaterThan(0.2)
+    expect(result.diagnostics.rawTrailingMarkerConfidence).toBeGreaterThan(0)
+    expect(result.diagnostics.endingMarkerConfidence).toBeGreaterThan(0)
+    expect(result.diagnostics.syncMarkerFailureReason).toBe('end_marker_missing')
     expect(result.correctedPoints).toHaveLength(0)
+  })
+
+  test('retains raw marker peaks when the combined policy rejects them', () => {
+    const capture = generateMeasurementReference(sweep)
+    setMarkerCorrelation(capture, sweep, 'start', 0.24)
+    setMarkerCorrelation(capture, sweep, 'end', 0.26)
+
+    const result = analyzeMeasurement(capture, sweep.sampleRate, sweep, profile)
+
+    expect(result.status).toBe('sync_marker_not_found')
+    expect(result.diagnostics.rawLeadingMarkerConfidence).toBeGreaterThan(0.2)
+    expect(result.diagnostics.rawTrailingMarkerConfidence).toBeGreaterThan(0.2)
+    expect(result.diagnostics.markerPairScore).not.toBeNull()
+    expect(result.diagnostics.markerPairScore).toBeLessThan(0.63)
+    expect(result.diagnostics.syncMarkerFailureReason).toBe('marker_pair_low_confidence')
   })
 
   test('keeps an envelope estimate diagnostic when markers fail without accepting the sweep', () => {

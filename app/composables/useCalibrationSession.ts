@@ -59,6 +59,7 @@ import {
   isCalibrationOperationCurrent,
   isSameMeasurementContext,
 } from '../lib/audio/measurement/session-guard'
+import { hasNewAcceptedEvidence } from '../lib/audio/measurement/response-graph'
 import {
   createCalibrationAbortCommand,
   evaluateCalibrationAbortRecovery,
@@ -743,7 +744,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     }, 25_000)
   }
 
-  function advanceAfterCapture(currentContext: MeasurementContext) {
+  function advanceAfterCapture(currentContext: MeasurementContext, acceptedEvidenceChanged = false) {
     const operationGeneration = sessionGeneration
     const operationSessionId = sessionId
     if (!isCurrentOperation(operationGeneration, operationSessionId)) return
@@ -751,7 +752,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     if (sessionMode === 'validation') rebuildValidationAggregates()
     else rebuildAggregates()
     if (sessionMode === 'measurement') {
-      sendResponseGraph(progress.value.current, progress.value.total)
+      if (acceptedEvidenceChanged) sendResponseGraph(progress.value.current, progress.value.total)
       scheduleAdaptiveNext()
       return
     }
@@ -1092,8 +1093,16 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         endMarkerSample: result.detection.trailingMarkerSample,
         expectedMarkerSeparationSamples: result.detection.expectedMarkerSeparationSamples,
         observedMarkerSeparationSamples: result.detection.observedMarkerSeparationSamples,
-        syncMarkerConfidence: child.diagnostics.detectionConfidence,
+        syncMarkerConfidence: child.diagnostics.rawLeadingMarkerConfidence,
         endingMarkerConfidence: child.diagnostics.endingMarkerConfidence,
+        rawLeadingMarkerConfidence: child.diagnostics.rawLeadingMarkerConfidence,
+        rawTrailingMarkerConfidence: child.diagnostics.rawTrailingMarkerConfidence,
+        bestLeadingMarkerSample: child.diagnostics.bestLeadingMarkerSample,
+        bestTrailingMarkerSample: child.diagnostics.bestTrailingMarkerSample,
+        markerPairScore: child.diagnostics.markerPairScore,
+        markerSeparationError: child.diagnostics.markerSeparationError,
+        markerTimingAgreement: child.diagnostics.markerTimingAgreement,
+        syncMarkerFailureReason: child.diagnostics.syncMarkerFailureReason,
         clockDriftPpm: Number.isFinite(child.diagnostics.clockDriftPpm ?? Number.NaN) ? child.diagnostics.clockDriftPpm : null,
         clipped: child.diagnostics.clipped,
         clippedSamples: child.diagnostics.clippedSamples,
@@ -1188,10 +1197,11 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         acceptedAt: Date.now(),
       })
       const acceptedRecordsInLedger = projectAcceptedRecords(positionLedger)
+      const acceptedEvidenceChanged = hasNewAcceptedEvidence(acceptedChannelsBefore, acceptedRecordsInLedger.length)
       records.value = acceptedRecordsInLedger
       const projected = projectPhysicalPositionLedger(positionLedger)
       const acceptedPositionTotal = projected.positions.filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted').length
-      if (acceptedRecordsInLedger.length > acceptedChannelsBefore) persistPositionCheckpoint()
+      if (acceptedEvidenceChanged) persistPositionCheckpoint()
       previousConvergencePoints = previousAggregatePoints
       analysis.value = result.left.status === 'ok' ? result.left : result.right
       progress.value = { current: acceptedPositionTotal, total: Math.max(progress.value.total, currentPositionCount) }
@@ -1201,7 +1211,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
           : measurementFailureMessage(result.left.status !== 'ok' ? result.left : result.right)
         sendProgress('preparing', message.value)
       }
-      advanceAfterCapture(currentContext)
+      advanceAfterCapture(currentContext, acceptedEvidenceChanged)
     } catch (error: unknown) {
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       await fail('sweep_not_found', error instanceof Error ? error.message : 'Measurement analysis failed.')
