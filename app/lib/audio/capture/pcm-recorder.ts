@@ -34,8 +34,8 @@ interface PcmMessage {
   buffer: ArrayBuffer
 }
 
-interface FlushedMessage {
-  type: 'flushed'
+interface StoppedMessage {
+  type: 'stopped'
 }
 
 function isPcmMessage(value: unknown): value is PcmMessage {
@@ -43,12 +43,8 @@ function isPcmMessage(value: unknown): value is PcmMessage {
   return value.type === 'pcm' && value.buffer instanceof ArrayBuffer && value.buffer.byteLength % 4 === 0
 }
 
-function isFlushedMessage(value: unknown): value is FlushedMessage {
-  return typeof value === 'object' && value !== null && 'type' in value && value.type === 'flushed'
-}
-
-function waitForTurn(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0))
+function isStoppedMessage(value: unknown): value is StoppedMessage {
+  return typeof value === 'object' && value !== null && 'type' in value && value.type === 'stopped'
 }
 
 export interface PcmRecorderOptions {
@@ -80,9 +76,10 @@ class PcmRecorderImpl implements PcmRecorder {
   private node: AudioWorkletNode | null = null
   private silence: GainNode | null = null
   private trackEndedHandler: (() => void) | null = null
-  private flushResolve: (() => void) | null = null
+  private stopResolve: ((drained: boolean) => void) | null = null
   private graphStarted = false
   private windowActive = false
+  private stopPromise: Promise<PcmRecording> | null = null
   private streamSampleCount = 0
   private windowStartSample = 0
 
@@ -92,6 +89,7 @@ class PcmRecorderImpl implements PcmRecorder {
   }
 
   async start(): Promise<void> {
+    if (this.windowActive) return
     if (this.capture.track.readyState === 'ended') {
       this.options.onTrackEnded?.()
       throw new PcmRecorderError('The microphone ended before capture could start.')
@@ -136,8 +134,41 @@ class PcmRecorderImpl implements PcmRecorder {
 
   async stop(): Promise<PcmRecording> {
     if (!this.windowActive) return this.emptyRecording()
-    await this.flush()
-    await waitForTurn()
+    if (this.stopPromise) return this.stopPromise
+    const pending = this.finishStop()
+    this.stopPromise = pending
+    try {
+      return await pending
+    } finally {
+      if (this.stopPromise === pending) this.stopPromise = null
+    }
+  }
+
+  async dispose(): Promise<void> {
+    const pendingStop = this.stopPromise
+    if (pendingStop) {
+      this.stopResolve?.(true)
+      await pendingStop
+    }
+    this.windowActive = false
+    this.chunks.length = 0
+    this.stopResolve = null
+    this.disconnectGraph()
+    if (this.context) {
+      await this.context.close()
+      this.context = null
+    }
+    this.streamSampleCount = 0
+    this.windowStartSample = 0
+  }
+
+  private async finishStop(): Promise<PcmRecording> {
+    const drained = await this.requestStop()
+    if (!drained) {
+      this.windowActive = false
+      this.chunks.length = 0
+      throw new PcmRecorderError('The capture worklet did not finish draining the recording.')
+    }
     this.windowActive = false
     const samples = this.combineChunks()
     const startSample = this.windowStartSample
@@ -150,20 +181,6 @@ class PcmRecorderImpl implements PcmRecorder {
     }
   }
 
-  async dispose(): Promise<void> {
-    this.windowActive = false
-    this.chunks.length = 0
-    this.flushResolve?.()
-    this.flushResolve = null
-    this.disconnectGraph()
-    if (this.context) {
-      await this.context.close()
-      this.context = null
-    }
-    this.streamSampleCount = 0
-    this.windowStartSample = 0
-  }
-
   private onMessage(data: unknown): void {
     if (isPcmMessage(data)) {
       const samples = new Float32Array(data.buffer)
@@ -172,22 +189,22 @@ class PcmRecorderImpl implements PcmRecorder {
       if (this.windowActive) this.chunks.push({ startSample, samples })
       return
     }
-    if (isFlushedMessage(data)) {
-      const resolve = this.flushResolve
-      this.flushResolve = null
-      resolve?.()
+    if (isStoppedMessage(data)) {
+      const resolve = this.stopResolve
+      this.stopResolve = null
+      resolve?.(true)
     }
   }
 
-  private flush(): Promise<void> {
-    if (!this.node) return Promise.resolve()
+  private requestStop(): Promise<boolean> {
+    if (!this.node) return Promise.resolve(true)
     return new Promise((resolve) => {
-      this.flushResolve = resolve
-      this.node?.port.postMessage({ type: 'flush' })
+      this.stopResolve = resolve
+      this.node?.port.postMessage({ type: 'stop' })
       setTimeout(() => {
-        if (this.flushResolve === resolve) {
-          this.flushResolve = null
-          resolve()
+        if (this.stopResolve === resolve) {
+          this.stopResolve = null
+          resolve(false)
         }
       }, 250)
     })

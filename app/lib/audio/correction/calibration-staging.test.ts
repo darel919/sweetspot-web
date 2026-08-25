@@ -13,6 +13,7 @@ const correction = { bandsDb: curve(-2), independent: false }
 
 const eligible: AutomaticCorrectionStageInput = {
   measurementComplete: true,
+  convergenceSufficient: true,
   measurementId: 'measurement-1',
   correction,
   supportsCalibratedCorrection: true,
@@ -22,6 +23,9 @@ const eligible: AutomaticCorrectionStageInput = {
   applyInProgress: false,
   attemptedMeasurementId: null,
   failedMeasurementId: null,
+  unresolvedFailureCount: 0,
+  failedAttemptCount: 0,
+  acceptedPositionCount: 3,
 }
 
 describe('automatic calibration staging guards', () => {

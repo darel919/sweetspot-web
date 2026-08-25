@@ -8,6 +8,7 @@ export interface AutomaticCorrection {
 
 export interface AutomaticCorrectionStageInput {
   measurementComplete: boolean
+  convergenceSufficient: boolean
   measurementId: string | null
   correction: AutomaticCorrection | null
   supportsCalibratedCorrection: boolean
@@ -17,6 +18,9 @@ export interface AutomaticCorrectionStageInput {
   applyInProgress: boolean
   attemptedMeasurementId: string | null
   failedMeasurementId: string | null
+  unresolvedFailureCount: number
+  failedAttemptCount: number
+  acceptedPositionCount: number
 }
 
 function isCorrectionCurve(curve: readonly number[]): boolean {
@@ -34,11 +38,15 @@ export function isValidCorrection(correction: AutomaticCorrection | null): boole
 export function shouldStageAutomaticCorrection(input: AutomaticCorrectionStageInput): boolean {
   const measurementId = input.measurementId
   return input.measurementComplete
+    && input.convergenceSufficient
     && measurementId !== null
     && measurementId.length > 0
     && isValidCorrection(input.correction)
     && input.supportsCalibratedCorrection
     && input.capturePathEligible
+    && input.unresolvedFailureCount === 0
+    && input.failedAttemptCount === 0
+    && input.acceptedPositionCount >= 3
     && input.deviceOnline
     && !input.candidatePending
     && !input.applyInProgress

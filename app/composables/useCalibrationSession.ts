@@ -50,6 +50,9 @@ import {
 } from '../lib/audio/measurement/position-ledger'
 import { decideNextCapture, type ConvergenceAssessment } from '../lib/audio/measurement/adaptive-planner'
 import {
+  CALIBRATION_ANALYSIS_REVISION,
+  CALIBRATION_SWEEP_REVISION,
+  CALIBRATION_WEB_BUILD_SHA,
   checkCalibrationCheckpointCompatibility,
   clearCalibrationCheckpoint,
   createCalibrationCheckpoint,
@@ -66,6 +69,13 @@ import {
   isSameMeasurementContext,
 } from '../lib/audio/measurement/session-guard'
 import { hasNewAcceptedEvidence } from '../lib/audio/measurement/response-graph'
+import { assessAcousticPreflight } from '../lib/audio/measurement/acoustic-preflight'
+import {
+  createCalibrationDebugBundle,
+  createCalibrationDebugCapture,
+  downloadCalibrationDebugBundle,
+  type CalibrationDebugCapture,
+} from '../lib/audio/measurement/debug-bundle'
 import {
   createCalibrationAbortCommand,
   evaluateCalibrationAbortRecovery,
@@ -88,10 +98,13 @@ type Connection = {
 
 interface CalibrationSessionOptions {
   getDeviceIdentity?: () => { id: string; appVersion: string } | null
+  debugCaptureExport?: boolean
 }
 
 const ABORT_RECOVERY_POLL_INTERVAL_MS = 400
-const CAPTURE_TAIL_AFTER_PLAYBACK_MS = 450
+// The Android sweep includes post-roll and measurement.finished is emitted only
+// after AudioTrack consumed it. Keep a small drain margin for the worklet.
+const CAPTURE_TAIL_AFTER_PLAYBACK_MS = 64
 const MAX_MEDIAN_CORRECTION_CHANGE_DB = 1.5
 const MAX_P95_CORRECTION_CHANGE_DB = 3
 
@@ -117,6 +130,13 @@ export const CALIBRATION_ACTIVE_STAGES: readonly CalibrationStage[] = [
   'ending',
 ]
 
+export interface CalibrationTakeDiagnostics {
+  context: MeasurementContext
+  capture: CaptureSignalDiagnostics
+  left: MeasurementDiagnosticsValues
+  right: MeasurementDiagnosticsValues
+}
+
 export function isCalibrationActiveStage(stage: CalibrationStage): boolean {
   return CALIBRATION_ACTIVE_STAGES.includes(stage)
 }
@@ -129,6 +149,9 @@ function newSessionId(): string {
 function analysisErrorCode(status: MeasurementAnalysis['status']): CalibrationErrorCode {
   if (status === 'capture_clipped') return 'capture_clipped'
   if (status === 'sweep_not_found') return 'sweep_not_found'
+  if (status === 'direct_arrival_low_confidence') return 'direct_arrival_low_confidence'
+  if (status === 'impulse_not_found') return 'impulse_not_found'
+  if (status === 'response_not_generated') return 'response_not_generated'
   if (status === 'sync_marker_not_found') return 'sync_marker_not_found'
   if (status === 'clock_drift_unreliable') return 'clock_drift_unreliable'
   if (status === 'capture_too_short') return 'capture_too_short'
@@ -159,6 +182,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   const validationAggregateLeft = shallowRef<AggregateResponse | null>(null)
   const validationAggregateRight = shallowRef<AggregateResponse | null>(null)
   const captureDiagnostics = shallowRef<CaptureSignalDiagnostics | null>(null)
+  const takeDiagnostics = shallowRef<CalibrationTakeDiagnostics[]>([])
   const failedTakeDiagnostics = shallowRef<FailedTakeDiagnostic[]>([])
   const profiles = shallowRef<MicCalibrationProfile[]>([])
   const selectedProfileId = ref('')
@@ -166,6 +190,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   const captureInfo = shallowRef<{
     settings: MicrophoneCapture['settings']
     capabilities: MicrophoneCapture['capabilities']
+    expectedSampleCount?: number
+    expectedDurationMs?: number
   } | null>(null)
   const captureMetadata = shallowRef<MeasurementCaptureMetadata | null>(null)
   const progress = ref({ current: 0, total: 0 })
@@ -178,6 +204,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   const resumeAvailable = ref(false)
   const resumePositionCount = ref(0)
   const resumeMessage = ref('')
+  const convergenceOutcome = ref<'sufficient' | 'bounded' | 'insufficient' | null>(null)
 
   let disposed = false
   let sessionId: string | null = null
@@ -202,13 +229,32 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   let takeStartInFlightGeneration: number | null = null
   let loudnessRequested = false
   let loudnessComplete = false
-  let validationConfirmationUsed = false
+  let preflightCaptureActive = false
+  let preflightStart: Promise<void> | null = null
+  let preflightCompletionStarted = false
+  let sessionSampleRate: number | null = null
+
   let checkpointWriteChain: Promise<void> = Promise.resolve()
   let loadedResumeCheckpoint: CalibrationCheckpoint | null = null
   let previousConvergencePoints: readonly ResponsePoint[] | null = null
+  const debugCaptures: CalibrationDebugCapture[] = []
+  const failedMeasurementAttemptCount = ref(0)
 
+  const countFailedMeasurementAttempts = (ledger: PositionLedger | null): number => ledger?.captures.filter((capture) => {
+    if (capture.context.phase !== 'measurement') return false
+    const channels: readonly ('left' | 'right')[] = capture.context.repairChannel === 'left' || capture.context.repairChannel === 'right'
+      ? [capture.context.repairChannel]
+      : ['left', 'right']
+    return channels.some((channel) => capture[channel].kind === 'rejected')
+  }).length ?? 0
+
+  const acceptedMeasurementPositionCount = computed(() => new Set(records.value.map((record) => record.context.positionId)).size)
   const repeatabilityPassed = computed(() =>
-    allRepeatabilityPassed(aggregateLeft.value) && allRepeatabilityPassed(aggregateRight.value))
+    allRepeatabilityPassed(aggregateLeft.value)
+    && allRepeatabilityPassed(aggregateRight.value)
+    && acceptedMeasurementPositionCount.value >= 3
+    && failedMeasurementAttemptCount.value === 0
+    && failedTakeDiagnostics.value.length === 0)
   const repeatabilitySummaries = computed<RepeatabilitySummary[]>(() => [
     ...(aggregateLeft.value?.repeatability ?? []),
     ...(aggregateRight.value?.repeatability ?? []),
@@ -381,12 +427,16 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       profileSourceDate: currentProfile.sourceDate,
       capturePathStatus: currentProfile.capturePathStatus,
       sampleRate: captureMetadata.value?.sampleRate ?? null,
+      webBuildSha: CALIBRATION_WEB_BUILD_SHA,
+      analysisRevision: CALIBRATION_ANALYSIS_REVISION,
+      sweepRevision: CALIBRATION_SWEEP_REVISION,
     }
   }
 
   async function refreshResumeCheckpoint(): Promise<void> {
     const identity = currentCheckpointIdentity()
     if (!identity) {
+      loadedResumeCheckpoint = null
       resumeAvailable.value = false
       resumePositionCount.value = 0
       return
@@ -395,6 +445,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       const checkpoint = await loadCalibrationCheckpoint(identity.deviceId)
       loadedResumeCheckpoint = checkpoint
       if (!checkpoint) {
+        loadedResumeCheckpoint = null
         resumeAvailable.value = false
         resumePositionCount.value = 0
         resumeMessage.value = ''
@@ -402,6 +453,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       }
       const compatibility = checkCalibrationCheckpointCompatibility(checkpoint, identity)
       if (!compatibility.compatible) {
+        loadedResumeCheckpoint = null
         resumeAvailable.value = false
         resumePositionCount.value = 0
         resumeMessage.value = 'A saved calibration cannot be resumed because the TV or microphone setup has changed.'
@@ -431,6 +483,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         sampleRate: identity.sampleRate,
       },
       captureMetadata: captureMetadata.value,
+      convergenceOutcome: convergenceOutcome.value,
       ledger,
       validationStarted: false,
     })
@@ -452,6 +505,17 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     resumeAvailable.value = false
     resumePositionCount.value = 0
     resumeMessage.value = ''
+  }
+
+  function exportDebugBundle(): void {
+    const exportSessionId = sessionId ?? completedMeasurementId.value
+    if (!options.debugCaptureExport || !exportSessionId || debugCaptures.length === 0) return
+    downloadCalibrationDebugBundle(createCalibrationDebugBundle(exportSessionId, debugCaptures, {
+      tvAppVersion: options.getDeviceIdentity?.()?.appVersion ?? null,
+      webBuildSha: CALIBRATION_WEB_BUILD_SHA,
+      analysisRevision: CALIBRATION_ANALYSIS_REVISION,
+      sweepRevision: CALIBRATION_SWEEP_REVISION,
+    }))
   }
 
   function rebuildAggregates() {
@@ -541,8 +605,11 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
 
   function scheduleAdaptiveNext(): void {
     if (!positionLedger) return
-    const decision = decideNextCapture(projectPhysicalPositionLedger(positionLedger), assessConvergence())
+    const convergence = assessConvergence()
+    const decision = decideNextCapture(projectPhysicalPositionLedger(positionLedger), convergence)
     if (decision.kind === 'finish') {
+      convergenceOutcome.value = decision.outcome
+      persistPositionCheckpoint()
       if (decision.outcome === 'insufficient') {
         void fail(
           'measurement_unstable',
@@ -917,7 +984,11 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       validationAggregateRight.value = null
     }
     captureDiagnostics.value = null
-    failedTakeDiagnostics.value = []
+    if (!resumingMeasurement) {
+      takeDiagnostics.value = []
+      failedTakeDiagnostics.value = []
+      debugCaptures.length = 0
+    }
     captureInfo.value = null
     captureMetadata.value = null
     plan = mode === 'validation'
@@ -940,7 +1011,12 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     preparedContext = null
     loudnessRequested = false
     loudnessComplete = false
-    validationConfirmationUsed = false
+    preflightCaptureActive = false
+    preflightStart = null
+    preflightCompletionStarted = false
+    sessionSampleRate = null
+    failedMeasurementAttemptCount.value = 0
+    convergenceOutcome.value = null
     stage.value = 'requesting-microphone'
     message.value = 'Loading microphone profiles…'
     try {
@@ -952,7 +1028,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       if (resumingMeasurement && resumeCheckpoint) {
         const identity = currentCheckpointIdentity()
         const compatibility = identity
-          ? checkCalibrationCheckpointCompatibility(resumeCheckpoint, identity)
+          ? checkCalibrationCheckpointCompatibility(resumeCheckpoint, identity, { requireSampleRate: true })
           : { compatible: false as const, reason: 'device' as const }
         if (!compatibility.compatible) {
           resumeAvailable.value = false
@@ -965,6 +1041,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         positionLedger = resumingMeasurement && resumeCheckpoint
           ? { ...resumeCheckpoint.ledger, sessionId }
           : createPositionLedger(sessionId)
+        convergenceOutcome.value = resumingMeasurement && resumeCheckpoint ? resumeCheckpoint.convergenceOutcome : null
+        failedMeasurementAttemptCount.value = countFailedMeasurementAttempts(positionLedger)
         records.value = projectAcceptedRecords(positionLedger)
         rebuildAggregates()
         if (resumingMeasurement && positionLedger) {
@@ -1023,9 +1101,14 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     void startMode('probe', null, null, kind)
   }
 
-  function retryFailedGroups() {
+  async function retryFailedGroups() {
     if (stage.value !== 'complete' || sessionMode !== 'measurement') return
-    if (failedRepeatabilityGroups.value.length === 0) return
+    if (failedRepeatabilityGroups.value.length === 0 && failedTakeDiagnostics.value.length === 0) return
+    await refreshResumeCheckpoint()
+    if (loadedResumeCheckpoint) {
+      void startMode('measurement', null, null, null, loadedResumeCheckpoint)
+      return
+    }
     void startMode('measurement')
   }
 
@@ -1037,6 +1120,14 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     if (!context || !isMeasurementContext(context)) {
       if (stage.value !== 'preparing') return
       sweep = payload.sweep
+      const parts = sweepSampleParts(sweep, captureInfo.value?.settings.sampleRate ?? sweep.sampleRate)
+      if (captureInfo.value) {
+        captureInfo.value = {
+          ...captureInfo.value,
+          expectedSampleCount: parts.totalSamples,
+          expectedDurationMs: parts.totalSamples * 1000 / (captureInfo.value.settings.sampleRate ?? sweep.sampleRate),
+        }
+      }
       if (sessionMode === 'measurement' && !loudnessRequested) {
         loudnessRequested = true
         stage.value = 'loudness'
@@ -1084,6 +1175,11 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       const sampleRate = recording.diagnostics.sampleRate > 0
         ? recording.diagnostics.sampleRate
         : currentSweep.sampleRate
+      if (sessionSampleRate !== null && Math.abs(sampleRate - sessionSampleRate) > 1) {
+        await fail('capture_sample_rate_changed', `Microphone sample rate changed from ${sessionSampleRate} Hz to ${sampleRate} Hz during calibration.`)
+        return
+      }
+      sessionSampleRate ??= sampleRate
       if (captureMetadata.value) {
         captureMetadata.value = {
           ...captureMetadata.value,
@@ -1093,9 +1189,58 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
           trackChannelCount: captureMetadata.value.trackChannelCount ?? captureMetadata.value.channelCount,
         }
       }
+      if (captureInfo.value) {
+        const expectedParts = sweepSampleParts(currentSweep, sampleRate)
+        captureInfo.value = {
+          ...captureInfo.value,
+          expectedSampleCount: expectedParts.totalSamples,
+          expectedDurationMs: expectedParts.totalSamples * 1000 / sampleRate,
+          settings: {
+            ...captureInfo.value.settings,
+            sampleRate,
+            channelCount: recording.diagnostics.channelCount,
+          },
+        }
+      }
       if (!currentProfile) throw new Error('Microphone calibration profile is unavailable.')
+      const debugCaptureIndex = options.debugCaptureExport
+        ? debugCaptures.push(createCalibrationDebugCapture({
+          context: currentContext,
+          samples: recording.samples,
+          sampleRate,
+          channelCount: recording.diagnostics.channelCount,
+          startSample: recording.startSample,
+          endSample: recording.endSample,
+          captureMetadata: captureMetadata.value,
+          signalDiagnostics: recording.diagnostics,
+          analysisStatus: null,
+          analysisDiagnostics: null,
+          responsePoints: null,
+          sweep: currentSweep,
+          microphoneProfile: currentProfile,
+          plannerState: { convergenceOutcome: convergenceOutcome.value },
+          positionLedger: positionLedger ? projectPhysicalPositionLedger(positionLedger) : null,
+        })) - 1
+        : -1
       const result = await analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile)
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
+      if (debugCaptureIndex >= 0) {
+        const debugCapture = debugCaptures[debugCaptureIndex]
+        if (debugCapture) debugCaptures[debugCaptureIndex] = {
+          ...debugCapture,
+          analysisStatus: `${result.left.status}/${result.right.status}`,
+          analysisDiagnostics: {
+            left: result.left.diagnostics as unknown as Record<string, unknown>,
+            right: result.right.diagnostics as unknown as Record<string, unknown>,
+          },
+          responsePoints: {
+            left: result.left.displayPoints,
+            right: result.right.displayPoints,
+          },
+          plannerState: { convergenceOutcome: convergenceOutcome.value },
+          positionLedger: positionLedger ? projectPhysicalPositionLedger(positionLedger) : null,
+        }
+      }
       const diagnosticsFor = (child: MeasurementAnalysis, channel: 'left' | 'right'): MeasurementDiagnosticsValues => ({
         channel,
         analysisStatus: child.status,
@@ -1124,6 +1269,13 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         clipped: child.diagnostics.clipped,
         clippedSamples: child.diagnostics.clippedSamples,
         directArrivalMs: child.room?.directArrivalMs ?? null,
+        directPeak: child.diagnostics.directPeak ?? child.impulse?.directArrival.directPeak ?? null,
+        deconvolvedNoiseFloorRms: child.diagnostics.deconvolvedNoiseFloorRms ?? child.impulse?.directArrival.noiseFloorRms ?? null,
+        directPeakToNoiseDb: child.diagnostics.directPeakToNoiseDb ?? child.impulse?.directArrival.peakToNoiseDb ?? null,
+        directArrivalAcceptanceThreshold: child.diagnostics.directArrivalAcceptanceThreshold ?? child.impulse?.directArrival.acceptanceThreshold ?? null,
+        directArrivalCandidateSample: child.diagnostics.directArrivalCandidateSample ?? child.impulse?.directArrival.candidateArrivalIndex ?? null,
+        directArrivalAcceptedSample: child.diagnostics.directArrivalAcceptedSample ?? child.impulse?.directArrival.acceptedArrivalIndex ?? null,
+        directArrivalRejectionReason: child.diagnostics.directArrivalRejectionReason ?? child.impulse?.directArrival.rejectionReason ?? null,
         directToLateDb: child.room?.directToLateDb ?? null,
         c50Db: child.room?.c50Db ?? null,
         c80Db: child.room?.c80Db ?? null,
@@ -1136,7 +1288,16 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       })
       const leftDiagnostics = diagnosticsFor(result.left, 'left')
       const rightDiagnostics = diagnosticsFor(result.right, 'right')
+      takeDiagnostics.value = [...takeDiagnostics.value, {
+        context: currentContext,
+        capture: recording.diagnostics,
+        left: leftDiagnostics,
+        right: rightDiagnostics,
+      }]
       const currentPositionCount = currentContext.positionCount
+      const requiredChannels: readonly ('left' | 'right')[] = currentContext.repairChannel === 'left' || currentContext.repairChannel === 'right'
+        ? [currentContext.repairChannel]
+        : ['left', 'right']
       connection.send('measurement.diagnostics', {
         sessionId: operationSessionId,
         context: currentContext,
@@ -1159,35 +1320,46 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       failedTakeDiagnostics.value = reconcileFailedTakeDiagnostics(
         failedTakeDiagnostics.value,
         currentContext,
-        [
-          { channel: 'left', failed: result.left.status !== 'ok', diagnostics: leftDiagnostics },
-          { channel: 'right', failed: result.right.status !== 'ok', diagnostics: rightDiagnostics },
-        ],
+        requiredChannels.map((channel) => ({
+          channel,
+          failed: result[channel].status !== 'ok',
+          diagnostics: channel === 'left' ? leftDiagnostics : rightDiagnostics,
+        })),
       )
 
       if (sessionMode === 'validation') {
-        const nextRecords = [
-          ...acceptedRecords(result.left, 'left'),
-          ...acceptedRecords(result.right, 'right'),
+        const nextRecords = requiredChannels.flatMap((channel) => acceptedRecords(result[channel], channel))
+        const channelsToReplace = new Set(requiredChannels)
+        validationRecords.value = [
+          ...validationRecords.value.filter((record) =>
+            record.context.positionId !== currentContext.positionId || !channelsToReplace.has(record.channel)),
+          ...nextRecords,
         ]
-        validationRecords.value = [...validationRecords.value, ...nextRecords]
-        validationAnalysis.value = result.left.status === 'ok' ? result.left : result.right
+        const analysisChannel = requiredChannels.find((channel) => result[channel].status === 'ok') ?? requiredChannels[0]
+        validationAnalysis.value = analysisChannel === 'left' ? result.left : result.right
         rebuildValidationAggregates()
-        const hasBothChannels = result.left.status === 'ok' && result.right.status === 'ok'
-        if (!hasBothChannels && !validationConfirmationUsed) {
-          validationConfirmationUsed = true
-          const confirmation = { ...currentContext, attemptIndex: 1 }
+        const hasRequiredChannels = requiredChannels.every((channel) => result[channel].status === 'ok')
+        if (!hasRequiredChannels && currentContext.attemptIndex + 1 < currentContext.attemptCount) {
+          const failedChannel = requiredChannels.find((channel) => result[channel].status !== 'ok')
+          if (!failedChannel) return
+          const confirmation = {
+            ...currentContext,
+            repairChannel: failedChannel,
+            attemptIndex: currentContext.attemptIndex + 1,
+          }
           plan[planIndex] = confirmation
           activeContext.value = confirmation
-          message.value = 'Validation was inconclusive. One confirmation reading will be taken.'
+          message.value = `Validation retry for the ${currentContext.positionId} position. Keep the phone still.`
           sendPrepare(confirmation)
           return
         }
-        if (!hasBothChannels && validationConfirmationUsed) {
-          await fail(analysisErrorCode(result.left.status === 'ok' ? result.right.status : result.left.status), measurementFailureMessage(result.left.status === 'ok' ? result.right : result.left))
+        if (!hasRequiredChannels) {
+          const failedChannel = requiredChannels.find((channel) => result[channel].status !== 'ok')
+          if (!failedChannel) return
+          await fail(analysisErrorCode(result[failedChannel].status), measurementFailureMessage(result[failedChannel]))
           return
         }
-        progress.value = { current: 1, total: 1 }
+        progress.value = { current: Math.min(planIndex + 1, plan.length), total: plan.length }
         advanceAfterCapture(currentContext)
         return
       }
@@ -1216,25 +1388,36 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         captureMetadata: captureMetadata.value,
         acceptedAt: Date.now(),
       })
+      failedMeasurementAttemptCount.value = countFailedMeasurementAttempts(positionLedger)
       const acceptedRecordsInLedger = projectAcceptedRecords(positionLedger)
       const acceptedEvidenceChanged = hasNewAcceptedEvidence(acceptedChannelsBefore, acceptedRecordsInLedger.length)
       records.value = acceptedRecordsInLedger
       const projected = projectPhysicalPositionLedger(positionLedger)
       const acceptedPositionTotal = projected.positions.filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted').length
-      if (acceptedEvidenceChanged) persistPositionCheckpoint()
+      persistPositionCheckpoint()
       previousConvergencePoints = previousAggregatePoints
       analysis.value = result.left.status === 'ok' ? result.left : result.right
       progress.value = { current: acceptedPositionTotal, total: Math.max(progress.value.total, currentPositionCount) }
       if (result.status !== 'ok') {
-        message.value = result.status === 'partial'
-          ? 'Repeating this position. One channel reading was not clear enough.'
-          : measurementFailureMessage(result.left.status !== 'ok' ? result.left : result.right)
+        message.value = result.status === 'partial' && (currentContext.repairChannel === 'left' || currentContext.repairChannel === 'right')
+          ? `The ${currentContext.repairChannel} channel was repaired. Continuing calibration.`
+          : result.status === 'partial'
+            ? 'Repeating this position. One channel reading was not clear enough.'
+            : measurementFailureMessage(currentContext.repairChannel === 'left' ? result.left : result.right)
         sendProgress('preparing', message.value)
       }
       advanceAfterCapture(currentContext, acceptedEvidenceChanged)
     } catch (error: unknown) {
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
-      await fail('sweep_not_found', error instanceof Error ? error.message : 'Measurement analysis failed.')
+      const debugCapture = debugCaptures.at(-1)
+      if (debugCapture?.analysisStatus === null) {
+        debugCaptures[debugCaptures.length - 1] = {
+          ...debugCapture,
+          analysisStatus: 'response_not_generated',
+          analysisDiagnostics: { error: error instanceof Error ? error.message : 'Measurement analysis failed.' },
+        }
+      }
+      await fail('response_not_generated', error instanceof Error ? error.message : 'Measurement analysis failed.')
     }
   }
 
@@ -1257,7 +1440,76 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     if (result.status === 'clock_drift_unreliable') {
       return 'Capture rejected because the TV/browser clock relationship was unreliable. Keep the phone still and retry.'
     }
+    if (result.status === 'direct_arrival_low_confidence' || result.status === 'impulse_not_found') {
+      const ratio = result.diagnostics.directPeakToNoiseDb
+      return ratio == null
+        ? 'Capture synchronized, but the direct acoustic arrival was too weak to trust. Move the phone closer, reduce background noise, and retry.'
+        : `Capture synchronized, but the direct acoustic arrival was too weak to trust (peak/noise ${ratio.toFixed(1)} dB). Move the phone closer or reduce background noise, then retry.`
+    }
+    if (result.status === 'response_not_generated') {
+      return 'The synchronized capture did not produce a usable frequency response. Keep the phone still and retry.'
+    }
     return 'Capture rejected because the sweep was not detected. Keep the phone still and try again.'
+  }
+
+  async function startLoudnessPreflightCapture(): Promise<void> {
+    if (preflightCaptureActive || preflightCompletionStarted || !recorder || stage.value !== 'loudness') return
+    preflightCaptureActive = true
+    try {
+      const start = recorder.start()
+      preflightStart = start
+      await start
+      if (preflightStart === start) preflightStart = null
+      if (disposed || stage.value !== 'loudness') {
+        preflightCaptureActive = false
+        preflightCompletionStarted = false
+        return
+      }
+    } catch (error: unknown) {
+      preflightCaptureActive = false
+      preflightStart = null
+      await fail('calibration_ui_failed', error instanceof Error ? error.message : 'Microphone preflight failed.')
+    }
+  }
+
+  async function completeLoudnessPreflight(): Promise<void> {
+    if (!preflightCaptureActive || preflightCompletionStarted || !recorder || stage.value !== 'loudness') return
+    preflightCompletionStarted = true
+    try {
+      if (preflightStart) await preflightStart
+      if (disposed || stage.value !== 'loudness') {
+        preflightCaptureActive = false
+        preflightCompletionStarted = false
+        return
+      }
+      preflightCaptureActive = false
+      const recording = await recorder.stop()
+      captureDiagnostics.value = recording.diagnostics
+      const preflightSampleRate = recording.diagnostics.sampleRate > 0
+        ? recording.diagnostics.sampleRate
+        : captureInfo.value?.settings.sampleRate ?? sweep?.sampleRate ?? 48_000
+      const preflight = assessAcousticPreflight(recording.samples, preflightSampleRate)
+      const failure = preflight.failure
+      if (failure !== null) {
+        const messageText = failure === 'capture_clipped'
+          ? 'Acoustic preflight clipped. Lower the TV volume or remove nearby noise before continuing.'
+          : failure === 'capture_too_short'
+            ? 'Acoustic preflight ended too early. Keep the TV pink noise running until the check completes.'
+            : 'Acoustic preflight was too quiet. Check the TV route and listening volume before continuing.'
+        await fail(failure, messageText)
+        return
+      }
+      sessionSampleRate = preflightSampleRate
+      preflightCompletionStarted = false
+      loudnessComplete = true
+      stage.value = 'preparing'
+      message.value = 'Level preflight passed. The first center sweep will verify synchronization before the walkaround.'
+      prepareNextContext()
+    } catch (error: unknown) {
+      preflightCaptureActive = false
+      preflightStart = null
+      await fail('calibration_ui_failed', error instanceof Error ? error.message : 'Acoustic preflight failed.')
+    }
   }
 
   function continuePosition() {
@@ -1316,14 +1568,12 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       stage.value = 'loudness'
       message.value = 'Follow the instructions on the TV.'
       sendProgress('loudness')
+      void startLoudnessPreflightCapture()
       return
     }
     if (env.type === 'calibrationSession.loudness.stopped' && sessionId && typeof env.payload === 'object' && env.payload !== null &&
       'sessionId' in env.payload && env.payload.sessionId === sessionId) {
-      loudnessComplete = true
-      stage.value = 'preparing'
-      message.value = 'Follow the instructions on the TV.'
-      prepareNextContext()
+      void completeLoudnessPreflight()
       return
     }
     if (env.type === 'calibrationSession.position.continued'
@@ -1382,9 +1632,12 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         message.value = endedAbort.details.message
         return
       }
-      if (endedMode === 'measurement' && hadAnalysis) {
+      if (endedMode === 'measurement') {
         completedMeasurementId.value = endedSessionId
-        if (positionLedger && acceptedPositionCount(positionLedger) >= 3) clearPersistedCheckpoint()
+        if (hadAnalysis && positionLedger
+          && acceptedPositionCount(positionLedger) >= 3
+          && repeatabilityPassed.value
+          && convergenceOutcome.value === 'sufficient') clearPersistedCheckpoint()
       }
       stage.value = hadAnalysis ? 'complete' : 'idle'
       message.value = hadAnalysis
@@ -1396,7 +1649,9 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
               : `Diagnostic probe repeatability is inconclusive at ${repeatabilityFailureMessage(probeFailedRepeatabilityGroups.value)}.`
             : repeatabilityPassed.value
               ? 'Advanced measurement complete. Review the response and room metrics below.'
-              : `Calibration failed. Measurements were not repeatable at ${repeatabilityFailureMessage(failedRepeatabilityGroups.value)}.`
+              : failedMeasurementAttemptCount.value > 0
+                ? `Calibration needs review. ${failedMeasurementAttemptCount.value} capture attempt${failedMeasurementAttemptCount.value === 1 ? '' : 's'} failed before a retry.`
+                : `Calibration failed. Measurements were not repeatable at ${repeatabilityFailureMessage(failedRepeatabilityGroups.value)}.`
         : 'Calibration cancelled.'
     }
   }
@@ -1459,6 +1714,9 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     validationActive: readonly(validationActive),
     validationFailed: readonly(validationFailed),
     validationCandidateId: readonly(validationCandidateId),
+    convergenceOutcome: readonly(convergenceOutcome),
+    debugCaptureExportEnabled: options.debugCaptureExport === true,
+    exportDebugBundle,
     completedMeasurementId: readonly(completedMeasurementId),
     abortRecovery: readonly(abortRecovery),
     message: readonly(message),
@@ -1472,6 +1730,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     validationAggregateLeft: readonly(validationAggregateLeft),
     validationAggregateRight: readonly(validationAggregateRight),
     repeatabilityPassed,
+    failedMeasurementAttemptCount: readonly(failedMeasurementAttemptCount),
     repeatabilitySummaries: readonly(repeatabilitySummaries),
     failedRepeatabilityGroups: readonly(failedRepeatabilityGroups),
     probeRepeatabilityPassed,
@@ -1484,6 +1743,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     progress: readonly(progress),
     estimatedRemainingSeconds: readonly(estimatedRemainingSeconds),
     captureDiagnostics,
+    takeDiagnostics: readonly(takeDiagnostics),
     failedTakeDiagnostics: readonly(failedTakeDiagnostics),
     captureInfo,
     captureMetadata: readonly(captureMetadata),

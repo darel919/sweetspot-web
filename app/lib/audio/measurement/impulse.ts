@@ -26,6 +26,22 @@ export interface ImpulseSummary {
   impulseLengthSamples: number
   noiseFloorRms: number
   peak: number
+  directArrival: DirectArrivalDiagnostics
+}
+
+export type DirectArrivalRejectionReason =
+  | 'no_candidate'
+  | 'peak_below_noise'
+  | 'candidate_not_sustained'
+
+export interface DirectArrivalDiagnostics {
+  directPeak: number
+  noiseFloorRms: number
+  peakToNoiseDb: number | null
+  acceptanceThreshold: number
+  candidateArrivalIndex: number | null
+  acceptedArrivalIndex: number | null
+  rejectionReason: DirectArrivalRejectionReason | null
 }
 
 export interface ImpulseResponsePoint {
@@ -389,6 +405,9 @@ function findDirectArrival(samples: Float32Array, sampleRate: number, externalNo
   peakIndex: number | null
   noiseRms: number
   peak: number
+  directPeak: number
+  acceptanceThreshold: number
+  rejectionReason: DirectArrivalRejectionReason | null
 } {
   // The causal impulse starts at the trimmed active-sweep boundary. A short
   // tail must not become the noise estimate for the direct path at index zero.
@@ -421,28 +440,77 @@ function findDirectArrival(samples: Float32Array, sampleRate: number, externalNo
       directPeakIndex = index
     }
   }
-  if (directPeakIndex < 0 || directPeak <= Math.max(noiseFloorRms * 6, 1e-7)) {
-    return { index: null, peakIndex: null, noiseRms: noiseFloorRms, peak }
+  const peakGate = Math.max(noiseFloorRms * 6, 1e-7)
+  if (directPeakIndex < 0) {
+    return {
+      index: null,
+      peakIndex: null,
+      noiseRms: noiseFloorRms,
+      peak,
+      directPeak,
+      acceptanceThreshold: peakGate,
+      rejectionReason: 'no_candidate',
+    }
+  }
+  if (directPeak <= peakGate) {
+    return {
+      index: null,
+      peakIndex: directPeakIndex,
+      noiseRms: noiseFloorRms,
+      peak,
+      directPeak,
+      acceptanceThreshold: peakGate,
+      rejectionReason: 'peak_below_noise',
+    }
   }
 
   const threshold = Math.max(directPeak * 0.03, noiseFloorRms * 8, 1e-7)
-  const sustain = Math.max(2, Math.round(sampleRate * 0.001))
+  const supportRadius = Math.max(1, Math.round(sampleRate * 0.0001))
   for (let index = 0; index <= directPeakIndex; index++) {
     const value = Math.abs(samples[index])
     const left = index > 0 ? Math.abs(samples[index - 1]) : value
     const right = index + 1 < searchEnd ? Math.abs(samples[index + 1]) : value
     if (value < left || value < right) continue
     if (value < threshold) continue
-    let sustained = true
-    for (let cursor = index + 1; cursor < Math.min(searchEnd, index + sustain); cursor++) {
-      if (Math.abs(samples[cursor]) < threshold * 0.35) {
-        sustained = false
-        break
-      }
+    const supportStart = Math.max(0, index - supportRadius)
+    const supportEnd = Math.min(searchEnd, index + supportRadius + 1)
+    let supportEnergy = 0
+    for (let cursor = supportStart; cursor < supportEnd; cursor++) {
+      const sample = samples[cursor] ?? 0
+      supportEnergy += sample * sample
     }
-    if (sustained) return { index, peakIndex: directPeakIndex, noiseRms: noiseFloorRms, peak }
+    const supportRms = Math.sqrt(supportEnergy / Math.max(1, supportEnd - supportStart))
+    if (supportRms >= Math.max(noiseFloorRms * 1.5, threshold * 0.05)) return {
+      index,
+      peakIndex: directPeakIndex,
+      noiseRms: noiseFloorRms,
+      peak,
+      directPeak,
+      acceptanceThreshold: threshold,
+      rejectionReason: null,
+    }
   }
-  return { index: directPeakIndex, peakIndex: directPeakIndex, noiseRms: noiseFloorRms, peak }
+  return {
+    index: null,
+    peakIndex: directPeakIndex,
+    noiseRms: noiseFloorRms,
+    peak,
+    directPeak,
+    acceptanceThreshold: threshold,
+    rejectionReason: 'candidate_not_sustained',
+  }
+}
+
+function directArrivalDiagnostics(arrival: ReturnType<typeof findDirectArrival>): DirectArrivalDiagnostics {
+  return {
+    directPeak: arrival.directPeak,
+    noiseFloorRms: arrival.noiseRms,
+    peakToNoiseDb: dbRatio(arrival.directPeak ** 2, arrival.noiseRms ** 2),
+    acceptanceThreshold: arrival.acceptanceThreshold,
+    candidateArrivalIndex: arrival.peakIndex,
+    acceptedArrivalIndex: arrival.index,
+    rejectionReason: arrival.rejectionReason,
+  }
 }
 
 function findEarlyReflections(
@@ -520,6 +588,7 @@ export function summarizeImpulse(samples: Float32Array, sampleRate: number, exte
       impulseLengthSamples: samples.length,
       noiseFloorRms: arrival.noiseRms,
       peak: arrival.peak,
+      directArrival: directArrivalDiagnostics(arrival),
     }
   }
 
@@ -561,6 +630,7 @@ export function summarizeImpulse(samples: Float32Array, sampleRate: number, exte
     impulseLengthSamples: samples.length,
     noiseFloorRms: noiseRms,
     peak: arrival.peak,
+    directArrival: directArrivalDiagnostics(arrival),
   }
 }
 

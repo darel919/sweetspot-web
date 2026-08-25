@@ -69,7 +69,7 @@ export interface SweepDetection {
   failureReason: SyncMarkerFailureReason | null
 }
 
-export type MeasurementAnalysisStatus = 'ok' | 'signal_too_low' | 'sweep_not_found' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
+export type MeasurementAnalysisStatus = 'ok' | 'signal_too_low' | 'sweep_not_found' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
 export type MeasurementAnalysisFailure = Exclude<MeasurementAnalysisStatus, 'ok'>
 
 export interface MeasurementAnalysisDiagnostics {
@@ -97,6 +97,13 @@ export interface MeasurementAnalysisDiagnostics {
   clippedSamples: number
   sampleCount: number
   frequencyPoints: number
+  directPeak?: number | null
+  deconvolvedNoiseFloorRms?: number | null
+  directPeakToNoiseDb?: number | null
+  directArrivalAcceptanceThreshold?: number | null
+  directArrivalCandidateSample?: number | null
+  directArrivalAcceptedSample?: number | null
+  directArrivalRejectionReason?: string | null
   failureReason: MeasurementAnalysisFailure | null
 }
 
@@ -772,6 +779,24 @@ function analyzeMeasurementWindow(
   if (deconvolution.kind === 'capture_too_short') {
     return emptyAnalysis('capture_too_short', micProfile, diagnostics)
   }
+  const directArrival = deconvolution.summary.directArrival
+  const diagnosticsWithDirectArrival: MeasurementAnalysisDiagnostics = {
+    ...diagnostics,
+    directPeak: directArrival.directPeak,
+    deconvolvedNoiseFloorRms: directArrival.noiseFloorRms,
+    directPeakToNoiseDb: directArrival.peakToNoiseDb,
+    directArrivalAcceptanceThreshold: directArrival.acceptanceThreshold,
+    directArrivalCandidateSample: directArrival.candidateArrivalIndex,
+    directArrivalAcceptedSample: directArrival.acceptedArrivalIndex,
+    directArrivalRejectionReason: directArrival.rejectionReason,
+  }
+  if (directArrival.acceptedArrivalIndex === null) {
+    return emptyAnalysis(
+      directArrival.candidateArrivalIndex === null ? 'impulse_not_found' : 'direct_arrival_low_confidence',
+      micProfile,
+      diagnosticsWithDirectArrival,
+    )
+  }
   const rawPoints = normalizeResponsePoints(windowedImpulseResponse(
     deconvolution.samples,
     sampleRate,
@@ -780,7 +805,7 @@ function analyzeMeasurementWindow(
     48,
     deconvolution.summary.noiseFloorRms,
   ))
-  if (rawPoints.length === 0) return emptyAnalysis('sweep_not_found', micProfile, diagnostics)
+  if (rawPoints.length === 0) return emptyAnalysis('response_not_generated', micProfile, diagnosticsWithDirectArrival)
   const correctedPoints = rawPoints.map((point) => ({
     ...point,
     magnitudeDb: point.magnitudeDb + micCompensationDbAtHz(micProfile, point.frequencyHz),
@@ -795,7 +820,7 @@ function analyzeMeasurementWindow(
     impulse: deconvolution.summary,
     micProfile: summarizeMicCalibrationProfile(micProfile),
     diagnostics: {
-      ...diagnostics,
+      ...diagnosticsWithDirectArrival,
       frequencyPoints: correctedPoints.length,
       failureReason: signal.clippedSamples > 0 ? 'capture_clipped' : null,
     },

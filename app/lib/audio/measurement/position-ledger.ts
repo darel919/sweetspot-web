@@ -81,7 +81,7 @@ function failureClass(status: MeasurementAnalysis['status']): CaptureFailureClas
   if (status === 'sync_marker_not_found' || status === 'clock_drift_unreliable' || status === 'capture_too_short') {
     return 'systemic'
   }
-  if (status === 'signal_too_low' || status === 'capture_clipped' || status === 'sweep_not_found') return 'local'
+  if (status === 'signal_too_low' || status === 'capture_clipped' || status === 'sweep_not_found' || status === 'direct_arrival_low_confidence' || status === 'impulse_not_found' || status === 'response_not_generated') return 'local'
   return null
 }
 
@@ -144,8 +144,14 @@ export function appendCompositeCapture(
   }
   const systemicCenterFailure = commit.context.phase === 'measurement'
     && commit.context.positionId === 'center'
-    && !commit.analysis.detection.found
-    && (failureClass(commit.analysis.left.status) === 'systemic' || failureClass(commit.analysis.right.status) === 'systemic')
+    && (failureClass(commit.analysis.left.status) === 'systemic'
+      || failureClass(commit.analysis.right.status) === 'systemic'
+      || commit.analysis.left.status === 'direct_arrival_low_confidence'
+      || commit.analysis.right.status === 'direct_arrival_low_confidence'
+      || commit.analysis.left.status === 'impulse_not_found'
+      || commit.analysis.right.status === 'impulse_not_found'
+      || commit.analysis.left.status === 'response_not_generated'
+      || commit.analysis.right.status === 'response_not_generated')
   return {
     ...ledger,
     captures: [...ledger.captures, capture],

@@ -8,8 +8,9 @@
   "private": true,
   "scripts": {
     "dev": "nuxt dev",
-    "generate": "nuxt generate",
+    "generate": "bun scripts/generate-with-build-id.mjs",
     "generate:measurement-vector": "bun scripts/generate-measurement-sweep-vector.mjs",
+    "replay:calibration": "bun scripts/replay-calibration-debug.mjs",
     "verify:transport": "bun scripts/verify-websocket-only.mjs",
     "deploy": "bun run generate && bunx wrangler deploy",
     "test": "bun test"

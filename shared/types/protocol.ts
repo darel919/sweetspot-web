@@ -242,7 +242,11 @@ export const CALIBRATION_ERROR_CODES = [
   'already_measuring',
   'capture_clipped',
   'capture_too_short',
+  'capture_sample_rate_changed',
   'sweep_not_found',
+  'direct_arrival_low_confidence',
+  'impulse_not_found',
+  'response_not_generated',
   'sync_marker_not_found',
   'clock_drift_unreliable',
   'signal_too_low',
@@ -355,7 +359,7 @@ export type MeasurementSyncMarkerFailureReason =
 
 export interface MeasurementDiagnosticsValues {
   channel?: 'left' | 'right' | 'both'
-  analysisStatus?: 'ok' | 'signal_too_low' | 'sweep_not_found' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
+  analysisStatus?: 'ok' | 'signal_too_low' | 'sweep_not_found' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
   failureReason?: string | null
   signalRms: number
   signalPeak: number
@@ -382,6 +386,13 @@ export interface MeasurementDiagnosticsValues {
   clipped: boolean
   clippedSamples: number
   directArrivalMs: number | null
+  directPeak?: number | null
+  deconvolvedNoiseFloorRms?: number | null
+  directPeakToNoiseDb?: number | null
+  directArrivalAcceptanceThreshold?: number | null
+  directArrivalCandidateSample?: number | null
+  directArrivalAcceptedSample?: number | null
+  directArrivalRejectionReason?: string | null
   directToLateDb: number | null
   c50Db: number | null
   c80Db: number | null
@@ -938,6 +949,9 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
       || diagnostics.analysisStatus === 'ok'
       || diagnostics.analysisStatus === 'signal_too_low'
       || diagnostics.analysisStatus === 'sweep_not_found'
+      || diagnostics.analysisStatus === 'direct_arrival_low_confidence'
+      || diagnostics.analysisStatus === 'impulse_not_found'
+      || diagnostics.analysisStatus === 'response_not_generated'
       || diagnostics.analysisStatus === 'sync_marker_not_found'
       || diagnostics.analysisStatus === 'clock_drift_unreliable'
       || diagnostics.analysisStatus === 'capture_too_short'
@@ -1007,6 +1021,15 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
     && isInteger(diagnostics.clippedSamples)
     && diagnostics.clippedSamples >= 0
     && isNullableFiniteNumber(diagnostics.directArrivalMs)
+    && (!('directPeak' in diagnostics) || isNullableFiniteNumber(diagnostics.directPeak))
+    && (!('deconvolvedNoiseFloorRms' in diagnostics) || isNullableFiniteNumber(diagnostics.deconvolvedNoiseFloorRms))
+    && (!('directPeakToNoiseDb' in diagnostics) || isNullableFiniteNumber(diagnostics.directPeakToNoiseDb))
+    && (!('directArrivalAcceptanceThreshold' in diagnostics) || isNullableFiniteNumber(diagnostics.directArrivalAcceptanceThreshold))
+    && (!('directArrivalCandidateSample' in diagnostics) || isNullableFiniteNumber(diagnostics.directArrivalCandidateSample))
+    && (!('directArrivalAcceptedSample' in diagnostics) || isNullableFiniteNumber(diagnostics.directArrivalAcceptedSample))
+    && (!('directArrivalRejectionReason' in diagnostics)
+      || diagnostics.directArrivalRejectionReason === null
+      || typeof diagnostics.directArrivalRejectionReason === 'string')
     && isNullableFiniteNumber(diagnostics.directToLateDb)
     && isNullableFiniteNumber(diagnostics.c50Db)
     && isNullableFiniteNumber(diagnostics.c80Db)

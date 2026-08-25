@@ -1,9 +1,15 @@
 import { isMeasurementContext, type MeasurementCaptureMetadata, type MeasurementContext } from '../../../../shared/types/protocol'
 import type { PositionLedger } from './position-ledger'
 
-export const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 1 as const
+export const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 2 as const
 export const CALIBRATION_CHECKPOINT_ORIENTATION = 'iphone-upright-bottom-edge-to-tv' as const
 export const CALIBRATION_CHECKPOINT_STORE = 'sweetspot-calibration-checkpoints'
+const configuredBuildSha = import.meta.env.NUXT_PUBLIC_BUILD_SHA
+
+export const CALIBRATION_ANALYSIS_REVISION = 'response-direct-arrival-v2' as const
+export const CALIBRATION_SWEEP_REVISION = 'android-sweep-v1' as const
+export const CALIBRATION_WEB_BUILD_SHA = configuredBuildSha || 'local'
+export type CalibrationConvergenceOutcome = 'sufficient' | 'bounded' | 'insufficient'
 
 export interface CalibrationCheckpointDevice {
   id: string
@@ -22,6 +28,10 @@ export interface CalibrationCheckpoint {
   sessionId: string
   device: CalibrationCheckpointDevice
   microphone: CalibrationCheckpointMicrophone
+  webBuildSha: string
+  analysisRevision: typeof CALIBRATION_ANALYSIS_REVISION
+  sweepRevision: typeof CALIBRATION_SWEEP_REVISION
+  convergenceOutcome: CalibrationConvergenceOutcome | null
   orientation: typeof CALIBRATION_CHECKPOINT_ORIENTATION
   captureMetadata: MeasurementCaptureMetadata | null
   ledger: PositionLedger
@@ -40,13 +50,16 @@ export interface CalibrationCheckpointIdentity {
   profileSourceDate: string
   capturePathStatus: CalibrationCheckpointMicrophone['capturePathStatus']
   sampleRate: number | null
+  webBuildSha: string
+  analysisRevision: typeof CALIBRATION_ANALYSIS_REVISION
+  sweepRevision: typeof CALIBRATION_SWEEP_REVISION
 }
 
 export type CalibrationCheckpointCompatibility =
   | { compatible: true }
   | {
       compatible: false
-      reason: 'schema' | 'device' | 'app-version' | 'microphone-profile' | 'capture-path' | 'sample-rate' | 'orientation' | 'pending-transaction'
+      reason: 'schema' | 'device' | 'app-version' | 'web-build' | 'analysis-revision' | 'sweep-revision' | 'microphone-profile' | 'capture-path' | 'sample-rate' | 'orientation' | 'pending-transaction'
     }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,7 +87,7 @@ function isMeasurementCaptureMetadata(value: unknown): value is MeasurementCaptu
 
 function isMeasurementAnalysis(value: unknown): boolean {
   if (!isRecord(value)) return false
-  const statuses = ['ok', 'signal_too_low', 'sweep_not_found', 'sync_marker_not_found', 'clock_drift_unreliable', 'capture_too_short', 'capture_clipped']
+  const statuses = ['ok', 'signal_too_low', 'sweep_not_found', 'direct_arrival_low_confidence', 'impulse_not_found', 'response_not_generated', 'sync_marker_not_found', 'clock_drift_unreliable', 'capture_too_short', 'capture_clipped']
   return typeof value.status === 'string'
     && statuses.includes(value.status)
     && Array.isArray(value.rawPoints)
@@ -115,6 +128,10 @@ function isCapturePathStatus(value: unknown): value is CalibrationCheckpointMicr
   return value === 'validated' || value === 'provisional' || value === 'unvalidated'
 }
 
+function isCalibrationConvergenceOutcome(value: unknown): value is CalibrationConvergenceOutcome | null {
+  return value === null || value === 'sufficient' || value === 'bounded' || value === 'insufficient'
+}
+
 function isCheckpointLedger(value: unknown): value is PositionLedger {
   return isRecord(value)
     && value.schemaVersion === 2
@@ -148,6 +165,11 @@ export function parseCalibrationCheckpoint(value: unknown): CalibrationCheckpoin
     || typeof value.microphone.sourceDate !== 'string'
     || !isCapturePathStatus(value.microphone.capturePathStatus)
     || !isFiniteOrNull(value.microphone.sampleRate)
+    || typeof value.webBuildSha !== 'string'
+    || value.webBuildSha.length === 0
+    || value.analysisRevision !== CALIBRATION_ANALYSIS_REVISION
+    || value.sweepRevision !== CALIBRATION_SWEEP_REVISION
+    || !isCalibrationConvergenceOutcome(value.convergenceOutcome)
     || value.orientation !== CALIBRATION_CHECKPOINT_ORIENTATION
     || (value.captureMetadata !== null && !isMeasurementCaptureMetadata(value.captureMetadata))
     || !isCheckpointLedger(value.ledger)
@@ -181,6 +203,10 @@ export function createCalibrationCheckpoint(input: {
   sessionId: string
   device: CalibrationCheckpointDevice
   microphone: CalibrationCheckpointMicrophone
+  webBuildSha?: string
+  analysisRevision?: typeof CALIBRATION_ANALYSIS_REVISION
+  sweepRevision?: typeof CALIBRATION_SWEEP_REVISION
+  convergenceOutcome?: CalibrationConvergenceOutcome | null
   captureMetadata: MeasurementCaptureMetadata | null
   ledger: PositionLedger
   correctionState?: CalibrationCheckpoint['correctionState']
@@ -192,6 +218,10 @@ export function createCalibrationCheckpoint(input: {
     sessionId: input.sessionId,
     device: { ...input.device },
     microphone: { ...input.microphone },
+    webBuildSha: input.webBuildSha ?? CALIBRATION_WEB_BUILD_SHA,
+    analysisRevision: input.analysisRevision ?? CALIBRATION_ANALYSIS_REVISION,
+    sweepRevision: input.sweepRevision ?? CALIBRATION_SWEEP_REVISION,
+    convergenceOutcome: input.convergenceOutcome ?? null,
     orientation: CALIBRATION_CHECKPOINT_ORIENTATION,
     captureMetadata: input.captureMetadata ? { ...input.captureMetadata } : null,
     ledger: input.ledger,
@@ -204,6 +234,7 @@ export function createCalibrationCheckpoint(input: {
 export function checkCalibrationCheckpointCompatibility(
   checkpoint: CalibrationCheckpoint,
   expected: CalibrationCheckpointIdentity,
+  options: { requireSampleRate?: boolean } = {},
 ): CalibrationCheckpointCompatibility {
   if (checkpoint.schemaVersion !== CALIBRATION_CHECKPOINT_SCHEMA_VERSION) return { compatible: false, reason: 'schema' }
   if (checkpoint.orientation !== CALIBRATION_CHECKPOINT_ORIENTATION) return { compatible: false, reason: 'orientation' }
@@ -212,13 +243,19 @@ export function checkCalibrationCheckpointCompatibility(
   }
   if (checkpoint.device.id !== expected.deviceId) return { compatible: false, reason: 'device' }
   if (checkpoint.device.appVersion !== expected.appVersion) return { compatible: false, reason: 'app-version' }
+  if (checkpoint.webBuildSha !== expected.webBuildSha) return { compatible: false, reason: 'web-build' }
+  if (checkpoint.analysisRevision !== expected.analysisRevision) return { compatible: false, reason: 'analysis-revision' }
+  if (checkpoint.sweepRevision !== expected.sweepRevision) return { compatible: false, reason: 'sweep-revision' }
   if (checkpoint.microphone.profileId !== expected.profileId || checkpoint.microphone.sourceDate !== expected.profileSourceDate) {
     return { compatible: false, reason: 'microphone-profile' }
   }
   if (checkpoint.microphone.capturePathStatus !== expected.capturePathStatus) return { compatible: false, reason: 'capture-path' }
-  if (checkpoint.microphone.sampleRate !== null && expected.sampleRate !== null
-    && Math.abs(checkpoint.microphone.sampleRate - expected.sampleRate) > 1) {
-    return { compatible: false, reason: 'sample-rate' }
+  if (checkpoint.microphone.sampleRate !== null) {
+    if (expected.sampleRate === null) {
+      if (options.requireSampleRate) return { compatible: false, reason: 'sample-rate' }
+    } else if (Math.abs(checkpoint.microphone.sampleRate - expected.sampleRate) > 1) {
+      return { compatible: false, reason: 'sample-rate' }
+    }
   }
   return { compatible: true }
 }

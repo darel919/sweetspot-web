@@ -24,6 +24,8 @@ export interface RecommendedCorrection {
 
 export interface CalibrationCaptureInfo {
   settings: CaptureTrackSettings
+  expectedSampleCount?: number
+  expectedDurationMs?: number
 }
 
 export interface CalibrationValidationMetrics {

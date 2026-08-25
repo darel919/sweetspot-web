@@ -3,7 +3,7 @@ import type { AggregateResponse, MeasurementRecord, RepeatabilitySummary } from 
 import type { CalibrationPosition } from '~/lib/audio/measurement/plan'
 import type { MeasurementAnalysis } from '~/lib/audio/measurement/response'
 import type { MicCalibrationProfile } from '~/lib/audio/mics/types'
-import type { CalibrationStage } from '~/composables/useCalibrationSession'
+import type { CalibrationStage, CalibrationTakeDiagnostics } from '~/composables/useCalibrationSession'
 import type { CorrectionStrength } from '~/lib/audio/correction/optimizer'
 import type { CalibrationValidationStatus, MeasurementContext, MeasurementDiagnosticsValues, StateSnapshot } from '#shared/types/protocol'
 import ConnectResponseGraph from './ConnectResponseGraph.vue'
@@ -28,12 +28,15 @@ const props = defineProps<{
   measurementAggregateRight: AggregateResponse | null
   measurementValidationAnalysis: MeasurementAnalysis | null
   measurementRepeatabilityPassed: boolean
+  measurementConvergenceOutcome: 'sufficient' | 'bounded' | 'insufficient' | null
   measurementFailedGroups: readonly RepeatabilitySummary[]
   measurementCurrentContext: MeasurementContext | null
   measurementCurrentPosition: CalibrationPosition | null
   measurementProgress: { current: number; total: number }
   measurementCaptureInfo: CalibrationCaptureInfo | null
+  measurementTakeDiagnostics: readonly CalibrationTakeDiagnostics[]
   measurementFailedDiagnostics: ReadonlyArray<{ context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues }>
+  debugCaptureExportEnabled: boolean
   measurementResumeAvailable: boolean
   measurementResumePositionCount: number
   measurementResumeMessage: string
@@ -86,6 +89,7 @@ const emit = defineEmits<{
   (event: 'rollback-calibration'): void
   (event: 'accept-candidate'): void
   (event: 'download-calibration'): void
+  (event: 'export-debug-bundle'): void
   (event: 'import-calibration', file: File): void
 }>()
 
@@ -130,6 +134,11 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
       return 'The reading was too quiet or noisy to trust.'
     case 'sweep_not_found':
       return 'The complete test signal was not clear enough to analyze.'
+    case 'direct_arrival_low_confidence':
+    case 'impulse_not_found':
+      return 'Synchronization succeeded, but the direct acoustic arrival was too weak to trust.'
+    case 'response_not_generated':
+      return 'Synchronization succeeded, but no usable response was generated.'
     default:
       return 'The reading was not clear enough to trust.'
   }
@@ -156,7 +165,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
     <p v-if="selectedCapturePathStatus" class="note">
       Capture profile status:
       {{ selectedCapturePathStatus.toUpperCase() }}.
-      <span v-if="selectedCapturePathStatus !== 'validated'">Automatic correction is enabled, but this capture path has not been independently validated.</span>
+      <span v-if="selectedCapturePathStatus !== 'validated'">Automatic correction is disabled until this capture path is independently validated.</span>
     </p>
     <p v-if="measurementProfileError" class="error">{{ measurementProfileError }}</p>
     <p v-else-if="!measurementProfiles.length" class="note">Loading microphone profiles…</p>
@@ -193,6 +202,9 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
         {{ captureFailureMessage(failure.diagnostics) }}
       </li>
     </ul>
+    <div v-if="debugCaptureExportEnabled" class="actions">
+      <button :disabled="measurementBusy" @click="emit('export-debug-bundle')">Export raw calibration debug bundle</button>
+    </div>
     <p v-if="measurementProgress.total" class="note">
       Positions measured {{ measurementProgress.current }} of {{ measurementProgress.total }}
       <span v-if="measurementCurrentPosition"> · {{ measurementCurrentPosition.label }}</span>
@@ -205,6 +217,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
     <dl v-if="measurementCaptureInfo" class="spec">
       <dt>sample rate</dt><dd>{{ measurementCaptureInfo.settings.sampleRate ?? 'unknown' }} Hz</dd>
       <dt>channels</dt><dd>{{ measurementCaptureInfo.settings.channelCount ?? 'unknown' }}</dd>
+      <dt>expected capture</dt><dd>{{ measurementCaptureInfo.expectedSampleCount ?? 'unknown' }} samples{{ measurementCaptureInfo.expectedDurationMs == null ? '' : ` / ${Math.round(measurementCaptureInfo.expectedDurationMs)} ms` }}</dd>
       <dt>echo cancellation</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.echoCancellation) }}</dd>
       <dt>noise suppression</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.noiseSuppression) }}</dd>
       <dt>auto gain</dt><dd>{{ settingLabel(measurementCaptureInfo.settings.autoGainControl) }}</dd>
@@ -238,6 +251,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
       <dl class="spec">
         <dt>repeatability</dt>
         <dd>{{ measurementRepeatabilityPassed ? 'passed' : 'failed — do not apply correction' }}</dd>
+        <dt>planner convergence</dt><dd>{{ measurementConvergenceOutcome ?? 'not available' }}</dd>
         <dt>left readings</dt><dd>{{ measurementAggregateLeft?.records.length ?? 0 }}</dd>
         <dt>right readings</dt><dd>{{ measurementAggregateRight?.records.length ?? 0 }}</dd>
         <dt>relative L/R broadband level</dt>
@@ -258,6 +272,32 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
           </template>
         </li>
       </ul>
+      <details v-if="measurementTakeDiagnostics.length" class="developer-diagnostics">
+        <summary>Developer diagnostics, {{ measurementTakeDiagnostics.length }} physical take{{ measurementTakeDiagnostics.length === 1 ? '' : 's' }}</summary>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>position</th><th>channel</th><th>attempt</th><th>peak</th><th>SNR</th><th>start marker</th><th>end marker</th><th>drift</th><th>direct ratio</th><th>status</th></tr>
+            </thead>
+            <tbody>
+              <template v-for="take in measurementTakeDiagnostics" :key="`${take.context.positionId}:${take.context.attemptIndex}`">
+                <tr v-for="channel in [take.left, take.right]" :key="`${take.context.positionId}:${take.context.attemptIndex}:${channel.channel}`">
+                  <td>{{ take.context.positionId }}</td>
+                  <td>{{ channel.channel }}</td>
+                  <td>{{ take.context.attemptIndex + 1 }}/{{ take.context.attemptCount }}</td>
+                  <td>{{ channel.signalPeak == null ? 'unknown' : channel.signalPeak.toFixed(3) }}</td>
+                  <td>{{ channel.snrEstimateDb == null ? 'unknown' : `${channel.snrEstimateDb.toFixed(1)} dB` }}</td>
+                  <td>{{ channel.rawLeadingMarkerConfidence == null ? 'unknown' : channel.rawLeadingMarkerConfidence.toFixed(2) }}</td>
+                  <td>{{ channel.rawTrailingMarkerConfidence == null ? 'unknown' : channel.rawTrailingMarkerConfidence.toFixed(2) }}</td>
+                  <td>{{ channel.clockDriftPpm == null ? 'unknown' : `${channel.clockDriftPpm.toFixed(1)} ppm` }}</td>
+                  <td>{{ channel.directPeakToNoiseDb == null ? 'unknown' : `${channel.directPeakToNoiseDb.toFixed(1)} dB` }}</td>
+                  <td>{{ channel.analysisStatus }}</td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </details>
       <p class="note">The curves are separate channel checks. Echo and decay metrics are diagnostic; magnitude EQ cannot remove physical reflections.</p>
       <div class="actions">
         <span class="mini-label">correction strength</span>
@@ -270,7 +310,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
           {{ strength.label }}
         </button>
         <button
-          v-if="measurementFailedGroups.length"
+          v-if="measurementFailedGroups.length || measurementFailedDiagnostics.length"
           :disabled="correctionPending"
           @click="emit('retry-failed-groups')"
         >

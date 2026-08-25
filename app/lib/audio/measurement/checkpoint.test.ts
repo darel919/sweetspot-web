@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  CALIBRATION_ANALYSIS_REVISION,
   CALIBRATION_CHECKPOINT_ORIENTATION,
+  CALIBRATION_SWEEP_REVISION,
+  CALIBRATION_WEB_BUILD_SHA,
   checkCalibrationCheckpointCompatibility,
   createCalibrationCheckpoint,
   parseSerializedCalibrationCheckpoint,
@@ -22,6 +25,18 @@ const checkpoint = createCalibrationCheckpoint({
   savedAt: 123,
 })
 
+const identity = {
+  deviceId: 'tv-1',
+  appVersion: '1.2.3',
+  profileId: 'iphone-test',
+  profileSourceDate: '2026-08-24',
+  capturePathStatus: 'unvalidated' as const,
+  sampleRate: 48_000,
+  webBuildSha: CALIBRATION_WEB_BUILD_SHA,
+  analysisRevision: CALIBRATION_ANALYSIS_REVISION,
+  sweepRevision: CALIBRATION_SWEEP_REVISION,
+}
+
 describe('calibration checkpoint persistence contract', () => {
   test('round-trips the append-only session without raw PCM', () => {
     const serialized = serializeCalibrationCheckpoint(checkpoint)
@@ -40,32 +55,14 @@ describe('calibration checkpoint persistence contract', () => {
 
   test('rejects malformed or incompatible checkpoints before resume', () => {
     expect(parseSerializedCalibrationCheckpoint('{"schemaVersion":1}')).toBeNull()
+    expect(checkCalibrationCheckpointCompatibility(checkpoint, { ...identity, deviceId: 'other-tv' })).toEqual({ compatible: false, reason: 'device' })
     expect(checkCalibrationCheckpointCompatibility(checkpoint, {
-      deviceId: 'other-tv',
-      appVersion: '1.2.3',
-      profileId: 'iphone-test',
-      profileSourceDate: '2026-08-24',
-      capturePathStatus: 'unvalidated',
-      sampleRate: 48_000,
-    })).toEqual({ compatible: false, reason: 'device' })
-    expect(checkCalibrationCheckpointCompatibility(checkpoint, {
-      deviceId: 'tv-1',
-      appVersion: '1.2.3',
+      ...identity,
       profileId: 'different-profile',
-      profileSourceDate: '2026-08-24',
-      capturePathStatus: 'unvalidated',
-      sampleRate: 48_000,
     })).toEqual({ compatible: false, reason: 'microphone-profile' })
     expect(checkCalibrationCheckpointCompatibility({
       ...checkpoint,
       validationStarted: true,
-    }, {
-      deviceId: 'tv-1',
-      appVersion: '1.2.3',
-      profileId: 'iphone-test',
-      profileSourceDate: '2026-08-24',
-      capturePathStatus: 'unvalidated',
-      sampleRate: 48_000,
-    })).toEqual({ compatible: false, reason: 'pending-transaction' })
+    }, identity)).toEqual({ compatible: false, reason: 'pending-transaction' })
   })
 })

@@ -44,12 +44,15 @@
           :measurement-aggregate-right="measurementAggregateRight"
           :measurement-validation-analysis="measurementValidationAnalysis"
           :measurement-repeatability-passed="measurementRepeatabilityPassed"
+          :measurement-convergence-outcome="measurementConvergenceOutcome"
           :measurement-failed-groups="measurementFailedGroups"
           :measurement-current-context="measurementCurrentContext"
           :measurement-current-position="measurementCurrentPosition"
           :measurement-progress="measurementProgress"
           :measurement-capture-info="measurementCaptureInfo"
           :measurement-failed-diagnostics="measurementFailedDiagnostics"
+          :measurement-take-diagnostics="measurementTakeDiagnostics"
+          :debug-capture-export-enabled="debugCaptureExportEnabled"
           :measurement-resume-available="measurementResumeAvailable"
           :measurement-resume-position-count="measurementResumePositionCount"
           :measurement-resume-message="measurementResumeMessage"
@@ -89,6 +92,7 @@
           @rollback-calibration="rollbackCalibration"
           @accept-candidate="acceptCandidate"
           @download-calibration="downloadCalibration"
+          @export-debug-bundle="exportDebugBundle"
           @import-calibration="importCalibration"
         />
 
@@ -227,6 +231,7 @@ const rawCode = computed(() => String(route.params.code ?? ''))
 const codeValid = computed(() => /^[A-Za-z0-9]{6,10}$/.test(rawCode.value.replace(/-/g, '')))
 const codeError = computed(() => !codeValid.value)
 const room = computed(() => rawCode.value.toUpperCase())
+const debugCaptureExportEnabled = computed(() => route.query.debug === '1')
 
 const connection = useSweetSpotConnection('client', () => rawCode.value)
 const { status, deviceOnline, debugLog, connect, send, request, onMessage } = connection
@@ -244,12 +249,15 @@ const {
   validationAggregateLeft: measurementValidationAggregateLeft,
   validationAggregateRight: measurementValidationAggregateRight,
   repeatabilityPassed: measurementRepeatabilityPassed,
+  failedMeasurementAttemptCount: measurementFailedAttemptCount,
+  convergenceOutcome: measurementConvergenceOutcome,
   failedRepeatabilityGroups: measurementFailedGroups,
   currentContext: measurementCurrentContext,
   currentPosition: measurementCurrentPosition,
   progress: measurementProgress,
   estimatedRemainingSeconds: measurementEstimatedRemainingSeconds,
   captureInfo: measurementCaptureInfo,
+  takeDiagnostics: measurementTakeDiagnostics,
   failedTakeDiagnostics: measurementFailedDiagnostics,
   profiles: measurementProfiles,
   selectedProfileId: measurementSelectedProfileId,
@@ -270,6 +278,7 @@ const {
   abortRecovery: measurementAbortRecovery,
   cancel: cancelMeasurement,
   observeAbortRecoverySnapshot,
+  exportDebugBundle,
 } = useCalibrationSession({
   send: connection.send,
   onMessage: connection.onMessage,
@@ -279,6 +288,7 @@ const {
     id: snapshot.value.device.id,
     appVersion: snapshot.value.device.appVersion,
   } : null,
+  debugCaptureExport: debugCaptureExportEnabled.value,
 })
 const candidateTransaction = computed<Extract<CalibrationTransaction, { state: 'candidate_pending' }> | null>(() => {
   const transaction = snapshot.value?.calibration.transaction
@@ -491,6 +501,7 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
   const bandCutoffs = currentSnapshot.calibration.frequenciesHz
   if (bandCutoffs.length !== 64) return null
   if (measurementStage.value !== 'complete' || !measurementRepeatabilityPassed.value) return null
+  if (measurementConvergenceOutcome.value !== 'sufficient') return null
   if (currentSnapshot.capabilities.supportsCalibratedCorrection !== true) return null
   if (!isMicCalibrationProfileEligibleForCorrection(profile)) return null
   const headroomVerified = currentSnapshot.capabilities.supportsHeadroomCompensation === true
@@ -949,11 +960,12 @@ async function sendValidationResultOnce(candidateId: string, outcome: Validation
 }
 
 watch(
-  [measurementStage, measurementCompletedId, recommendedCorrection, measurementRepeatabilityPassed, deviceOnline, correctionPending, candidateTransaction],
-  ([stage, measurementId, correction, repeatabilityPassed, online, applying, transaction]) => {
+  [measurementStage, measurementCompletedId, recommendedCorrection, measurementRepeatabilityPassed, measurementFailedAttemptCount, deviceOnline, correctionPending, candidateTransaction],
+  ([stage, measurementId, correction, repeatabilityPassed, failedAttemptCount, online, applying, transaction]) => {
     const currentSnapshot = snapshot.value
     if (!shouldStageAutomaticCorrection({
       measurementComplete: stage === 'complete' && repeatabilityPassed,
+      convergenceSufficient: measurementConvergenceOutcome.value === 'sufficient',
       measurementId,
       correction,
       supportsCalibratedCorrection: currentSnapshot?.capabilities.supportsCalibratedCorrection === true,
@@ -963,6 +975,9 @@ watch(
       applyInProgress: applying,
       attemptedMeasurementId: automaticStagingMeasurementId.value,
       failedMeasurementId: automaticStagingFailedMeasurementId.value,
+      unresolvedFailureCount: measurementFailedDiagnostics.value.length,
+      failedAttemptCount,
+      acceptedPositionCount: new Set(measurementRecords.value.map((record) => record.context.positionId)).size,
     })) return
     if (!measurementId || !correction) return
     void stageRecommendedCorrectionAutomatically(measurementId, correction)
