@@ -17,6 +17,7 @@ export const CALIBRATION_POSITIONS: readonly [CalibrationPosition, ...Calibratio
 export const MEASUREMENT_CHANNELS: readonly Exclude<CalibrationChannel, 'both'>[] = ['left', 'right']
 export const REPEAT_COUNT = 2
 export const MAX_REPEAT_COUNT = 3
+export const MAX_ATTEMPT_COUNT = 2
 
 export function requiresRemoteContinue(context: Pick<MeasurementContext, 'positionIndex' | 'takeIndex'>): boolean {
   return context.positionIndex > 0 && context.takeIndex === 0
@@ -55,6 +56,8 @@ function contextsForGroups(
     ...group,
     takeIndex,
     takeCount,
+    attemptIndex: 0,
+    attemptCount: MAX_ATTEMPT_COUNT,
     phase,
   })))
 }
@@ -109,6 +112,16 @@ export function createThirdTakeContext(context: MeasurementContext): Measurement
     ...context,
     takeIndex: MAX_REPEAT_COUNT - 1,
     takeCount: MAX_REPEAT_COUNT,
+    attemptIndex: 0,
+    attemptCount: MAX_ATTEMPT_COUNT,
+  }
+}
+
+export function createRetryContext(context: MeasurementContext): MeasurementContext | null {
+  if (context.attemptIndex >= context.attemptCount - 1) return null
+  return {
+    ...context,
+    attemptIndex: context.attemptIndex + 1,
   }
 }
 

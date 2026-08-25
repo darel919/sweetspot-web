@@ -174,6 +174,8 @@ export interface MeasurementContext {
   channel: CalibrationChannel
   takeIndex: number
   takeCount: number
+  attemptIndex: number
+  attemptCount: number
   phase: MeasurementPhase
 }
 
@@ -745,8 +747,11 @@ export function isMeasurementContext(value: unknown): value is MeasurementContex
   if (value.positionIndex >= value.positionCount) return false
   if (!isCalibrationChannel(value.channel)) return false
   if (!isInteger(value.takeIndex) || value.takeIndex < 0 || value.takeIndex >= 16) return false
-  if (!isInteger(value.takeCount) || value.takeCount < 1 || value.takeCount > 8) return false
+  if (!isInteger(value.takeCount) || value.takeCount < 1 || value.takeCount > 3) return false
   if (value.takeIndex >= value.takeCount) return false
+  if (!isInteger(value.attemptIndex) || value.attemptIndex < 0 || value.attemptIndex >= 2) return false
+  if (!isInteger(value.attemptCount) || value.attemptCount < 1 || value.attemptCount > 2) return false
+  if (value.attemptIndex >= value.attemptCount) return false
   return isMeasurementPhase(value.phase)
 }
 

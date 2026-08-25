@@ -45,6 +45,7 @@
           :measurement-validation-analysis="measurementValidationAnalysis"
           :measurement-repeatability-passed="measurementRepeatabilityPassed"
           :measurement-failed-groups="measurementFailedGroups"
+          :measurement-current-context="measurementCurrentContext"
           :measurement-current-position="measurementCurrentPosition"
           :measurement-progress="measurementProgress"
           :measurement-capture-info="measurementCaptureInfo"
@@ -130,6 +131,7 @@
       v-if="calibrationLocked"
       :stage="calibrationOverlayStage"
       :message="calibrationOverlayMessage"
+      :current-context="measurementCurrentContext"
       :progress="measurementProgress"
       :estimated-remaining-seconds="measurementEstimatedRemainingSeconds"
       :can-cancel="canCancelCalibration"
@@ -225,6 +227,7 @@ const {
   validationAggregateRight: measurementValidationAggregateRight,
   repeatabilityPassed: measurementRepeatabilityPassed,
   failedRepeatabilityGroups: measurementFailedGroups,
+  currentContext: measurementCurrentContext,
   currentPosition: measurementCurrentPosition,
   progress: measurementProgress,
   estimatedRemainingSeconds: measurementEstimatedRemainingSeconds,

@@ -29,6 +29,7 @@ const props = defineProps<{
   measurementValidationAnalysis: MeasurementAnalysis | null
   measurementRepeatabilityPassed: boolean
   measurementFailedGroups: readonly RepeatabilitySummary[]
+  measurementCurrentContext: MeasurementContext | null
   measurementCurrentPosition: CalibrationPosition | null
   measurementProgress: { current: number; total: number }
   measurementCaptureInfo: CalibrationCaptureInfo | null
@@ -132,8 +133,8 @@ function curveRange(curve: readonly number[] | undefined): string {
     </div>
     <p v-if="measurementMessage" class="note">{{ measurementMessage }}</p>
     <ul v-if="measurementFailedDiagnostics.length" class="calibration-failures">
-      <li v-for="failure in measurementFailedDiagnostics" :key="`${failure.context.positionId}:${failure.context.channel}:${failure.context.takeIndex}`">
-        Failed {{ failure.context.positionId }} / {{ failure.context.channel }} take {{ failure.context.takeIndex + 1 }}:
+      <li v-for="failure in measurementFailedDiagnostics" :key="`${failure.context.positionId}:${failure.context.channel}:${failure.context.takeIndex}:${failure.context.attemptIndex}`">
+        Failed {{ failure.context.positionId }} / {{ failure.context.channel }} Take {{ failure.context.takeIndex + 1 }}<span v-if="failure.context.attemptIndex > 0"> retry {{ failure.context.attemptIndex }} of {{ failure.context.attemptCount - 1 }}</span>:
         {{ failure.diagnostics.failureReason ?? failure.diagnostics.analysisStatus ?? 'measurement error' }};
         marker {{ failure.diagnostics.syncMarkerConfidence.toFixed(2) }},
         ending marker {{ failure.diagnostics.endingMarkerConfidence.toFixed(2) }},
@@ -145,6 +146,12 @@ function curveRange(curve: readonly number[] | undefined): string {
     <p v-if="measurementProgress.total" class="note">
       Sweep {{ measurementProgress.current }} of {{ measurementProgress.total }}
       <span v-if="measurementCurrentPosition"> · {{ measurementCurrentPosition.label }}</span>
+    </p>
+    <p v-if="measurementCurrentContext" class="note calibration-take" aria-live="polite">
+      Position {{ measurementCurrentContext.positionIndex + 1 }} of {{ measurementCurrentContext.positionCount }} ·
+      {{ measurementCurrentContext.channel === 'both' ? 'both channels' : measurementCurrentContext.channel + ' channel' }} ·
+      Take {{ measurementCurrentContext.takeIndex + 1 }} of {{ measurementCurrentContext.takeCount }}
+      <span v-if="measurementCurrentContext.attemptIndex > 0"> · Retry {{ measurementCurrentContext.attemptIndex }} of {{ measurementCurrentContext.attemptCount - 1 }}</span>
     </p>
 
     <dl v-if="measurementCaptureInfo" class="spec">

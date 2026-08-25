@@ -33,6 +33,8 @@ const context = {
   channel: 'left',
   takeIndex: 0,
   takeCount: 3,
+  attemptIndex: 0,
+  attemptCount: 2,
   phase: 'measurement',
 } as const
 
@@ -61,6 +63,14 @@ describe('measurement protocol boundary', () => {
     expect(validatePayload('measurement.finished', {
       sessionId: 'cal_test',
       context: { ...context, takeIndex: 3 },
+    })).not.toBeNull()
+    expect(validatePayload('measurement.finished', {
+      sessionId: 'cal_test',
+      context: { ...context, attemptIndex: 2 },
+    })).not.toBeNull()
+    expect(validatePayload('measurement.finished', {
+      sessionId: 'cal_test',
+      context: { ...context, takeIndex: 3, takeCount: 4 },
     })).not.toBeNull()
   })
 
@@ -243,6 +253,8 @@ describe('measurement protocol boundary', () => {
         channel: 'left',
         takeIndex: 0,
         takeCount: 2,
+        attemptIndex: 0,
+        attemptCount: 2,
         phase: 'validation',
       },
     })).toBeNull()

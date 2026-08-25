@@ -60,7 +60,7 @@ export type InvalidTakeDecision =
   | { kind: 'retry'; nextAttempts: number }
   | { kind: 'terminal' }
 
-export const MAX_INVALID_TAKE_RETRIES = 2
+export const MAX_INVALID_TAKE_RETRIES = 1
 
 function median(values: number[]): number {
   const sorted = [...values].sort((left, right) => left - right)
@@ -244,6 +244,11 @@ export function decideAdaptiveTake(
   if (groupRecords.some((record) => record.context.takeIndex >= MAX_REPEAT_COUNT - 1)) {
     return { kind: 'not-eligible' }
   }
+  if (groupRecords.length !== 2 || groupRecords.some((record) => record.analysis.status !== 'ok')) {
+    return { kind: 'not-eligible' }
+  }
+  const takeIndices = new Set(groupRecords.map((record) => record.context.takeIndex))
+  if (!takeIndices.has(0) || !takeIndices.has(1)) return { kind: 'not-eligible' }
   const summary = calculateRepeatability(groupRecords)
   if (!summary) return { kind: 'not-eligible' }
   return summary.passed

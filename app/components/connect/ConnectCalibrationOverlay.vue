@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { CalibrationStage } from '~/composables/useCalibrationSession'
+import type { MeasurementContext } from '#shared/types/protocol'
 
 const props = defineProps<{
   stage: CalibrationStage
   message: string
+  currentContext: MeasurementContext | null
   progress: { current: number; total: number }
   estimatedRemainingSeconds: number | null
   canCancel: boolean
@@ -46,6 +48,13 @@ function stageLabel(stage: CalibrationStage): string {
         </p>
         <p class="calibration-progress-time">{{ remainingLabel(props.estimatedRemainingSeconds) }}</p>
       </div>
+
+      <p v-if="props.currentContext" class="calibration-take" aria-live="polite">
+        Position {{ props.currentContext.positionIndex + 1 }} of {{ props.currentContext.positionCount }} ·
+        {{ props.currentContext.channel === 'both' ? 'both channels' : props.currentContext.channel + ' channel' }} ·
+        Take {{ props.currentContext.takeIndex + 1 }} of {{ props.currentContext.takeCount }}
+        <span v-if="props.currentContext.attemptIndex > 0"> · Retry {{ props.currentContext.attemptIndex }} of {{ props.currentContext.attemptCount - 1 }}</span>
+      </p>
 
       <p v-if="props.message" class="calibration-message" aria-live="polite">{{ props.message }}</p>
 

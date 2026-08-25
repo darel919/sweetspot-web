@@ -14,7 +14,7 @@ import { createMeasurementPlan, createMeasurementPlanForGroups, createProbeMeasu
 function record(
   takeIndex: number,
   values: number[],
-  options: Partial<Pick<MeasurementRecord['context'], 'channel' | 'positionId' | 'positionIndex' | 'positionCount' | 'phase' | 'takeCount'>> = {},
+  options: Partial<Pick<MeasurementRecord['context'], 'channel' | 'positionId' | 'positionIndex' | 'positionCount' | 'phase' | 'takeCount' | 'attemptIndex' | 'attemptCount'>> = {},
   status: MeasurementAnalysis['status'] = 'ok',
   signalRms = 0.1,
 ): MeasurementRecord {
@@ -29,7 +29,17 @@ function record(
     diagnostics: { detected: true, detectionOffsetMs: 0, envelopeOnlyOffsetMs: null, detectionConfidence: 1, endingMarkerConfidence: 1, clockDriftPpm: null, signalRms, signalPeak: 0.2, snrEstimateDb: 30, clipped: false, clippedSamples: 0, sampleCount: 10, frequencyPoints: values.length, failureReason: status === 'ok' ? null : status },
   } as MeasurementAnalysis
   return {
-    context: { positionId: options.positionId ?? 'center', positionIndex: options.positionIndex ?? 0, positionCount: options.positionCount ?? 5, channel: options.channel ?? 'left', takeIndex, takeCount: options.takeCount ?? 3, phase: options.phase ?? 'measurement' },
+    context: {
+      positionId: options.positionId ?? 'center',
+      positionIndex: options.positionIndex ?? 0,
+      positionCount: options.positionCount ?? 5,
+      channel: options.channel ?? 'left',
+      takeIndex,
+      takeCount: options.takeCount ?? 3,
+      attemptIndex: options.attemptIndex ?? 0,
+      attemptCount: options.attemptCount ?? 2,
+      phase: options.phase ?? 'measurement',
+    },
     analysis,
   }
 }
@@ -114,6 +124,13 @@ describe('robust spatial aggregation', () => {
 
     const third = validationRecord(2, [4, 4, 4])
     expect(decideAdaptiveTake([first, second, third], third.context)).toEqual({ kind: 'not-eligible' })
+  })
+
+  test('does not schedule an adaptive take when one logical take is invalid', () => {
+    const first = validationRecord(0, [8, 8, 8])
+    const second = validationRecord(1, [], 'capture_too_short')
+
+    expect(decideAdaptiveTake([first, second], second.context)).toEqual({ kind: 'not-eligible' })
   })
 
   test('adjudicates a validation third take when it resolves the first outlier', () => {
@@ -269,7 +286,7 @@ describe('robust spatial aggregation', () => {
 
   test('bounds invalid take retries and never turns an invalid take into a pass', () => {
     expect(decideInvalidTake(0)).toEqual({ kind: 'retry', nextAttempts: 1 })
-    expect(decideInvalidTake(1)).toEqual({ kind: 'retry', nextAttempts: 2 })
+    expect(decideInvalidTake(1)).toEqual({ kind: 'terminal' })
     expect(decideInvalidTake(2)).toEqual({ kind: 'terminal' })
 
     const aggregate = aggregateResponse([

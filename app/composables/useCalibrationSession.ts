@@ -33,6 +33,7 @@ import {
   createMeasurementPlan,
   createMeasurementPlanForGroups,
   createProbeMeasurementPlan,
+  createRetryContext,
   createThirdTakeContext,
   measurementGroupKey,
   positionForContext,
@@ -43,6 +44,10 @@ import {
 import { sweepSampleParts } from '../lib/audio/sweep-reference'
 import { discoverMicCalibrationProfiles } from '../lib/audio/mics/registry'
 import type { MicCalibrationProfile } from '../lib/audio/mics/types'
+import {
+  isCalibrationOperationCurrent,
+  isSameMeasurementContext,
+} from '../lib/audio/measurement/session-guard'
 import {
   createCalibrationAbortCommand,
   evaluateCalibrationAbortRecovery,
@@ -105,22 +110,15 @@ function analysisErrorCode(status: MeasurementAnalysis['status']): CalibrationEr
   return 'signal_too_low'
 }
 
-function isSameContext(left: MeasurementContext | null, right: MeasurementContext | null): boolean {
-  if (!left || !right) return left === right
-  return left.positionId === right.positionId
-    && left.positionIndex === right.positionIndex
-    && left.positionCount === right.positionCount
-    && left.channel === right.channel
-    && left.takeIndex === right.takeIndex
-    && left.takeCount === right.takeCount
-    && left.phase === right.phase
-}
-
 function errorCode(value: unknown): CalibrationErrorCode {
   for (const code of CALIBRATION_ERROR_CODES) {
     if (value === code) return code
   }
   return 'invalid_session'
+}
+
+function isUserCancellationCode(code: CalibrationErrorCode): boolean {
+  return code === 'calibration_aborted' || code === 'calibration_ui_closed'
 }
 
 export function useCalibrationSession(connection: Connection) {
@@ -165,13 +163,14 @@ export function useCalibrationSession(connection: Connection) {
   let sessionKeepAlive: ReturnType<typeof setInterval> | null = null
   let abortRecoveryPollTimer: ReturnType<typeof setTimeout> | null = null
   let abortRecoveryPollAttempts = 0
+  let sessionGeneration = 0
   let plan: MeasurementContext[] = []
   let planIndex = 0
   let sessionMode: 'measurement' | 'validation' | 'probe' = 'measurement'
   let probePlanKind: ProbePlanKind | null = null
   const activeContext = shallowRef<MeasurementContext | null>(null)
   let preparedContext: MeasurementContext | null = null
-  let invalidAttempts = 0
+  let takeStartInFlightGeneration: number | null = null
   let loudnessRequested = false
   let loudnessComplete = false
 
@@ -233,7 +232,10 @@ export function useCalibrationSession(connection: Connection) {
 
   function armTimeout() {
     clearTimeoutTimer()
+    const operationGeneration = sessionGeneration
+    const operationSessionId = sessionId
     timeoutTimer = setTimeout(() => {
+      if (!isCurrentOperation(operationGeneration, operationSessionId)) return
       void fail('measurement_timeout', 'The TV did not finish this measurement in time.')
     }, 70_000)
   }
@@ -252,6 +254,20 @@ export function useCalibrationSession(connection: Connection) {
     if (abortRecoveryPollTimer !== null) clearTimeout(abortRecoveryPollTimer)
     abortRecoveryPollTimer = null
     abortRecoveryPollAttempts = 0
+  }
+
+  function invalidateSessionGeneration(): number {
+    sessionGeneration += 1
+    return sessionGeneration
+  }
+
+  function isCurrentOperation(operationGeneration: number, operationSessionId: string | null): boolean {
+    return !disposed && isCalibrationOperationCurrent(
+      operationGeneration,
+      sessionGeneration,
+      operationSessionId,
+      sessionId,
+    )
   }
 
   function clearValidationSessionState() {
@@ -416,10 +432,12 @@ export function useCalibrationSession(connection: Connection) {
   async function fail(code: CalibrationErrorCode, text: string) {
     const currentSessionId = sessionId
     const ownsValidationAbort = sessionMode === 'validation' && currentSessionId !== null
+    if (!currentSessionId && stage.value === 'error') return
     if (sessionMode === 'validation') {
       validationFailed.value = code !== 'calibration_aborted'
       if (ownsValidationAbort) beginValidationAbort(code, text)
     }
+    const operationGeneration = invalidateSessionGeneration()
     clearTimeoutTimer()
     clearPositionKeepAlive()
     clearSessionKeepAlive()
@@ -428,6 +446,7 @@ export function useCalibrationSession(connection: Connection) {
     }
     if (code === 'calibration_aborted' && !ownsValidationAbort) connection.send('state.get')
     await closeCapture()
+    if (disposed || operationGeneration !== sessionGeneration) return
     if (!ownsValidationAbort) sessionId = null
     sweep = null
     profile = null
@@ -489,14 +508,16 @@ export function useCalibrationSession(connection: Connection) {
   }
 
   function sendPrepare(context: MeasurementContext) {
-    if (!sessionId) return
+    const operationGeneration = sessionGeneration
+    const operationSessionId = sessionId
+    if (!isCurrentOperation(operationGeneration, operationSessionId)) return
     preparedContext = null
     stage.value = 'preparing'
     setPreparingText(context)
     armTimeout()
     sendProgress('preparing')
     connection.send('measurement.prepare', {
-      sessionId,
+      sessionId: operationSessionId,
       channel: context.channel,
       context,
     })
@@ -509,10 +530,12 @@ export function useCalibrationSession(connection: Connection) {
     sendProgress('position-pause', positionForContext(context).instruction)
     activeContext.value = context
     clearPositionKeepAlive()
+    const operationGeneration = sessionGeneration
+    const operationSessionId = sessionId
     positionKeepAlive = setInterval(() => {
-      if (sessionId && preparedContext) {
+      if (isCurrentOperation(operationGeneration, operationSessionId) && preparedContext) {
         connection.send('measurement.prepare', {
-          sessionId,
+          sessionId: operationSessionId,
           channel: preparedContext.channel,
           context: preparedContext,
         })
@@ -525,6 +548,9 @@ export function useCalibrationSession(connection: Connection) {
     addedThirdTake = false,
     notice: string | null = null,
   ) {
+    const operationGeneration = sessionGeneration
+    const operationSessionId = sessionId
+    if (!isCurrentOperation(operationGeneration, operationSessionId)) return
     planIndex++
     if (sessionMode === 'validation') rebuildValidationAggregates()
     else rebuildAggregates()
@@ -549,20 +575,26 @@ export function useCalibrationSession(connection: Connection) {
     }
   }
 
-  async function startTake(context: MeasurementContext) {
-    if (!sessionId || !sweep || !recorder || disposed) return
+  async function startTake(context: MeasurementContext, operationGeneration = sessionGeneration) {
+    const operationSessionId = sessionId
+    if (!isCurrentOperation(operationGeneration, operationSessionId) || !sweep || !recorder) return
+    if (takeStartInFlightGeneration === operationGeneration) return
+    takeStartInFlightGeneration = operationGeneration
     activeContext.value = context
     preparedContext = context
     try {
       await recorder.start()
-      if (disposed || !sessionId) return
+      if (!isCurrentOperation(operationGeneration, operationSessionId)) return
       stage.value = 'recording'
       message.value = 'Follow the instructions on the TV.'
       armTimeout()
       sendProgress('recording')
-      connection.send('measurement.playSweep', { sessionId, context })
+      connection.send('measurement.playSweep', { sessionId: operationSessionId, context })
     } catch (error: unknown) {
+      if (!isCurrentOperation(operationGeneration, operationSessionId)) return
       await fail('calibration_ui_failed', error instanceof Error ? error.message : 'Microphone recording failed.')
+    } finally {
+      if (takeStartInFlightGeneration === operationGeneration) takeStartInFlightGeneration = null
     }
   }
 
@@ -586,8 +618,10 @@ export function useCalibrationSession(connection: Connection) {
 
   async function finishMeasurement() {
     const currentSessionId = sessionId
-    if (!currentSessionId) return
+    const operationGeneration = sessionGeneration
+    if (!isCurrentOperation(operationGeneration, currentSessionId)) return
     await closeCapture()
+    if (!isCurrentOperation(operationGeneration, currentSessionId)) return
     clearTimeoutTimer()
     clearPositionKeepAlive()
     clearSessionKeepAlive()
@@ -656,6 +690,7 @@ export function useCalibrationSession(connection: Connection) {
       message.value = 'A diagnostic probe plan is required.'
       return
     }
+    const operationGeneration = invalidateSessionGeneration()
     validationActive.value = mode === 'validation'
     validationFailed.value = false
     validationCandidateId.value = mode === 'validation' ? candidateId : null
@@ -698,13 +733,16 @@ export function useCalibrationSession(connection: Connection) {
     planIndex = 0
     activeContext.value = null
     preparedContext = null
-    invalidAttempts = 0
     loudnessRequested = false
     loudnessComplete = false
     stage.value = 'requesting-microphone'
     message.value = 'Loading microphone profiles…'
     try {
       await loadAndOpenCapture()
+      if (disposed || operationGeneration !== sessionGeneration) {
+        await closeCapture()
+        return
+      }
       sessionId = newSessionId()
       stage.value = 'preparing'
       message.value = 'Preparing the TV measurement. Follow the instructions on the TV.'
@@ -718,6 +756,7 @@ export function useCalibrationSession(connection: Connection) {
       armSessionKeepAlive()
     } catch (error: unknown) {
       await closeCapture()
+      if (disposed || operationGeneration !== sessionGeneration) return
       sessionId = null
       profile = null
       validationActive.value = false
@@ -748,11 +787,13 @@ export function useCalibrationSession(connection: Connection) {
   }
 
   async function onReady(payload: unknown) {
-    if (!sessionId || !isMeasurementReadyPayload(payload) || payload.sessionId !== sessionId) return
-    sweep = payload.sweep
+    const operationGeneration = sessionGeneration
+    const operationSessionId = sessionId
+    if (!isCurrentOperation(operationGeneration, operationSessionId) || !isMeasurementReadyPayload(payload) || payload.sessionId !== operationSessionId) return
     const context = payload.context
     if (!context || !isMeasurementContext(context)) {
       if (stage.value !== 'preparing') return
+      sweep = payload.sweep
       if (sessionMode === 'measurement' && !loudnessRequested) {
         loudnessRequested = true
         stage.value = 'loudness'
@@ -765,22 +806,27 @@ export function useCalibrationSession(connection: Connection) {
       return
     }
     const wanted = plan[planIndex]
-    if (!wanted || !isSameContext(context, wanted)) return
+    if (!wanted || !isSameMeasurementContext(context, wanted)) return
+    if (stage.value !== 'preparing' && stage.value !== 'position-pause') return
+    sweep = payload.sweep
     preparedContext = context
     if (stage.value === 'position-pause') return
-    await startTake(context)
+    await startTake(context, operationGeneration)
   }
 
   async function onFinished(payload: unknown) {
-    if (stage.value !== 'recording' || !sessionId || !sweep || !activeContext.value) return
-    if (typeof payload !== 'object' || payload === null || !('sessionId' in payload) || payload.sessionId !== sessionId) return
+    const operationGeneration = sessionGeneration
+    const operationSessionId = sessionId
+    if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'recording' || !sweep || !activeContext.value) return
+    if (typeof payload !== 'object' || payload === null || !('sessionId' in payload) || payload.sessionId !== operationSessionId) return
     const context = 'context' in payload && isMeasurementContext(payload.context) ? payload.context : null
-    if (context && !isSameContext(context, activeContext.value)) return
+    if (!context || !isSameMeasurementContext(context, activeContext.value)) return
+    const wanted = plan[planIndex]
+    if (!wanted || !isSameMeasurementContext(context, wanted)) return
     const currentSweep = sweep
     const currentRecorder = recorder
     const currentProfile = profile
     const currentContext = activeContext.value
-    const operationSessionId = sessionId
     if (!currentContext) return
     stage.value = 'analyzing'
     message.value = 'Follow the instructions on the TV.'
@@ -788,7 +834,7 @@ export function useCalibrationSession(connection: Connection) {
     try {
       if (!currentRecorder) throw new Error('Microphone recorder is unavailable.')
       const recording = await currentRecorder.stop()
-      if (sessionId !== operationSessionId || disposed || stage.value !== 'analyzing') return
+      if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       captureDiagnostics.value = recording.diagnostics
       const sampleRate = recording.diagnostics.sampleRate > 0
         ? recording.diagnostics.sampleRate
@@ -804,7 +850,7 @@ export function useCalibrationSession(connection: Connection) {
       }
       if (!currentProfile) throw new Error('Microphone calibration profile is unavailable.')
       const result = await analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile)
-      if (sessionId !== operationSessionId || disposed || stage.value !== 'analyzing') return
+      if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       const nextProgress = { current: progress.value.current + 1, total: progress.value.total }
       const diagnostics: MeasurementDiagnosticsValues = {
         analysisStatus: result.status,
@@ -830,39 +876,37 @@ export function useCalibrationSession(connection: Connection) {
         decayConfidence: result.room?.decayConfidence ?? 'low',
         ...(captureMetadata.value ? { captureMetadata: captureMetadata.value } : {}),
       }
+      if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       connection.send('measurement.diagnostics', {
         sessionId: operationSessionId,
         context: currentContext,
-        current: nextProgress.current,
+        current: result.status === 'ok' ? nextProgress.current : progress.value.current,
         total: nextProgress.total,
         diagnostics,
       })
       if (result.status !== 'ok') {
-        failedTakeDiagnostics.value = [
-          ...failedTakeDiagnostics.value,
-          { context: currentContext, diagnostics },
-        ]
-        const invalidDecision = decideInvalidTake(invalidAttempts)
-        if (invalidDecision.kind === 'retry') {
-          invalidAttempts = invalidDecision.nextAttempts
-          message.value = `This sweep was rejected (${result.status.replaceAll('_', ' ')}). Repeating it…`
-          sendPrepare(currentContext)
+        const invalidDecision = decideInvalidTake(currentContext.attemptIndex)
+        const retryContext = invalidDecision.kind === 'retry' ? createRetryContext(currentContext) : null
+        if (retryContext) {
+          plan[planIndex] = retryContext
+          activeContext.value = retryContext
+          message.value = `${retryContext.positionId} ${retryContext.channel} channel · Take ${retryContext.takeIndex + 1} of ${retryContext.takeCount}\n` +
+            `Retry ${retryContext.attemptIndex} of ${retryContext.attemptCount - 1}\n` +
+            `Previous attempt rejected: ${result.status.replaceAll('_', ' ')}`
+          sendPrepare(retryContext)
           return
         }
         if (sessionMode === 'validation') {
+          failedTakeDiagnostics.value = [...failedTakeDiagnostics.value, { context: currentContext, diagnostics }]
           await fail(analysisErrorCode(result.status), measurementFailureMessage(result))
           return
         }
-        invalidAttempts = 0
+        failedTakeDiagnostics.value = [...failedTakeDiagnostics.value, { context: currentContext, diagnostics }]
         records.value = [...records.value, { context: currentContext, analysis: result }]
-        progress.value = {
-          current: progress.value.current + 1,
-          total: progress.value.total,
-        }
+        progress.value = nextProgress
         advanceAfterTake(currentContext, false, measurementFailureMessage(result))
         return
       }
-      invalidAttempts = 0
       if (sessionMode === 'validation') {
         validationAnalysis.value = result
         validationRecords.value = [...validationRecords.value, { context: currentContext, analysis: result }]
@@ -880,6 +924,7 @@ export function useCalibrationSession(connection: Connection) {
         : null
       advanceAfterTake(currentContext, addedThirdTake, finalGroupNotice)
     } catch (error: unknown) {
+      if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       await fail('sweep_not_found', error instanceof Error ? error.message : 'Measurement analysis failed.')
     }
   }
@@ -912,12 +957,46 @@ export function useCalibrationSession(connection: Connection) {
     void startTake(preparedContext)
   }
 
+  function finishCancelled(text = 'Calibration cancelled.', sendAbort = false) {
+    const currentSessionId = sessionId
+    if (!currentSessionId) {
+      invalidateSessionGeneration()
+      validationFailed.value = false
+      validationActive.value = false
+      stage.value = 'idle'
+      message.value = text
+      return
+    }
+    invalidateSessionGeneration()
+    if (sendAbort) {
+      const abort = createCalibrationAbortCommand(currentSessionId, 'calibration_aborted')
+      connection.send(abort.type, abort.payload)
+      connection.send('state.get')
+    }
+    clearTimeoutTimer()
+    clearPositionKeepAlive()
+    clearSessionKeepAlive()
+    void closeCapture()
+    sessionId = null
+    sweep = null
+    profile = null
+    activeContext.value = null
+    preparedContext = null
+    validationFailed.value = false
+    validationActive.value = false
+    estimatedRemainingSeconds.value = null
+    stage.value = 'idle'
+    message.value = text
+  }
+
   function onMessage(env: Envelope) {
     if (env.type === 'measurement.ready') {
       void onReady(env.payload)
       return
     }
     if (env.type === 'measurement.started' && stage.value === 'recording') {
+      if (!sessionId || !isMeasurementReadyPayload(env.payload) || env.payload.sessionId !== sessionId ||
+        !env.payload.context || !isSameMeasurementContext(env.payload.context, activeContext.value)) return
       message.value = 'Follow the instructions on the TV.'
       return
     }
@@ -942,7 +1021,7 @@ export function useCalibrationSession(connection: Connection) {
       && env.payload.sessionId === sessionId
       && stage.value === 'position-pause'
       && preparedContext !== null
-      && isSameContext(env.payload.context, preparedContext)) {
+      && isSameMeasurementContext(env.payload.context, preparedContext)) {
       continuePosition()
       return
     }
@@ -956,6 +1035,10 @@ export function useCalibrationSession(connection: Connection) {
         ? env.payload.message
         : 'The TV rejected the measurement.'
       const code = 'code' in env.payload ? errorCode(env.payload.code) : 'invalid_session'
+      if (isUserCancellationCode(code) && sessionMode !== 'validation') {
+        finishCancelled('Calibration cancelled.')
+        return
+      }
       void fail(code, text)
       return
     }
@@ -965,6 +1048,7 @@ export function useCalibrationSession(connection: Connection) {
       const endedMode = sessionMode
       const endedAbort = abortRecovery.value
       const hadAnalysis = records.value.length > 0 || validationRecords.value.length > 0
+      invalidateSessionGeneration()
       clearTimeoutTimer()
       clearPositionKeepAlive()
       clearSessionKeepAlive()
@@ -1008,16 +1092,13 @@ export function useCalibrationSession(connection: Connection) {
   function cancel() {
     if (!sessionId) {
       if (abortRecovery.value.state === 'pending' || abortRecovery.value.state === 'awaiting-readback') return
-      validationFailed.value = false
-      validationActive.value = false
-      stage.value = 'idle'
-      message.value = 'Calibration cancelled.'
+      finishCancelled()
       return
     }
-    const currentSessionId = sessionId
     if (sessionMode === 'validation') {
       if (abortRecovery.value.state !== 'idle') return
       beginValidationAbort('calibration_aborted', 'Calibration cancelled.')
+      invalidateSessionGeneration()
       clearTimeoutTimer()
       clearPositionKeepAlive()
       clearSessionKeepAlive()
@@ -1033,27 +1114,12 @@ export function useCalibrationSession(connection: Connection) {
       message.value = 'Waiting for the TV to restore the previous calibration.'
       return
     }
-    const abort = createCalibrationAbortCommand(currentSessionId, 'calibration_aborted')
-    connection.send(abort.type, abort.payload)
-    connection.send('state.get')
-    clearTimeoutTimer()
-    clearPositionKeepAlive()
-    clearSessionKeepAlive()
-    void closeCapture()
-    sessionId = null
-    sweep = null
-    profile = null
-    activeContext.value = null
-    preparedContext = null
-    validationFailed.value = false
-    validationActive.value = false
-    estimatedRemainingSeconds.value = null
-    stage.value = 'idle'
-    message.value = 'Calibration cancelled.'
+    finishCancelled('Calibration cancelled.', true)
   }
 
   onScopeDispose(() => {
     disposed = true
+    invalidateSessionGeneration()
     off()
     clearTimeoutTimer()
     clearPositionKeepAlive()
@@ -1097,6 +1163,7 @@ export function useCalibrationSession(connection: Connection) {
     probeRepeatabilityPassed,
     probeRepeatabilitySummaries: readonly(probeRepeatabilitySummaries),
     probeFailedRepeatabilityGroups: readonly(probeFailedRepeatabilityGroups),
+    currentContext: readonly(activeContext),
     currentPosition,
     currentChannel,
     currentInstruction,
