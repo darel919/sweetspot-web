@@ -18,6 +18,10 @@ export const MEASUREMENT_CHANNELS: readonly Exclude<CalibrationChannel, 'both'>[
 export const REPEAT_COUNT = 2
 export const MAX_REPEAT_COUNT = 3
 
+export function requiresRemoteContinue(context: Pick<MeasurementContext, 'positionIndex' | 'takeIndex'>): boolean {
+  return context.positionIndex > 0 && context.takeIndex === 0
+}
+
 export interface MeasurementGroup {
   positionId: CalibrationPositionId
   positionIndex: number

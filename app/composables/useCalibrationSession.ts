@@ -36,6 +36,7 @@ import {
   createThirdTakeContext,
   measurementGroupKey,
   positionForContext,
+  requiresRemoteContinue,
   type MeasurementGroup,
   type ProbePlanKind,
 } from '../lib/audio/measurement/plan'
@@ -572,7 +573,7 @@ export function useCalibrationSession(connection: Connection) {
       return
     }
     const previous = activeContext.value
-    if (next.requiresRemoteContinue()) {
+    if (requiresRemoteContinue(next)) {
       waitForPosition(next)
       return
     }
