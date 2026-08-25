@@ -22,7 +22,10 @@ export default {
     const path = url.pathname
 
     if (!path.startsWith('/api/')) {
-      return env.ASSETS.fetch(request)
+      const res = await env.ASSETS.fetch(request)
+      const headers = new Headers(res.headers)
+      headers.set('x-robots-tag', 'noindex')
+      return new Response(res.body, { ...res, headers })
     }
 
     const m = path.match(/^\/api\/room\/([A-Za-z0-9-]{6,14})\/ws$/)
