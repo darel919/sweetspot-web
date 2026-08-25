@@ -10,6 +10,7 @@ import {
   connectionStateForDevice,
   type ConnectionState,
 } from './connectionState'
+import { flushPendingEnvelopes } from '../lib/transport/outbox'
 
 const SOCKET_RECONNECT_MIN_MS = 800
 const SOCKET_RECONNECT_MAX_MS = 10_000
@@ -41,6 +42,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   let socket: WebSocket | null = null
   let socketReady = false
   let socketAttempts = 0
+  let pendingEnvelopes: Envelope[] = []
 
   const handlers = new Set<(env: Envelope) => void>()
   const seenMessageIds = new Set<string>()
@@ -81,20 +83,31 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     for (const handler of handlers) handler(env)
   }
 
-  function dispatch(env: Envelope) {
-    if (!socketReady || socket?.readyState !== WebSocket.OPEN) return
+  function dispatch(env: Envelope): boolean {
+    if (!socketReady || socket?.readyState !== WebSocket.OPEN) return false
     try {
       socket.send(JSON.stringify(env))
+      return true
     } catch {
       markConnectionInterrupted()
       socket?.close()
+      return false
     }
+  }
+
+  function flushPending() {
+    pendingEnvelopes = flushPendingEnvelopes(pendingEnvelopes, dispatch, Date.now())
+  }
+
+  function dispatchOrQueue(env: Envelope) {
+    if (dispatch(env) || disposed) return
+    pendingEnvelopes.push(env)
   }
 
   function send(type: string, payload: unknown = {}, replyTo?: string): string {
     const env = makeEnvelope(type, payload, replyTo)
     log('out', JSON.stringify(env))
-    dispatch(env)
+    dispatchOrQueue(env)
     return env.id
   }
 
@@ -107,7 +120,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
         resolve(incoming as Envelope<T>)
       })
       log('out', JSON.stringify(env))
-      dispatch(env)
+      dispatchOrQueue(env)
     })
   }
 
@@ -168,6 +181,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       if (socket !== next || disposed) return
       socketReady = true
       socketAttempts = 0
+      flushPending()
       status.value = 'connecting'
     }
     next.onmessage = (event) => {
@@ -207,6 +221,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     socket?.close()
     socket = null
     socketReady = false
+    pendingEnvelopes = []
     status.value = 'disconnected'
   }
 
