@@ -233,6 +233,11 @@ function curveRange(curve: readonly number[] | undefined): string {
         headroom {{ recommendedCorrection.headroomDb.toFixed(1) }} dB ·
         LF capability −3/−6 dB {{ recommendedCorrection.lfExtension3DbHz?.toFixed(0) ?? 'unknown' }}/{{ recommendedCorrection.lfExtension6DbHz?.toFixed(0) ?? 'unknown' }} Hz
       </p>
+      <p v-if="recommendedCorrection?.sharedLf" class="note">
+        Shared bass correction: active · common correction 20–{{ recommendedCorrection.sharedLf.commonThroughHz.toFixed(0) }} Hz ·
+        stereo transition {{ recommendedCorrection.sharedLf.commonThroughHz.toFixed(0) }}–{{ recommendedCorrection.sharedLf.independentFromHz.toFixed(0) }} Hz ·
+        independent correction above {{ recommendedCorrection.sharedLf.independentFromHz.toFixed(0) }} Hz
+      </p>
       <p v-if="recommendedCorrection && snapshot.capabilities.supportsHeadroomCompensation !== true" class="note">
         TV headroom could not be verified, so positive correction is disabled.
       </p>

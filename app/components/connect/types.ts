@@ -1,4 +1,5 @@
 import type { CorrectionStrength } from '~/lib/audio/correction/optimizer'
+import type { SharedLfAssessment } from '~/lib/audio/correction/shared-lf'
 import type { CaptureTrackSettings } from '~/lib/audio/capture/microphone'
 import type { AggregateResponse } from '~/lib/audio/measurement/aggregation'
 
@@ -13,6 +14,11 @@ export interface RecommendedCorrection {
   lfExtension3DbHz?: number
   lfExtension6DbHz?: number
   lfExtensionConfidence?: number
+  sharedLf?: {
+    commonThroughHz: number
+    independentFromHz: number
+    assessment?: SharedLfAssessment
+  }
 }
 
 export interface CalibrationCaptureInfo {

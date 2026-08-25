@@ -184,6 +184,11 @@ import {
   shouldReportValidationFailure,
 } from '~/lib/audio/correction/calibration-recovery'
 import { shouldStageAutomaticCorrection } from '~/lib/audio/correction/calibration-staging'
+import {
+  assessSharedLfReproduction,
+  blendSharedLfCorrections,
+  DEFAULT_SHARED_LF_POLICY,
+} from '~/lib/audio/correction/shared-lf'
 import type {
   AggregateResponse,
 } from '~/lib/audio/measurement/aggregation'
@@ -447,30 +452,33 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
     strength: correctionStrength.value,
     headroomVerified,
   })
-  const commonBands = mapCorrectionToBandsConservative(common.correction, bandCutoffs)
-  const commonSummary = {
-    ...mappedCorrectionSummary(commonBands),
-    lfExtension3DbHz: common.lfExtension3DbHz,
-    lfExtension6DbHz: common.lfExtension6DbHz,
-    lfExtensionConfidence: common.lfExtensionConfidence,
-  }
   if (!independent || !measurementAggregateLeft.value || !measurementAggregateRight.value) {
+    const commonBands = mapCorrectionToBandsConservative(common.correction, bandCutoffs)
     return {
       bandsDb: commonBands,
       independent: false,
-      ...commonSummary,
+      ...mappedCorrectionSummary(commonBands),
+      lfExtension3DbHz: common.lfExtension3DbHz,
+      lfExtension6DbHz: common.lfExtension6DbHz,
+      lfExtensionConfidence: common.lfExtensionConfidence,
     }
   }
   const left = calculateCorrection(measurementAggregateLeft.value, profile, { strength: correctionStrength.value, headroomVerified })
   const right = calculateCorrection(measurementAggregateRight.value, profile, { strength: correctionStrength.value, headroomVerified })
-  const leftBandsDb = mapCorrectionToBandsConservative(left.correction, bandCutoffs)
-  const rightBandsDb = mapCorrectionToBandsConservative(right.correction, bandCutoffs)
+  const sharedLfCurves = blendSharedLfCorrections(common.correction, left.correction, right.correction)
+  const commonBands = mapCorrectionToBandsConservative(common.correction, bandCutoffs)
+  const leftBandsDb = mapCorrectionToBandsConservative(sharedLfCurves.left, bandCutoffs)
+  const rightBandsDb = mapCorrectionToBandsConservative(sharedLfCurves.right, bandCutoffs)
   const channelSummary = mappedCorrectionSummary([...leftBandsDb, ...rightBandsDb])
   return {
     bandsDb: commonBands,
     leftBandsDb,
     rightBandsDb,
     independent: true,
+    sharedLf: {
+      ...DEFAULT_SHARED_LF_POLICY,
+      assessment: assessSharedLfReproduction(measurementAggregateLeft.value, measurementAggregateRight.value),
+    },
     ...channelSummary,
   }
 })
