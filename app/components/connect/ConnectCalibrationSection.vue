@@ -11,6 +11,7 @@ import type {
   CalibrationValidationStatus,
   CalibrationCaptureInfo,
   CalibrationValidationMetrics,
+  CalibrationResultStatus,
   CorrectionStrengthOption,
   RecommendedCorrection,
 } from './types'
@@ -45,6 +46,9 @@ const props = defineProps<{
   candidatePending: boolean
   candidateValidationStatus: CalibrationValidationStatus | null
   validationReady: boolean
+  calibrationFinalizationPending: boolean
+  calibrationResult: CalibrationResultStatus | null
+  calibrationResultMessage: string
   calJson: string
   calStatus: string
   validationMetrics: CalibrationValidationMetrics | null
@@ -59,8 +63,6 @@ const emit = defineEmits<{
   (event: 'select-strength', strength: CorrectionStrength): void
   (event: 'edit-curve', value: string): void
   (event: 'start-measurement'): void
-  (event: 'confirm-loudness'): void
-  (event: 'continue-measurement'): void
   (event: 'cancel-measurement'): void
   (event: 'retry-failed-groups'): void
   (event: 'start-validation'): void
@@ -121,15 +123,11 @@ function curveRange(curve: readonly number[] | undefined): string {
     </p>
     <div class="actions">
       <button
-        :disabled="!snapshot.capabilities.supportsSweep || measurementBusy"
+        :disabled="!snapshot.capabilities.supportsSweep || measurementBusy || correctionPending"
         @click="emit('start-measurement')"
       >
-        {{ measurementBusy ? measurementMessage : 'Start advanced calibration' }}
+        {{ measurementBusy ? measurementMessage : 'Start Auto Room Calibration' }}
       </button>
-      <button v-if="measurementStage === 'loudness'" @click="emit('confirm-loudness')">
-        Volume set, continue
-      </button>
-      <button v-if="measurementStage === 'position-pause'" @click="emit('continue-measurement')">Continue</button>
       <button v-if="measurementBusy" @click="emit('cancel-measurement')">Cancel</button>
     </div>
     <p v-if="measurementMessage" class="note">{{ measurementMessage }}</p>
@@ -166,11 +164,15 @@ function curveRange(curve: readonly number[] | undefined): string {
 
     <div v-if="measurementStage === 'complete' && (measurementAggregateLeft || measurementAggregateRight)" class="response-graph">
       <p class="mini-label">Advanced result: left/right robust spatial aggregates</p>
-      <p :class="measurementRepeatabilityPassed ? 'calibration-result calibration-result-good' : 'calibration-result calibration-result-failed'">
+      <p v-if="calibrationResult" :class="`calibration-result calibration-result-${calibrationResult}`">
+        {{ calibrationResult.toUpperCase() }}
+      </p>
+      <p v-else :class="measurementRepeatabilityPassed ? 'calibration-result calibration-result-good' : 'calibration-result calibration-result-failed'">
         {{ candidatePending
           ? `VALIDATION ${(candidateValidationStatus ?? 'pending').toUpperCase()}`
           : measurementRepeatabilityPassed ? 'CALIBRATION COMPLETE' : 'CALIBRATION FAILED — measurements were not repeatable' }}
       </p>
+      <p v-if="calibrationResultMessage" class="note">{{ calibrationResultMessage }}</p>
       <dl class="spec">
         <dt>repeatability</dt>
         <dd>{{ measurementRepeatabilityPassed ? 'passed' : 'failed — do not apply correction' }}</dd>
@@ -215,13 +217,13 @@ function curveRange(curve: readonly number[] | undefined): string {
       </div>
       <div class="actions">
         <button
-          :disabled="!recommendedCorrection || !measurementRepeatabilityPassed || correctionPending || snapshot.capabilities.supportsCalibratedCorrection !== true"
+          :disabled="!recommendedCorrection || !measurementRepeatabilityPassed || correctionPending || candidatePending || snapshot.capabilities.supportsCalibratedCorrection !== true"
           @click="emit('apply-recommended-correction')"
         >
-          {{ correctionPending ? 'Applying…' : 'Apply recommended correction' }}
+          {{ correctionPending ? 'Applying…' : 'Recovery-only apply recommended correction' }}
         </button>
-        <button v-if="calibrationApplied && candidatePending" :disabled="measurementBusy || !validationReady || snapshot.calibration.liveDspStatus !== 'verified'" @click="emit('start-validation')">
-          Run validation sweep
+        <button v-if="calibrationApplied && candidatePending && !calibrationFinalizationPending" :disabled="measurementBusy || !validationReady || snapshot.calibration.liveDspStatus !== 'verified'" @click="emit('start-validation')">
+          Recovery validation sweep
         </button>
       </div>
       <p v-if="recommendedCorrection" class="note">
@@ -230,6 +232,11 @@ function curveRange(curve: readonly number[] | undefined): string {
         max boost {{ recommendedCorrection.maxBoostDb.toFixed(1) }} dB ·
         headroom {{ recommendedCorrection.headroomDb.toFixed(1) }} dB ·
         LF capability −3/−6 dB {{ recommendedCorrection.lfExtension3DbHz?.toFixed(0) ?? 'unknown' }}/{{ recommendedCorrection.lfExtension6DbHz?.toFixed(0) ?? 'unknown' }} Hz
+      </p>
+      <p v-if="recommendedCorrection?.sharedLf" class="note">
+        Shared bass correction: active · common correction 20–{{ recommendedCorrection.sharedLf.commonThroughHz.toFixed(0) }} Hz ·
+        stereo transition {{ recommendedCorrection.sharedLf.commonThroughHz.toFixed(0) }}–{{ recommendedCorrection.sharedLf.independentFromHz.toFixed(0) }} Hz ·
+        independent correction above {{ recommendedCorrection.sharedLf.independentFromHz.toFixed(0) }} Hz
       </p>
       <p v-if="recommendedCorrection && snapshot.capabilities.supportsHeadroomCompensation !== true" class="note">
         TV headroom could not be verified, so positive correction is disabled.
@@ -253,33 +260,44 @@ function curveRange(curve: readonly number[] | undefined): string {
           <dt>validation decision</dt><dd class="error">Worse than the center-position baseline</dd>
         </template>
       </dl>
-      <div v-if="candidatePending" class="actions">
+      <p v-if="candidatePending && !calibrationFinalizationPending" class="note">
+        The normal flow validates and finalizes this candidate automatically. The controls below are recovery-only.
+      </p>
+      <div v-if="candidatePending && !calibrationFinalizationPending" class="actions">
         <button v-if="candidateValidationStatus === 'passed'" :disabled="correctionPending" @click="emit('accept-candidate')">
-          Accept candidate
+          Recovery-only accept
         </button>
         <button :disabled="correctionPending" @click="emit('rollback-calibration')">
-          Roll back candidate
+          Recovery-only rollback
         </button>
       </div>
+    </div>
+
+    <div v-if="measurementStage === 'error' && calibrationResult" class="response-graph">
+      <p :class="`calibration-result calibration-result-${calibrationResult}`">
+        {{ calibrationResult.toUpperCase() }}
+      </p>
+      <p v-if="calibrationResultMessage" class="note">{{ calibrationResultMessage }}</p>
     </div>
 
     <div v-if="candidatePending && measurementStage !== 'complete'" class="response-graph">
       <p class="calibration-result">CALIBRATION CANDIDATE · {{ (candidateValidationStatus ?? 'pending').toUpperCase() }}</p>
       <p v-if="candidateValidationStatus === 'rolling_back'" class="note">The TV is completing the rollback. Validation and acceptance are temporarily unavailable.</p>
-      <p v-else class="note">The TV retained this candidate across the browser session. Choose Validate, Accept, or Roll back.</p>
+      <p v-else-if="!calibrationFinalizationPending" class="note">The TV retained this candidate across the browser session. The normal flow validates it automatically. Recovery controls are available below.</p>
+      <p v-else class="note">The TV is completing the calibration transaction. Keep this page open until it reports a final result.</p>
       <div class="actions">
         <button
-          v-if="candidateValidationStatus !== 'rolling_back'"
+          v-if="candidateValidationStatus !== 'rolling_back' && !calibrationFinalizationPending"
           :disabled="measurementBusy || !validationReady || snapshot.calibration.liveDspStatus !== 'verified'"
           @click="emit('start-validation')"
         >
-          Validate candidate
+          Recovery-only validate
         </button>
-        <button v-if="candidateValidationStatus === 'passed'" :disabled="correctionPending" @click="emit('accept-candidate')">
-          Accept candidate
+        <button v-if="candidateValidationStatus === 'passed' && !calibrationFinalizationPending" :disabled="correctionPending" @click="emit('accept-candidate')">
+          Recovery-only accept
         </button>
-        <button :disabled="correctionPending" @click="emit('rollback-calibration')">
-          Roll back candidate
+        <button v-if="!calibrationFinalizationPending" :disabled="correctionPending" @click="emit('rollback-calibration')">
+          Recovery-only rollback
         </button>
       </div>
     </div>
@@ -302,7 +320,7 @@ function curveRange(curve: readonly number[] | undefined): string {
       <summary>Curve JSON</summary>
       <textarea :value="calJson" rows="4" spellcheck="false" @input="editCurve"></textarea>
       <div class="actions">
-        <button :disabled="snapshot.capabilities.supportsCalibratedCorrection !== true" @click="emit('apply-calibration')">Apply curve</button>
+        <button :disabled="snapshot.capabilities.supportsCalibratedCorrection !== true || candidatePending" @click="emit('apply-calibration')">Apply curve</button>
         <button @click="emit('reset-calibration')">Reset to flat</button>
       </div>
       <p v-if="calStatus" class="note">{{ calStatus }}</p>
@@ -319,6 +337,23 @@ function curveRange(curve: readonly number[] | undefined): string {
 
 .calibration-result-good {
   color: #a9e6b1;
+}
+
+.calibration-result-improved {
+  color: #a9e6b1;
+}
+
+.calibration-result-inconclusive {
+  color: #f2d28c;
+}
+
+.calibration-result-cancelled {
+  color: #f2d28c;
+}
+
+.calibration-result-worse,
+.calibration-result-error {
+  color: #ffb48a;
 }
 
 .calibration-result-failed {

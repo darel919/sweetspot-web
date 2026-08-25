@@ -195,6 +195,7 @@ export const CALIBRATION_ERROR_CODES = [
   'measurement_unstable',
   'dsp_state_unverified',
   'dsp_restore_failed',
+  'candidate_rollback_failed',
   'calibration_aborted',
 ] as const
 
@@ -215,7 +216,7 @@ export interface CalibrationSessionBeginPayload extends CalibrationSessionPayloa
 export interface CalibrationSessionEndPayload extends CalibrationSessionPayload {}
 
 export interface CalibrationSessionAbortPayload extends CalibrationSessionPayload {
-  code?: CalibrationErrorCode
+  code: CalibrationErrorCode
   message?: string
 }
 
@@ -234,6 +235,10 @@ export interface CalibrationLoudnessStartedPayload extends CalibrationSessionPay
 }
 
 export interface CalibrationLoudnessStoppedPayload extends CalibrationSessionPayload {}
+
+export interface CalibrationSessionPositionContinuedPayload extends CalibrationSessionPayload {
+  context: MeasurementContext
+}
 
 export interface MeasurementSweep {
   algorithm: 'exponential-sine-v1'
@@ -617,6 +622,7 @@ export const KNOWN_TYPES = new Set<string>([
   'calibrationSession.ended',
   'calibrationSession.loudness.started',
   'calibrationSession.loudness.stopped',
+  'calibrationSession.position.continued',
   'measurement.ready',
   'measurement.started',
   'measurement.finished',
@@ -1043,13 +1049,17 @@ function isSessionWithOptionalContext(value: unknown): value is Record<string, u
     && (value.context === undefined || isMeasurementContext(value.context))
 }
 
+export function isCalibrationSessionPositionContinuedPayload(value: unknown): value is CalibrationSessionPositionContinuedPayload {
+  return isSessionPayload(value) && isMeasurementContext(value.context)
+}
+
 export function isMeasurementReadyPayload(value: unknown): value is MeasurementReadyPayload {
   return isSessionWithSweep(value)
 }
 
 function isAbortPayload(value: unknown): value is Record<string, unknown> & CalibrationSessionAbortPayload {
   return isSessionPayload(value)
-    && (value.code === undefined || isCalibrationErrorCode(value.code))
+    && isCalibrationErrorCode(value.code)
     && hasOptionalMessage(value)
 }
 
@@ -1079,6 +1089,10 @@ export function validatePayload(type: string, payload: unknown): string | null {
     case 'calibrationSession.started':
     case 'calibrationSession.ended':
       return isSessionPayload(payload) ? null : `${type} requires sessionId`
+    case 'calibrationSession.position.continued':
+      return isCalibrationSessionPositionContinuedPayload(payload)
+        ? null
+        : `${type} requires sessionId and a valid measurement context`
     case 'measurement.playSweep':
     case 'measurement.finished':
       return isSessionWithOptionalContext(payload) ? null : `${type} requires sessionId and a valid optional context`
@@ -1087,7 +1101,7 @@ export function validatePayload(type: string, payload: unknown): string | null {
     case 'measurement.response':
       return isMeasurementResponsePayload(payload) ? null : `${type} requires a compact finite response curve`
     case 'calibrationSession.abort':
-      return isAbortPayload(payload) ? null : `${type} requires sessionId and a valid optional error`
+      return isAbortPayload(payload) ? null : `${type} requires sessionId and a valid code`
     case 'calibration.applyCandidate':
       return isCalibrationApplyPayload(payload) ? null : `${type} requires 64 finite bands and optional paired channel curves`
     case 'calibration.acceptCandidate':

@@ -1,20 +1,15 @@
 <script setup lang="ts">
-import type { CalibrationPosition } from '~/lib/audio/measurement/plan'
 import type { CalibrationStage } from '~/composables/useCalibrationSession'
 
 const props = defineProps<{
   stage: CalibrationStage
   message: string
-  currentPosition: CalibrationPosition | null
-  currentChannel: 'left' | 'right' | 'both' | null
-  currentInstruction: string | null
   progress: { current: number; total: number }
   estimatedRemainingSeconds: number | null
+  canCancel: boolean
 }>()
 
 const emit = defineEmits<{
-  (event: 'confirm-loudness'): void
-  (event: 'continue-measurement'): void
   (event: 'cancel-measurement'): void
 }>()
 
@@ -27,12 +22,10 @@ function remainingLabel(seconds: number | null): string {
 }
 
 function stageLabel(stage: CalibrationStage): string {
-  if (stage === 'requesting-microphone') return 'Requesting microphone'
-  if (stage === 'preparing') return 'Preparing the next sweep'
-  if (stage === 'loudness') return 'Confirm listening volume'
-  if (stage === 'position-pause') return 'Move to the next position'
-  if (stage === 'recording') return 'Recording measurement'
-  if (stage === 'analyzing') return 'Analyzing measurement'
+  if (stage === 'requesting-microphone') return 'Starting calibration'
+  if (stage === 'preparing' || stage === 'loudness' || stage === 'position-pause') return 'Waiting for the TV'
+  if (stage === 'recording') return 'Measuring'
+  if (stage === 'analyzing') return 'Analyzing'
   if (stage === 'ending') return 'Finishing calibration'
   return 'Calibration'
 }
@@ -44,6 +37,9 @@ function stageLabel(stage: CalibrationStage): string {
       <p class="mini-label">SweetSpot / advanced calibration</p>
       <h1 id="calibration-overlay-title">{{ stageLabel(props.stage) }}</h1>
 
+      <p class="calibration-primary">Follow the instructions on your TV</p>
+      <p class="calibration-phone-note">Keep this page open. Your iPhone microphone is being used for the measurement.</p>
+
       <div class="calibration-progress" aria-live="polite">
         <p class="calibration-progress-count">
           Sweep {{ Math.min(props.progress.current, props.progress.total) }} of {{ props.progress.total || '—' }}
@@ -51,27 +47,15 @@ function stageLabel(stage: CalibrationStage): string {
         <p class="calibration-progress-time">{{ remainingLabel(props.estimatedRemainingSeconds) }}</p>
       </div>
 
-      <p v-if="props.currentPosition" class="calibration-position">
-        {{ props.currentPosition.label }}<span v-if="props.currentChannel"> · {{ props.currentChannel === 'both' ? 'both channels' : props.currentChannel + ' channel' }}</span>
-      </p>
-      <p v-if="props.currentInstruction ?? props.currentPosition" class="calibration-instruction">
-        {{ props.currentInstruction ?? props.currentPosition?.instruction }}
-      </p>
       <p v-if="props.message" class="calibration-message" aria-live="polite">{{ props.message }}</p>
 
       <div class="calibration-actions">
-        <button v-if="props.stage === 'loudness'" type="button" @click="emit('confirm-loudness')">
-          Volume set, continue
-        </button>
-        <button v-if="props.stage === 'position-pause'" type="button" @click="emit('continue-measurement')">
-          Continue
-        </button>
-        <button class="calibration-cancel" type="button" @click="emit('cancel-measurement')">
+        <button v-if="props.canCancel" class="calibration-cancel" type="button" @click="emit('cancel-measurement')">
           Cancel calibration
         </button>
       </div>
 
-      <p class="calibration-note">Keep the phone still during each sweep. The response graph will appear when calibration ends.</p>
+      <p class="calibration-note">The response graph will appear when calibration ends.</p>
     </div>
   </div>
 </template>
@@ -112,10 +96,10 @@ function stageLabel(stage: CalibrationStage): string {
 }
 
 .calibration-progress p,
-.calibration-position,
-.calibration-instruction,
 .calibration-message,
-.calibration-note {
+.calibration-note,
+.calibration-primary,
+.calibration-phone-note {
   margin: 0;
 }
 
@@ -130,12 +114,13 @@ function stageLabel(stage: CalibrationStage): string {
   color: var(--dim);
 }
 
-.calibration-position {
+.calibration-primary {
   margin-top: 1.25rem;
-  font-size: 1.2rem;
+  font-size: 1.35rem;
+  font-weight: 700;
 }
 
-.calibration-instruction {
+.calibration-phone-note {
   margin-top: 0.5rem;
   color: var(--dim);
 }

@@ -46,6 +46,7 @@ Device-targeted (client -> device): `state.get`, `engine.enable`,
 Device-published (device -> clients): `state.snapshot`, `state.changed`,
 `calibrationSession.started`, `calibrationSession.ended`,
 `calibrationSession.loudness.started`, `calibrationSession.loudness.stopped`,
+`calibrationSession.position.continued`,
 `measurement.ready`, `measurement.started`, `measurement.finished`,
 `measurement.error`.
 
