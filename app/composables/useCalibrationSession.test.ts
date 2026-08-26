@@ -362,6 +362,45 @@ describe('useCalibrationSession integration state machine', () => {
     }
   })
 
+  test('resolves a failed marker retry without poisoning the final probe result', async () => {
+    const statuses = [
+      'ok' as const, 'ok' as const,
+      'sync_marker_not_found' as const, 'ok' as const,
+      'ok' as const, 'ok' as const,
+      'ok' as const, 'ok' as const,
+      'ok' as const, 'ok' as const,
+      'ok' as const, 'ok' as const,
+    ]
+    const harness = new CalibrationHarness(48_000, statuses)
+    try {
+      harness.session.startProbe('marker-only')
+      await harness.waitFor(() => harness.connection.last('calibrationSession.begin') !== undefined)
+      const sessionId = harness.connection.last('calibrationSession.begin')?.payload.sessionId
+      harness.connection.emit('measurement.ready', { sessionId, sweep })
+      await harness.waitFor(() => harness.connection.last('measurement.prepare') !== undefined)
+      for (let attempt = 0; attempt < 7 && !harness.connection.last('calibrationSession.end'); attempt++) {
+        await harness.completeTake()
+      }
+      await harness.waitFor(() => harness.connection.last('calibrationSession.end') !== undefined)
+      harness.connection.emit('calibrationSession.ended', { sessionId })
+      await harness.waitFor(() => harness.session.stage.value === 'complete')
+
+      expect(harness.session.takeDiagnostics.value).toHaveLength(6)
+      expect(harness.session.failedTakeDiagnostics.value).toHaveLength(0)
+      expect(harness.session.probeSummary.value).toEqual({
+        requestedPositionCount: 5,
+        completedPositionCount: 5,
+        failedPositionIds: [],
+        historicalAttemptCount: 6,
+        historicalFailureCount: 1,
+        passed: true,
+      })
+      expect(harness.session.message.value).toContain('Diagnostic marker probe complete')
+    } finally {
+      harness.dispose()
+    }
+  })
+
   test('aborting a marker-only probe returns to idle', async () => {
     const harness = new CalibrationHarness()
     try {

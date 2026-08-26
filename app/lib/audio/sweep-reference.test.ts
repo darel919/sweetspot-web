@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { MeasurementSweep } from '#shared/types/protocol'
 import golden from '../../../test-vectors/measurement-sweep-golden.json'
-import { generateCompositeSweepStereoReference, generateSweepReference, generateSweepSignal, generateSyncMarker, sweepSampleParts } from './sweep-reference'
+import { generateCompositeSweepReference, generateCompositeSweepStereoReference, generateSweepReference, generateSweepSignal, generateSyncMarker, sweepSampleParts } from './sweep-reference'
 
 const sweep: MeasurementSweep = {
   sweepRevision: 'android-sweep-v2',
@@ -122,6 +122,35 @@ describe('sweep reference', () => {
     expect(reference.slice(parts.sweepStartSamples * 2, parts.trailingMarkerStartSamples * 2).every((sample) => sample === 0)).toBe(true)
     expect(reference.slice(parts.leadingMarkerStartSamples * 2, parts.sweepStartSamples * 2).some((sample) => sample !== 0)).toBe(true)
     expect(reference.slice(parts.trailingMarkerStartSamples * 2, (parts.trailingMarkerStartSamples + parts.endMarkerSamples) * 2).some((sample) => sample !== 0)).toBe(true)
+  })
+
+  test('keeps mono and stereo composite references consistent for diagnostic captures', () => {
+    for (const captureKind of ['marker-only', 'marker-production-spacing'] as const) {
+      const diagnosticSweep = { ...androidDefaultSweep, captureKind }
+      const parts = sweepSampleParts(diagnosticSweep)
+      const mono = generateCompositeSweepReference(diagnosticSweep)
+      const stereo = generateCompositeSweepStereoReference(diagnosticSweep)
+
+      expect(mono.length).toBe(parts.totalSamples)
+      expect(stereo.length).toBe(parts.totalSamples * 2)
+      expect(mono.slice(0, parts.leadingMarkerStartSamples).every((sample) => sample === 0)).toBe(true)
+      expect(mono.slice(parts.leadingMarkerStartSamples + parts.syncMarkerSamples, parts.trailingMarkerStartSamples).every((sample) => sample === 0)).toBe(true)
+      expect(mono.slice(parts.trailingMarkerStartSamples + parts.endMarkerSamples).every((sample) => sample === 0)).toBe(true)
+      expect(stereo.slice(0, parts.leadingMarkerStartSamples * 2).every((sample) => sample === 0)).toBe(true)
+      expect(stereo.slice((parts.leadingMarkerStartSamples + parts.syncMarkerSamples) * 2, parts.trailingMarkerStartSamples * 2).every((sample) => sample === 0)).toBe(true)
+      expect(stereo.slice((parts.trailingMarkerStartSamples + parts.endMarkerSamples) * 2).every((sample) => sample === 0)).toBe(true)
+    }
+  })
+
+  test('keeps both ESS sweeps in the position-composite reference', () => {
+    const parts = sweepSampleParts(androidDefaultSweep)
+    const mono = generateCompositeSweepReference(androidDefaultSweep)
+    const stereo = generateCompositeSweepStereoReference(androidDefaultSweep)
+
+    expect(mono.slice(parts.sweepStartSamples, parts.sweepStartSamples + parts.sweepSamples).some((sample) => sample !== 0)).toBe(true)
+    expect(mono.slice(parts.rightSweepStartSamples, parts.rightSweepStartSamples + parts.sweepSamples).some((sample) => sample !== 0)).toBe(true)
+    expect(stereo.slice(parts.sweepStartSamples * 2, (parts.sweepStartSamples + parts.sweepSamples) * 2).some((sample) => sample !== 0)).toBe(true)
+    expect(stereo.slice(parts.rightSweepStartSamples * 2, (parts.rightSweepStartSamples + parts.sweepSamples) * 2).some((sample) => sample !== 0)).toBe(true)
   })
 
   test('matches the deterministic cross-language PCM golden vector', () => {

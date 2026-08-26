@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { MeasurementContext, MeasurementDiagnosticsValues } from '#shared/types/protocol'
-import { countFailedPhysicalTakes, reconcileFailedTakeDiagnostics } from './failure-diagnostics'
+import { countFailedPhysicalTakes, reconcileFailedTakeDiagnostics, summarizeMarkerProbe } from './failure-diagnostics'
 
 const context: MeasurementContext = {
   positionId: 'center',
@@ -83,5 +83,91 @@ describe('failed take diagnostics', () => {
       [{ channel: 'left', failed: false, diagnostics: { ...diagnostics('left'), analysisStatus: 'ok' } }],
     )
     expect(resolved.map((entry) => entry.diagnostics.channel)).toEqual(['right'])
+  })
+
+  test('summarizes resolved marker positions separately from historical attempts', () => {
+    const markerContext = { ...context, captureKind: 'marker-only' as const }
+    const failedLeft = diagnostics('left')
+    const failedRight = diagnostics('right')
+    const successfulLeft = { ...failedLeft, analysisStatus: 'ok' as const }
+    const successfulRight = { ...failedRight, analysisStatus: 'ok' as const }
+    const centerTake = {
+      context: { ...markerContext, positionId: 'center' as const },
+      left: successfulLeft,
+      right: successfulRight,
+    }
+    const leftFailure = {
+      context: { ...markerContext, positionId: 'left' as const, attemptIndex: 0 },
+      left: failedLeft,
+      right: successfulRight,
+    }
+    const leftRetry = {
+      context: { ...markerContext, positionId: 'left' as const, attemptIndex: 1 },
+      left: successfulLeft,
+      right: successfulRight,
+    }
+    const rightFailure = {
+      context: { ...markerContext, positionId: 'right' as const, attemptIndex: 0 },
+      left: failedRight,
+      right: successfulRight,
+    }
+    const unresolved = reconcileFailedTakeDiagnostics(
+      reconcileFailedTakeDiagnostics([], leftFailure.context, [
+        { channel: 'left', failed: true, diagnostics: failedLeft },
+        { channel: 'right', failed: false, diagnostics: successfulRight },
+      ]),
+      leftRetry.context,
+      [
+        { channel: 'left', failed: false, diagnostics: successfulLeft },
+        { channel: 'right', failed: false, diagnostics: successfulRight },
+      ],
+    )
+    const finalUnresolved = reconcileFailedTakeDiagnostics(
+      unresolved,
+      rightFailure.context,
+      [
+        { channel: 'left', failed: true, diagnostics: failedRight },
+        { channel: 'right', failed: false, diagnostics: successfulRight },
+      ],
+    )
+
+    expect(summarizeMarkerProbe(
+      [centerTake, leftFailure, leftRetry, rightFailure],
+      finalUnresolved,
+      3,
+    )).toEqual({
+      requestedPositionCount: 3,
+      completedPositionCount: 2,
+      failedPositionIds: ['right'],
+      historicalAttemptCount: 4,
+      historicalFailureCount: 2,
+      passed: false,
+    })
+  })
+
+  test('uses the same resolved retry semantics for production-spacing markers', () => {
+    const markerContext = { ...context, captureKind: 'marker-production-spacing' as const, positionId: 'left' as const }
+    const failed = diagnostics('left')
+    const successful = { ...failed, analysisStatus: 'ok' as const }
+    const failureTake = { context: markerContext, left: failed, right: successful }
+    const retryContext = { ...markerContext, attemptIndex: 1 }
+    const retryTake = { context: retryContext, left: successful, right: successful }
+    const unresolved = reconcileFailedTakeDiagnostics([], markerContext, [
+      { channel: 'left', failed: true, diagnostics: failed },
+      { channel: 'right', failed: false, diagnostics: successful },
+    ])
+    const resolved = reconcileFailedTakeDiagnostics(unresolved, retryContext, [
+      { channel: 'left', failed: false, diagnostics: successful },
+      { channel: 'right', failed: false, diagnostics: successful },
+    ])
+
+    expect(summarizeMarkerProbe([failureTake, retryTake], resolved, 1)).toEqual({
+      requestedPositionCount: 1,
+      completedPositionCount: 1,
+      failedPositionIds: [],
+      historicalAttemptCount: 2,
+      historicalFailureCount: 1,
+      passed: true,
+    })
   })
 })

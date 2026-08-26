@@ -55,6 +55,7 @@
           :measurement-capture-info="measurementCaptureInfo"
           :measurement-failed-diagnostics="measurementFailedDiagnostics"
           :measurement-take-diagnostics="measurementTakeDiagnostics"
+          :measurement-probe-summary="measurementProbeSummary"
           :debug-capture-export-enabled="debugCaptureExportEnabled"
           :measurement-resume-available="measurementResumeAvailable"
           :measurement-resume-position-count="measurementResumePositionCount"
@@ -222,7 +223,6 @@ import type {
   AggregateResponse,
 } from '~/lib/audio/measurement/aggregation'
 import { allCaptureQualityPassed } from '~/lib/audio/measurement/aggregation'
-import { countFailedPhysicalTakes } from '~/lib/audio/measurement/failure-diagnostics'
 import { CALIBRATION_WEB_BUILD_SHA } from '~/lib/audio/measurement/checkpoint'
 import { EqCommandRevisionGate } from '~/lib/eq-command-revision'
 import type {
@@ -268,6 +268,7 @@ const {
   captureInfo: measurementCaptureInfo,
   takeDiagnostics: measurementTakeDiagnostics,
   failedTakeDiagnostics: measurementFailedDiagnostics,
+  probeSummary: measurementProbeSummary,
   profiles: measurementProfiles,
   selectedProfileId: measurementSelectedProfileId,
   profileError: measurementProfileError,
@@ -1716,12 +1717,11 @@ async function runMarkerProbe(kind: MarkerProbeKind = 'marker-only') {
       startProbeSession(kind)
       started = true
     })
-    const diagnostics = measurementTakeDiagnostics.value
-    const failed = countFailedPhysicalTakes(diagnostics)
+    const summary = measurementProbeSummary.value
     const displayLabel = `${label[0]?.toUpperCase() ?? ''}${label.slice(1)}`
-    probeLabMessage.value = failed === 0
-      ? `${displayLabel} set passed at ${diagnostics.length} positions.`
-      : `${displayLabel} set finished with ${failed} failed captures. Export the debug bundle for candidate and pair diagnostics.`
+    probeLabMessage.value = summary.passed
+      ? `${displayLabel} set passed at ${summary.completedPositionCount} physical positions after ${summary.historicalAttemptCount} attempts.`
+      : `${displayLabel} set finished with ${summary.failedPositionIds.length} failed physical position${summary.failedPositionIds.length === 1 ? '' : 's'}. Export the debug bundle for candidate and pair diagnostics.`
   } catch (error: unknown) {
     probeLabMessage.value = error instanceof Error ? error.message : `${label[0]?.toUpperCase() ?? ''}${label.slice(1)} probe failed.`
   } finally {

@@ -1,4 +1,5 @@
-import type { CalibrationPositionId, MeasurementCaptureKind, MeasurementContext, MeasurementDiagnosticsValues } from '#shared/types/protocol'
+import { isMarkerDiagnosticCaptureKind } from '../../../../shared/types/protocol'
+import type { CalibrationPositionId, MeasurementContext, MeasurementDiagnosticsValues } from '#shared/types/protocol'
 
 export interface FailedTakeDiagnostic {
   context: MeasurementContext
@@ -17,16 +18,21 @@ export interface PhysicalTakeDiagnostics {
   right: Pick<MeasurementDiagnosticsValues, 'analysisStatus'>
 }
 
+export interface MarkerProbeSummary {
+  requestedPositionCount: number
+  completedPositionCount: number
+  failedPositionIds: CalibrationPositionId[]
+  historicalAttemptCount: number
+  historicalFailureCount: number
+  passed: boolean
+}
+
 function diagnosticKey(context: MeasurementContext, channel: 'left' | 'right'): string {
   return `${context.positionId}:${channel}`
 }
 
 function physicalDiagnosticKey(context: MeasurementContext): string {
   return `${context.positionId}:physical`
-}
-
-function isMarkerDiagnosticCaptureKind(value: MeasurementCaptureKind): boolean {
-  return value === 'marker-only' || value === 'marker-production-spacing'
 }
 
 function isFailedStatus(status: MeasurementDiagnosticsValues['analysisStatus']): boolean {
@@ -53,6 +59,30 @@ export function failedPhysicalTakePositions(takes: readonly PhysicalTakeDiagnost
     if (failed) positions.add(take.context.positionId)
   }
   return [...positions]
+}
+
+export function summarizeMarkerProbe(
+  takes: readonly PhysicalTakeDiagnostics[],
+  unresolved: readonly FailedTakeDiagnostic[],
+  requestedPositionCount: number,
+): MarkerProbeSummary {
+  const markerTakes = takes.filter((take) => isMarkerDiagnosticCaptureKind(take.context.captureKind))
+  const failedPositionIds = [...new Set(unresolved
+    .filter((failure) => isMarkerDiagnosticCaptureKind(failure.context.captureKind))
+    .map((failure) => failure.context.positionId))]
+  const completedPositions = new Set(markerTakes.map((take) => take.context.positionId))
+  for (const positionId of failedPositionIds) completedPositions.delete(positionId)
+  const completedPositionCount = completedPositions.size
+  return {
+    requestedPositionCount,
+    completedPositionCount,
+    failedPositionIds,
+    historicalAttemptCount: markerTakes.length,
+    historicalFailureCount: countFailedPhysicalTakes(markerTakes),
+    passed: markerTakes.length > 0
+      && completedPositionCount === requestedPositionCount
+      && failedPositionIds.length === 0,
+  }
 }
 
 /** Keeps one current unresolved diagnostic for each physical position/channel. */

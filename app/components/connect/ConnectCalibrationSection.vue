@@ -4,8 +4,10 @@ import type { CalibrationPosition } from '~/lib/audio/measurement/plan'
 import type { MeasurementAnalysis } from '~/lib/audio/measurement/response'
 import type { MicCalibrationProfile } from '~/lib/audio/mics/types'
 import type { CalibrationStage, CalibrationTakeDiagnostics } from '~/composables/useCalibrationSession'
+import type { MarkerProbeSummary } from '~/lib/audio/measurement/failure-diagnostics'
 import type { CorrectionStrength } from '~/lib/audio/correction/optimizer'
 import type { CalibrationValidationStatus, MeasurementContext, MeasurementDiagnosticsValues, StateSnapshot } from '#shared/types/protocol'
+import { isMarkerDiagnosticCaptureKind } from '#shared/types/protocol'
 import ConnectResponseGraph from './ConnectResponseGraph.vue'
 import type {
   CalibrationCaptureInfo,
@@ -39,6 +41,7 @@ const props = defineProps<{
   measurementCaptureInfo: CalibrationCaptureInfo | null
   measurementTakeDiagnostics: readonly CalibrationTakeDiagnostics[]
   measurementFailedDiagnostics: ReadonlyArray<{ context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues }>
+  measurementProbeSummary: MarkerProbeSummary
   debugCaptureExportEnabled: boolean
   measurementResumeAvailable: boolean
   measurementResumePositionCount: number
@@ -163,7 +166,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
 }
 
 function captureFailureLabel(failure: { context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues }): string {
-  return failure.context.captureKind === 'marker-only' || failure.context.captureKind === 'marker-production-spacing'
+  return isMarkerDiagnosticCaptureKind(failure.context.captureKind)
     ? `${failure.context.positionId} position`
     : `${failure.context.positionId} / ${failure.diagnostics.channel ?? failure.context.repairChannel}`
 }
@@ -237,6 +240,15 @@ function captureFailureLabel(failure: { context: MeasurementContext; diagnostics
       Position {{ measurementCurrentContext.positionIndex + 1 }} of {{ measurementCurrentContext.positionCount }} ·
       {{ measurementCurrentContext.repairChannel === 'both' ? 'Keep the phone still' : 'Repeating this position' }}
     </p>
+
+    <dl v-if="measurementProbeSummary.requestedPositionCount > 0" class="spec">
+      <dt>marker probe</dt><dd>{{ measurementProbeSummary.passed ? 'passed' : 'incomplete' }}</dd>
+      <dt>requested physical positions</dt><dd>{{ measurementProbeSummary.requestedPositionCount }}</dd>
+      <dt>completed physical positions</dt><dd>{{ measurementProbeSummary.completedPositionCount }}</dd>
+      <dt>failed physical positions</dt><dd>{{ measurementProbeSummary.failedPositionIds.length }}</dd>
+      <dt>historical attempts</dt><dd>{{ measurementProbeSummary.historicalAttemptCount }}</dd>
+      <dt>historical failures</dt><dd>{{ measurementProbeSummary.historicalFailureCount }}</dd>
+    </dl>
 
     <dl v-if="measurementCaptureInfo" class="spec">
       <dt>sample rate</dt><dd>{{ measurementCaptureInfo.settings.sampleRate ?? 'unknown' }} Hz</dd>

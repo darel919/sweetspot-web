@@ -6,6 +6,7 @@ import type {
   Envelope,
   MeasurementContext,
   MeasurementDiagnosticsValues,
+  MeasurementCaptureKind,
   MeasurementCaptureMetadata,
   MeasurementResponsePayload,
   MeasurementSweep,
@@ -39,10 +40,10 @@ import {
   type ProbePlanKind,
 } from '../lib/audio/measurement/plan'
 import {
-  countFailedPhysicalTakes,
-  failedPhysicalTakePositions,
   reconcileFailedTakeDiagnostics,
+  summarizeMarkerProbe,
   type FailedTakeDiagnostic,
+  type MarkerProbeSummary,
 } from '../lib/audio/measurement/failure-diagnostics'
 import {
   appendCompositeCapture,
@@ -188,6 +189,14 @@ function isUserCancellationCode(code: CalibrationErrorCode): boolean {
   return code === 'calibration_aborted' || code === 'calibration_ui_closed'
 }
 
+function isMarkerProbePlan(kind: ProbePlanKind | null): boolean {
+  if (kind === null) return false
+  const captureKind: MeasurementCaptureKind = kind === 'transfer' || kind === 'routing'
+    ? 'position-composite'
+    : kind
+  return isMarkerDiagnosticCaptureKind(captureKind)
+}
+
 export function useCalibrationSession(connection: Connection, options: CalibrationSessionOptions = {}) {
   const dependencies: CalibrationSessionDependencies = {
     openMicrophone,
@@ -296,11 +305,16 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     spatialConsistencySummaries.value.filter((summary) => !summary.passed))
   const probeRepeatabilitySummaries = computed<RepeatabilitySummary[]>(() =>
     aggregateBoth.value?.spatialConsistency ?? [])
+  const probeSummary = computed<MarkerProbeSummary>(() => summarizeMarkerProbe(
+    takeDiagnostics.value,
+    failedTakeDiagnostics.value,
+    isMarkerProbePlan(probePlanKind) ? plan.length : 0,
+  ))
   const probeCaptureQualityPassed = computed(() => {
-    if (probePlanKind !== 'marker-only' && probePlanKind !== 'marker-production-spacing') {
+    if (!isMarkerProbePlan(probePlanKind)) {
       return allCaptureQualityPassed(aggregateBoth.value)
     }
-    return takeDiagnostics.value.length > 0 && countFailedPhysicalTakes(takeDiagnostics.value) === 0
+    return probeSummary.value.passed
   })
   const probeFailedRepeatabilityGroups = computed(() =>
     probeRepeatabilitySummaries.value.filter((summary) => !summary.passed))
@@ -1725,11 +1739,11 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       const endedProbePlanKind = probePlanKind
       const endedAbort = abortRecovery.value
       const hadMarkerProbeAnalysis = endedMode === 'probe'
-        && (endedProbePlanKind === 'marker-only' || endedProbePlanKind === 'marker-production-spacing')
+        && isMarkerProbePlan(endedProbePlanKind)
         && takeDiagnostics.value.length > 0
       const hadAnalysis = hadMarkerProbeAnalysis || records.value.length > 0 || validationRecords.value.length > 0
       const failedMarkerProbePositions = hadMarkerProbeAnalysis
-        ? failedPhysicalTakePositions(takeDiagnostics.value)
+        ? probeSummary.value.failedPositionIds
         : []
       invalidateSessionGeneration()
       clearTimeoutTimer()
@@ -1766,7 +1780,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         ? endedMode === 'validation'
           ? 'Validation complete. Compare the measured result with the original response.'
           : endedMode === 'probe'
-            ? (endedProbePlanKind === 'marker-only' || endedProbePlanKind === 'marker-production-spacing')
+            ? isMarkerProbePlan(endedProbePlanKind)
               ? failedMarkerProbePositions.length > 0
                 ? `Diagnostic marker probe complete with ${failedMarkerProbePositions.length} failed physical position${failedMarkerProbePositions.length === 1 ? '' : 's'}: ${failedMarkerProbePositions.map((position) => `${position} position`).join(', ')}.`
                 : 'Diagnostic marker probe complete. Review the marker timing diagnostics before changing the curve.'
@@ -1866,6 +1880,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     spatialConsistencySummaries: readonly(spatialConsistencySummaries),
     failedRepeatabilityGroups: readonly(failedRepeatabilityGroups),
     probeCaptureQualityPassed,
+    probeSummary: readonly(probeSummary),
     probeRepeatabilitySummaries: readonly(probeRepeatabilitySummaries),
     probeFailedRepeatabilityGroups: readonly(probeFailedRepeatabilityGroups),
     currentContext: readonly(activeContext),

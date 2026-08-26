@@ -105,6 +105,7 @@ export function generateSweepReference(sweep: MeasurementSweep, sampleRate = swe
 export function generateCompositeSweepReference(sweep: MeasurementSweep, sampleRate = sweep.sampleRate): Float32Array {
   const parts = sweepSampleParts(sweep, sampleRate)
   const reference = generateSweepReference(sweep, sampleRate)
+  if (sweep.captureKind !== 'position-composite') return reference
   const right = generateSweepSignal(sweep, sampleRate)
   for (let index = 0; index < right.length && parts.rightSweepStartSamples + index < reference.length; index++) {
     reference[parts.rightSweepStartSamples + index] = right[index] ?? 0
@@ -126,8 +127,8 @@ export function generateCompositeSweepStereoReference(
   const right = new Float32Array(parts.totalSamples)
   left.set(start, parts.leadingMarkerStartSamples)
   right.set(start, parts.leadingMarkerStartSamples)
-  left.set(leftSweep, parts.sweepStartSamples)
-  right.set(rightSweep, parts.rightSweepStartSamples)
+  if (leftSweep.length > 0) left.set(leftSweep, parts.sweepStartSamples)
+  if (rightSweep.length > 0) right.set(rightSweep, parts.rightSweepStartSamples)
   left.set(end, parts.trailingMarkerStartSamples)
   right.set(end, parts.trailingMarkerStartSamples)
 
