@@ -12,6 +12,7 @@ import type {
 } from '#shared/types/protocol'
 import {
   CALIBRATION_ERROR_CODES,
+  PROTOCOL_VERSION,
   isCalibrationSessionPositionContinuedPayload,
   isMeasurementContext,
   isMeasurementReadyPayload,
@@ -70,7 +71,8 @@ import {
   isSameMeasurementContext,
 } from '../lib/audio/measurement/session-guard'
 import { hasNewAcceptedEvidence } from '../lib/audio/measurement/response-graph'
-import { assessAcousticPreflight } from '../lib/audio/measurement/acoustic-preflight'
+import { assessCaptureLevelPreflight } from '../lib/audio/measurement/acoustic-preflight'
+import { combineChannelAggregates } from '../lib/audio/correction/optimizer'
 import {
   createCalibrationDebugBundle,
   createCalibrationDebugCapture,
@@ -149,7 +151,7 @@ function newSessionId(): string {
 
 function analysisErrorCode(status: MeasurementAnalysis['status']): CalibrationErrorCode {
   if (status === 'capture_clipped') return 'capture_clipped'
-  if (status === 'sweep_not_found') return 'sweep_not_found'
+
   if (status === 'direct_arrival_low_confidence') return 'direct_arrival_low_confidence'
   if (status === 'impulse_not_found') return 'impulse_not_found'
   if (status === 'response_not_generated') return 'response_not_generated'
@@ -228,12 +230,14 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   const activeContext = shallowRef<MeasurementContext | null>(null)
   let preparedContext: MeasurementContext | null = null
   let takeStartInFlightGeneration: number | null = null
+  let analysisAbortController: AbortController | null = null
   let loudnessRequested = false
   let loudnessComplete = false
   let preflightCaptureActive = false
   let preflightStart: Promise<void> | null = null
   let preflightCompletionStarted = false
   let sessionSampleRate: number | null = null
+  let resumeExpectedSampleRate: number | null = null
 
   let checkpointWriteChain: Promise<void> = Promise.resolve()
   let loadedResumeCheckpoint: CalibrationCheckpoint | null = null
@@ -338,6 +342,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }
 
   function invalidateSessionGeneration(): number {
+    analysisAbortController?.abort()
+    analysisAbortController = null
     sessionGeneration += 1
     return sessionGeneration
   }
@@ -516,6 +522,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       tvAppVersion: options.getDeviceIdentity?.()?.appVersion ?? null,
       tvBuildId: options.getDeviceIdentity?.()?.buildId ?? null,
       webBuildSha: CALIBRATION_WEB_BUILD_SHA,
+      protocolVersion: PROTOCOL_VERSION,
+      relayAuthVersion: 'pairing-v1',
       analysisRevision: CALIBRATION_ANALYSIS_REVISION,
       sweepRevision: CALIBRATION_SWEEP_REVISION,
     }))
@@ -523,9 +531,13 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
 
   function rebuildAggregates() {
     const current = records.value
-    aggregateLeft.value = aggregateResponse(current, 'left')
-    aggregateRight.value = aggregateResponse(current, 'right')
-    aggregateBoth.value = aggregateResponse(current, 'both')
+    const left = aggregateResponse(current, 'left')
+    const right = aggregateResponse(current, 'right')
+    aggregateLeft.value = left
+    aggregateRight.value = right
+    aggregateBoth.value = left && right
+      ? combineChannelAggregates(left, right) ?? aggregateResponse(current, 'both')
+      : aggregateResponse(current, 'both')
   }
 
   function rebuildValidationAggregates() {
@@ -780,7 +792,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
 
   function setPreparingText(context: MeasurementContext) {
     message.value = sessionMode === 'measurement'
-      && positionLedger === null
+      && positionLedger?.captures.length === 0
       && context.positionId === 'center'
       && context.attemptIndex === 0
       ? 'Running the center acoustic pilot. The room walkaround starts only after this signal is synchronized and analyzed.'
@@ -859,6 +871,16 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     try {
       await recorder.start()
       if (!isCurrentOperation(operationGeneration, operationSessionId)) return
+      const actualSampleRate = recorder.sampleRate()
+      if (resumeExpectedSampleRate !== null
+        && (actualSampleRate === null || Math.abs(actualSampleRate - resumeExpectedSampleRate) > 1)
+      ) {
+        await fail(
+          'capture_sample_rate_changed',
+          `The resumed microphone sample rate is ${actualSampleRate ?? 'unknown'} Hz, but the checkpoint requires ${resumeExpectedSampleRate} Hz.`,
+        )
+        return
+      }
       stage.value = 'recording'
       message.value = 'Follow the instructions on the TV.'
       armTimeout()
@@ -1023,8 +1045,11 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     preflightStart = null
     preflightCompletionStarted = false
     sessionSampleRate = null
-    failedMeasurementAttemptCount.value = 0
-    convergenceOutcome.value = null
+    resumeExpectedSampleRate = resumingMeasurement ? resumeCheckpoint?.microphone.sampleRate ?? null : null
+    if (mode !== 'validation') {
+      failedMeasurementAttemptCount.value = 0
+      convergenceOutcome.value = null
+    }
     stage.value = 'requesting-microphone'
     message.value = 'Loading microphone profiles…'
     try {
@@ -1233,7 +1258,10 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
           positionLedger: positionLedger ? projectPhysicalPositionLedger(positionLedger) : null,
         })) - 1
         : -1
-      const result = await analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile)
+      const analysisController = new AbortController()
+      analysisAbortController = analysisController
+      const result = await analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile, analysisController.signal)
+      if (analysisAbortController === analysisController) analysisAbortController = null
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       if (debugCaptureIndex >= 0) {
         const debugCapture = debugCaptures[debugCaptureIndex]
@@ -1500,7 +1528,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       const preflightSampleRate = recording.diagnostics.sampleRate > 0
         ? recording.diagnostics.sampleRate
         : captureInfo.value?.settings.sampleRate ?? sweep?.sampleRate ?? 48_000
-      const preflight = assessAcousticPreflight(recording.samples, preflightSampleRate)
+      const preflight = assessCaptureLevelPreflight(recording.samples, preflightSampleRate)
       const failure = preflight.failure
       if (failure !== null) {
         const messageText = failure === 'capture_clipped'
@@ -1660,7 +1688,12 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
               ? 'Diagnostic probe complete. Export the captured response before changing the curve.'
               : `Diagnostic probe capture quality is inconclusive at ${spatialConsistencyFailureMessage(probeFailedRepeatabilityGroups.value)}.`
             : measurementQualityPassed.value
+              && convergenceOutcome.value === 'sufficient'
               ? 'Advanced measurement complete. Review the response and room metrics below.'
+              : convergenceOutcome.value === 'bounded'
+                ? 'Measurement finished, but convergence was not reached. The result is inconclusive and no correction was staged.'
+                : convergenceOutcome.value === 'insufficient'
+                  ? 'Measurement finished without enough usable evidence. No correction was generated.'
               : failedMeasurementAttemptCount.value > 0
                 ? `Calibration needs review. ${failedMeasurementAttemptCount.value} capture attempt${failedMeasurementAttemptCount.value === 1 ? '' : 's'} failed before a retry.`
                 : `Calibration failed. Accepted position evidence was incomplete at ${spatialConsistencyFailureMessage(failedRepeatabilityGroups.value)}.`

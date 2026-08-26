@@ -2,12 +2,15 @@ import { describe, expect, test } from 'bun:test'
 import {
   isEnvelope,
   isCalibrationPackage,
+  isClientToDevice,
+  isDeviceToClient,
   KNOWN_TYPES,
   isMeasurementContext,
   isMeasurementSweep,
   isRoomSocketServerMessage,
   isStateSnapshot,
   CALIBRATION_POSITION_TARGETS,
+  CALIBRATION_ANALYSIS_REVISION,
   validatePayload,
 } from './protocol'
 
@@ -47,6 +50,32 @@ const context = {
 } as const
 
 describe('measurement protocol boundary', () => {
+  test('enforces explicit relay direction sets and payload validators', () => {
+    expect(isClientToDevice('engine.enable')).toBe(true)
+    expect(isClientToDevice('state.snapshot')).toBe(false)
+    expect(isDeviceToClient('state.snapshot')).toBe(true)
+    expect(isDeviceToClient('engine.enable')).toBe(false)
+    expect(validatePayload('engine.enable', {})).toBeNull()
+    expect(validatePayload('engine.enable', { enabled: true })).not.toBeNull()
+    expect(validatePayload('profile.save', { name: 'Living Room' })).toBeNull()
+    expect(validatePayload('profile.save', { name: '' })).not.toBeNull()
+    expect(validatePayload('state.get', {})).toBeNull()
+    expect(validatePayload('unhandled.type', {})).not.toBeNull()
+  })
+
+  test('validates measurement.prepare context instead of accepting arbitrary data', () => {
+    expect(validatePayload('measurement.prepare', {
+      sessionId: 'cal_test',
+      channel: 'both',
+      context,
+    })).toBeNull()
+    expect(validatePayload('measurement.prepare', {
+      sessionId: 'cal_test',
+      channel: 'both',
+      context: { ...context, positionIndex: 99 },
+    })).not.toBeNull()
+  })
+
   test('accepts the deterministic sweep descriptor', () => {
     expect(isMeasurementSweep(sweep)).toBe(true)
     expect(validatePayload('measurement.ready', { sessionId: 'cal_test', sweep })).toBeNull()
@@ -254,6 +283,7 @@ describe('measurement protocol boundary', () => {
       format: 'sweetspot.calibration',
       version: 1,
       exportedAt: 1_757_000_000_000,
+      analysisRevision: CALIBRATION_ANALYSIS_REVISION,
       sourceDevice: { id: 'tv-1', name: 'TV', appVersion: '0.1.0' },
       active: true,
       frequenciesHz: Array.from({ length: 64 }, (_, index) => index + 20),

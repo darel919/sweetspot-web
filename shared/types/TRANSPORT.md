@@ -16,10 +16,12 @@ GET /api/room/{code}/ws?role=device  WebSocket
 GET /api/room/{code}/ws?role=client   WebSocket
 ```
 
-The Worker validates the pair code, routes the request to the room Durable
-Object, and forwards the WebSocket upgrade. Every connection receives a
-`room.ready` frame with its `role`, current `deviceOnline` state, and queued
-messages for that role.
+The pairing code is the short-lived room credential. The Worker validates its
+format and routes both roles to the matching room Durable Object. Client
+sockets also require an allowed browser `Origin`. The room starts a ten-minute
+session on its first connection and closes all sockets when that session
+expires. Every connection receives a `room.ready` frame with its `role` and
+current `deviceOnline` state.
 
 The device receives commands on its socket and sends replies on the same
 socket. The dashboard sends commands on its socket and receives device
@@ -47,24 +49,38 @@ Room messages use the v1 envelope from `protocol.ts`.
 
 The room validates known types, rejects session-only types, enforces the
 payload limit, and rate-limits each socket. Commands go directly to an open
-device socket or stay in the room's bounded in-memory queue until the device
-connects. Queued commands carry a short expiry and are discarded after it.
-Device messages are broadcast to open client sockets and retained in the same
-bounded in-memory replay queue for the next client connection. State snapshots
-are not replayed.
+device socket. If the device is offline, the client receives an error instead
+of creating an unbounded mailbox. Device messages are broadcast only to open
+client sockets. Nothing is replayed after reconnect.
 
 Delivery is at-most-once. The dashboard requests a fresh state snapshot after
 it connects or the device becomes available. Calibration flows remain
 user-driven and handle missing replies with their existing timeouts.
 
+## Command replies
+
+Unless a command starts a calibration session, the TV replies with
+`state.snapshot` and sets `replyTo` to the command id. The explicit exceptions
+are:
+
+| Command family | Reply or event |
+| --- | --- |
+| `calibration.export` | `calibration.exported` |
+| `diagnostics.effects` | `diagnostics.effects` |
+| `diagnostics.deviceInfo` | `diagnostics.deviceInfo` |
+| `probe.status` | `probe.status` |
+| `calibrationSession.*` and `measurement.*` | session lifecycle/events |
+
+Every command and event still uses the shared payload validator. A message
+without a validator is rejected at the room boundary.
+
 ## Lifecycle
 
 Cloudflare may hibernate or restart the Durable Object while sockets remain
-attached. Socket attachments restore the role and connection identity when the
-object resumes, but the in-memory command and replay queues are not durable.
+attached. Socket attachments restore the role and rate-limit identity when the
+object resumes; no command or replay queue is persisted.
 The browser must request a fresh state snapshot after reconnect. Safety-critical
-calibration candidate and rollback state is persisted by the TV, not by this
-transport queue.
+calibration candidate and rollback state is persisted by the TV, not by this relay.
 
 During rollback the TV publishes the candidate with `validationStatus:
 "rolling_back"`. Clients must treat that state as pending recovery, disable

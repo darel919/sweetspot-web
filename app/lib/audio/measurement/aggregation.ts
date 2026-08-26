@@ -173,7 +173,6 @@ function aggregatePositions(records: readonly MeasurementRecord[], channel: Posi
 }
 
 function combineBothChannels(
-  records: readonly MeasurementRecord[],
   left: readonly PositionResponse[],
   right: readonly PositionResponse[],
 ): PositionResponse[] {
@@ -186,9 +185,9 @@ function combineBothChannels(
       positionIndex: leftResponse.positionIndex,
       positionCount: leftResponse.positionCount,
       channel: 'both' as const,
-      points: leftResponse.points.map((point, index) => ({
+      points: leftResponse.points.map((point) => ({
         frequencyHz: point.frequencyHz,
-        magnitudeDb: (point.magnitudeDb + (rightResponse.points[index]?.magnitudeDb ?? point.magnitudeDb)) / 2,
+        magnitudeDb: (point.magnitudeDb + (interpolateLog(rightResponse.points, point.frequencyHz) ?? point.magnitudeDb)) / 2,
       })),
       broadbandLevelDb: leftResponse.broadbandLevelDb !== null && rightResponse.broadbandLevelDb !== null
         ? (leftResponse.broadbandLevelDb + rightResponse.broadbandLevelDb) / 2
@@ -231,7 +230,7 @@ export function aggregateResponse(
     ? left.responses
     : channel === 'right'
       ? right.responses
-      : combineBothChannels(records, left.responses, right.responses)
+      : combineBothChannels(left.responses, right.responses)
   const spatial = spatialAggregate(positionResponses)
   const summaries = channel === 'left' ? left.summaries : channel === 'right' ? right.summaries : [...left.summaries, ...right.summaries]
   const leftLevel = median(left.responses.map((response) => response.broadbandLevelDb).filter((value): value is number => value !== null))
@@ -250,9 +249,15 @@ export function aggregateResponse(
 }
 
 export function allCaptureQualityPassed(aggregate: AggregateResponse | null): boolean {
+  const expectedPositionCount = Math.max(
+    0,
+    ...aggregate?.spatialConsistency.map((summary) => summary.positionCount) ?? [],
+  )
   return Boolean(
     aggregate
       && aggregate.points.length > 1
+      && expectedPositionCount > 0
+      && aggregate.positionResponses.length === expectedPositionCount
       && aggregate.spatialConsistency.length > 0
       && aggregate.spatialConsistency.every((summary) => summary.passed),
   )

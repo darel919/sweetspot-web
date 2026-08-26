@@ -11,8 +11,10 @@
     "generate": "bun scripts/generate-with-build-id.mjs",
     "generate:measurement-vector": "bun scripts/generate-measurement-sweep-vector.mjs",
     "replay:calibration": "bun scripts/replay-calibration-debug.mjs",
+    "lint": "bunx --package oxlint@1.80.0 oxlint .",
     "verify:protocol": "bun scripts/verify-protocol-parity.mjs",
     "verify:transport": "bun scripts/verify-websocket-only.mjs",
+    "typecheck": "vue-tsc --noEmit",
     "deploy": "bun run generate && bunx wrangler deploy",
     "test": "bun test"
   },

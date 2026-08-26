@@ -6,7 +6,7 @@ export const CALIBRATION_CHECKPOINT_ORIENTATION = 'iphone-upright-bottom-edge-to
 export const CALIBRATION_CHECKPOINT_STORE = 'sweetspot-calibration-checkpoints'
 const configuredBuildSha = import.meta.env.NUXT_PUBLIC_BUILD_SHA
 
-export const CALIBRATION_ANALYSIS_REVISION = 'response-direct-arrival-v2' as const
+export const CALIBRATION_ANALYSIS_REVISION = 'response-direct-arrival-v3' as const
 export const CALIBRATION_SWEEP_REVISION = 'android-sweep-v1' as const
 export const CALIBRATION_WEB_BUILD_SHA = configuredBuildSha || 'local'
 export type CalibrationConvergenceOutcome = 'sufficient' | 'bounded' | 'insufficient'
@@ -89,7 +89,7 @@ function isMeasurementCaptureMetadata(value: unknown): value is MeasurementCaptu
 
 function isMeasurementAnalysis(value: unknown): boolean {
   if (!isRecord(value)) return false
-  const statuses = ['ok', 'signal_too_low', 'sweep_not_found', 'direct_arrival_low_confidence', 'impulse_not_found', 'response_not_generated', 'sync_marker_not_found', 'clock_drift_unreliable', 'capture_too_short', 'capture_clipped']
+  const statuses = ['ok', 'signal_too_low', 'direct_arrival_low_confidence', 'impulse_not_found', 'response_not_generated', 'sync_marker_not_found', 'clock_drift_unreliable', 'capture_too_short', 'capture_clipped']
   return typeof value.status === 'string'
     && statuses.includes(value.status)
     && Array.isArray(value.rawPoints)
@@ -257,7 +257,8 @@ export function checkCalibrationCheckpointCompatibility(
   if (checkpoint.microphone.capturePathStatus !== expected.capturePathStatus) return { compatible: false, reason: 'capture-path' }
   if (checkpoint.microphone.sampleRate !== null) {
     if (expected.sampleRate === null) {
-      if (options.requireSampleRate) return { compatible: false, reason: 'sample-rate' }
+      // Safari can expose track settings before AudioContext has established its rate.
+      // The first resumed recording performs the strict comparison before playback.
     } else if (Math.abs(checkpoint.microphone.sampleRate - expected.sampleRate) > 1) {
       return { compatible: false, reason: 'sample-rate' }
     }

@@ -1,3 +1,4 @@
+import { PROTOCOL_VERSION } from '#shared/types/protocol'
 import type { MeasurementContext, MeasurementCaptureMetadata, MeasurementSweep } from '#shared/types/protocol'
 import type { CaptureSignalDiagnostics } from '../capture/pcm-recorder'
 import type { MicCalibrationProfile } from '../mics/types'
@@ -33,6 +34,8 @@ export interface CalibrationDebugBundle {
   tvAppVersion: string | null
   tvBuildId: string | null
   webBuildSha: string
+  protocolVersion: typeof PROTOCOL_VERSION
+  relayAuthVersion: 'pairing-v1'
   analysisRevision: string
   sweepRevision: string
   exportedAt: string
@@ -56,6 +59,8 @@ export function createCalibrationDebugBundle(
     tvAppVersion: string | null
     tvBuildId: string | null
     webBuildSha: string
+    protocolVersion: typeof PROTOCOL_VERSION
+    relayAuthVersion: 'pairing-v1'
     analysisRevision: string
     sweepRevision: string
   },

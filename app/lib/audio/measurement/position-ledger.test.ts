@@ -172,7 +172,7 @@ describe('append-only physical-position ledger', () => {
     expect(repair).toMatchObject({ kind: 'capture', position: { id: 'right' }, repairChannel: 'right', attemptIndex: 1 })
 
     const repairedRight = analysis('ok', 3)
-    ledger = append(ledger, context('right', 2, 1, 'right'), composite(analysis('sweep_not_found'), repairedRight))
+    ledger = append(ledger, context('right', 2, 1, 'right'), composite(analysis('sync_marker_not_found'), repairedRight))
     const projected = projectPhysicalPositionLedger(ledger)
     const right = projected.positions.find((position) => position.positionId === 'right')
     expect(right?.left.kind).toBe('accepted')

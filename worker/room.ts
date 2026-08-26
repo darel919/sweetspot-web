@@ -3,45 +3,47 @@ import {
   MAX_PAYLOAD_BYTES,
   KNOWN_TYPES,
   SESSION_ONLY_TYPES,
+  isClientToDevice,
+  isDeviceToClient,
   isEnvelope,
-  isDeviceTargeted,
   validatePayload,
   type Envelope,
   type ErrorPayload,
 } from '../shared/types/protocol'
 
-const MAX_QUEUE = 32
 const RATE_WINDOW_MS = 10_000
-const RATE_MAX = 60
-
-interface ConnState {
-  stamps: number[]
-}
+const MESSAGE_RATE_MAX = 60
+const CONNECTION_RATE_MAX = 10
+const MAX_CLIENTS = 4
+const PAIRING_TTL_MS = 10 * 60 * 1_000
+const EXPIRY_KEY = 'room-expires-at'
 
 interface SocketAttachment {
   role: 'client' | 'device'
-  connectionId: string
+  rateKey: string
+  expiresAt: number
 }
 
 export class RoomDO extends DurableObject<unknown> {
-  commands: Envelope[] = []
-  forClients: Envelope[] = []
-  connStates = new Map<string, ConnState>()
+  private readonly state: DurableObjectState
 
   constructor(state: DurableObjectState, env: unknown) {
     super(state, env)
+    this.state = state
   }
 
-  rateLimited(key: string): boolean {
+  private async rateLimited(key: string, limit: number): Promise<boolean> {
     const now = Date.now()
-    let cs = this.connStates.get(key)
-    if (!cs) {
-      cs = { stamps: [] }
-      this.connStates.set(key, cs)
+    const storageKey = `rate:${key}`
+    const stored = await this.state.storage.get<number[]>(storageKey)
+    const stamps = (stored ?? []).filter((stamp) => now - stamp < RATE_WINDOW_MS)
+    if (stamps.length >= limit) {
+      await this.state.storage.put(storageKey, stamps)
+      return true
     }
-    cs.stamps = cs.stamps.filter((t) => now - t < RATE_WINDOW_MS)
-    cs.stamps.push(now)
-    return cs.stamps.length > RATE_MAX
+    stamps.push(now)
+    await this.state.storage.put(storageKey, stamps)
+    return false
   }
 
   validate(env: unknown): { ok: true; env: Envelope } | { ok: false; code: ErrorPayload['code']; message: string } {
@@ -68,7 +70,7 @@ export class RoomDO extends DurableObject<unknown> {
   }
 
   private hasOpenSocket(role: SocketAttachment['role']): boolean {
-    return this.ctx.getWebSockets().some((ws) => {
+    return this.state.getWebSockets().some((ws) => {
       const attachment = this.socketAttachment(ws)
       return attachment?.role === role && ws.readyState === WebSocket.OPEN
     })
@@ -79,7 +81,8 @@ export class RoomDO extends DurableObject<unknown> {
     if (typeof attachment !== 'object' || attachment === null) return null
     if (
       (attachment.role !== 'client' && attachment.role !== 'device')
-      || typeof attachment.connectionId !== 'string'
+      || typeof attachment.rateKey !== 'string'
+      || typeof attachment.expiresAt !== 'number'
     ) return null
     return attachment as SocketAttachment
   }
@@ -97,40 +100,31 @@ export class RoomDO extends DurableObject<unknown> {
 
   private broadcastPresence(deviceOnline: boolean) {
     const value = { kind: 'room.presence', deviceOnline }
-    for (const ws of this.ctx.getWebSockets()) {
+    for (const ws of this.state.getWebSockets()) {
       if (this.socketAttachment(ws)?.role === 'client') this.sendSocket(ws, value)
     }
   }
 
   private broadcastClientPresence(clientOnline: boolean) {
     const value = { kind: 'room.clientPresence', clientOnline }
-    for (const ws of this.ctx.getWebSockets()) {
+    for (const ws of this.state.getWebSockets()) {
       if (this.socketAttachment(ws)?.role === 'device') this.sendSocket(ws, value)
     }
   }
 
   private broadcastEnvelope(env: Envelope) {
-    for (const ws of this.ctx.getWebSockets()) {
+    if (env.expiresAt !== undefined && env.expiresAt <= Date.now()) return
+    for (const ws of this.state.getWebSockets()) {
       if (this.socketAttachment(ws)?.role === 'client') this.sendSocket(ws, env)
     }
   }
 
-  private queueCommand(env: Envelope) {
-    if (env.expiresAt !== undefined && env.expiresAt <= Date.now()) return
-    const device = this.ctx.getWebSockets().find((ws) => {
+  private sendCommandToDevice(env: Envelope): boolean {
+    const device = this.state.getWebSockets().find((ws) => {
       const attachment = this.socketAttachment(ws)
       return attachment?.role === 'device' && ws.readyState === WebSocket.OPEN
     })
-    if (device && this.sendSocket(device, env)) return
-
-    this.commands.push(env)
-    if (this.commands.length > MAX_QUEUE) this.commands.splice(0, this.commands.length - MAX_QUEUE)
-  }
-
-  private queueClientReplay(env: Envelope) {
-    if (env.type === 'state.snapshot') return
-    this.forClients.push(env)
-    if (this.forClients.length > MAX_QUEUE) this.forClients.splice(0, this.forClients.length - MAX_QUEUE)
+    return device ? this.sendSocket(device, env) : false
   }
 
   private socketError(ws: WebSocket, code: ErrorPayload['code'] | 'bad_json' | 'bad_message', message: string) {
@@ -139,16 +133,20 @@ export class RoomDO extends DurableObject<unknown> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const attachment = this.socketAttachment(ws)
-    if (!attachment) {
-      try { ws.close(1008, 'invalid room socket') } catch {}
+    if (!attachment || attachment.expiresAt <= Date.now()) {
+      try { ws.close(1008, 'pairing session expired') } catch {}
       return
     }
-    if (this.rateLimited(attachment.connectionId)) {
+    if (await this.rateLimited(`message:${attachment.rateKey}`, MESSAGE_RATE_MAX)) {
       this.socketError(ws, 'rate_limited', 'Too many messages')
       return
     }
+    if (typeof message !== 'string' && message.byteLength > MAX_PAYLOAD_BYTES) {
+      this.socketError(ws, 'payload_too_large', 'Message exceeds the room payload limit')
+      return
+    }
     const body = typeof message === 'string' ? message : new TextDecoder().decode(message)
-    if (body.length > MAX_PAYLOAD_BYTES) {
+    if (typeof message === 'string' && new TextEncoder().encode(body).byteLength > MAX_PAYLOAD_BYTES) {
       this.socketError(ws, 'payload_too_large', 'Message exceeds the room payload limit')
       return
     }
@@ -165,59 +163,86 @@ export class RoomDO extends DurableObject<unknown> {
       return
     }
     if (attachment.role === 'client') {
-      if (!isDeviceTargeted(validated.env.type)) {
+      if (!isClientToDevice(validated.env.type)) {
         this.socketError(ws, 'unknown_type', 'Clients may only send device-targeted types')
         return
       }
-      this.queueCommand(validated.env)
+      if (!this.sendCommandToDevice(validated.env)) {
+        this.socketError(ws, 'not_in_room', 'The TV is not connected to this pairing session')
+      }
       return
     }
-
-    this.queueClientReplay(validated.env)
+    if (!isDeviceToClient(validated.env.type)) {
+      this.socketError(ws, 'unknown_type', 'The TV sent a client-only command')
+      return
+    }
     this.broadcastEnvelope(validated.env)
   }
 
   webSocketClose(ws: WebSocket, _code: number, _reason: string) {
     const attachment = this.socketAttachment(ws)
     if (!attachment) return
-
-    this.connStates.delete(attachment.connectionId)
-    if (attachment.role === 'device' && !this.hasOpenSocket('device')) {
-      this.broadcastPresence(false)
-    }
-    if (attachment.role === 'client' && !this.hasOpenSocket('client')) {
-      this.broadcastClientPresence(false)
-    }
+    if (attachment.role === 'device' && !this.hasOpenSocket('device')) this.broadcastPresence(false)
+    if (attachment.role === 'client' && !this.hasOpenSocket('client')) this.broadcastClientPresence(false)
   }
 
   webSocketError(_ws: WebSocket, error: unknown) {
     console.warn('SweetSpot room WebSocket error', error)
   }
 
-  private openSocket(request: Request, role: SocketAttachment['role']): Response {
+  async alarm() {
+    for (const ws of this.state.getWebSockets()) {
+      try { ws.close(1008, 'pairing session expired') } catch {}
+    }
+  }
+
+  private async openSocket(request: Request, role: SocketAttachment['role']): Promise<Response> {
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
       return new Response('Expected WebSocket upgrade', { status: 426 })
     }
-
+    const remoteAddress = request.headers.get('X-SweetSpot-Remote-Address') ?? 'unknown'
+    const now = Date.now()
+    const storedExpiresAt = await this.state.storage.get<number>(EXPIRY_KEY)
+    let expiresAt = typeof storedExpiresAt === 'number' && Number.isFinite(storedExpiresAt) && storedExpiresAt > now
+      ? storedExpiresAt
+      : null
+    if (expiresAt === null) {
+      for (const ws of this.state.getWebSockets()) {
+        try { ws.close(1000, 'pairing session expired') } catch {}
+      }
+      expiresAt = now + PAIRING_TTL_MS
+      await this.state.storage.put(EXPIRY_KEY, expiresAt)
+      await this.state.storage.setAlarm(expiresAt)
+    }
+    const rateKey = `${role}:${remoteAddress}`
+    if (await this.rateLimited(`connect:${rateKey}`, CONNECTION_RATE_MAX)) {
+      return new Response('connection rate limited', { status: 429 })
+    }
+    if (role === 'client') {
+      const clients = this.state.getWebSockets().filter((ws) => this.socketAttachment(ws)?.role === 'client')
+      if (clients.length >= MAX_CLIENTS) return new Response('too many clients', { status: 429 })
+    }
     if (role === 'device') {
-      for (const ws of this.ctx.getWebSockets()) {
+      for (const ws of this.state.getWebSockets()) {
         if (this.socketAttachment(ws)?.role === 'device' && ws.readyState === WebSocket.OPEN) {
-          try { ws.close(1000, 'replaced by newer device connection') } catch {}
+          try { ws.close(1000, 'reconnected authenticated device') } catch {}
         }
       }
     }
 
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair)
-    this.ctx.acceptWebSocket(server)
-    server.serializeAttachment({ role, connectionId: crypto.randomUUID() } satisfies SocketAttachment)
+    this.state.acceptWebSocket(server)
+    server.serializeAttachment({
+      role,
+      rateKey,
+      expiresAt,
+    } satisfies SocketAttachment)
     this.sendSocket(server, {
       kind: 'room.ready',
       role,
       deviceOnline: this.deviceOnline(),
-      messages: role === 'device'
-        ? this.commands.splice(0, this.commands.length).filter((env) => env.expiresAt === undefined || env.expiresAt > Date.now())
-        : this.forClients,
+      messages: [],
     })
     if (role === 'device') {
       this.broadcastPresence(true)
@@ -230,16 +255,11 @@ export class RoomDO extends DurableObject<unknown> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
-    const path = url.pathname
-
-    if (path === '/ws' && request.method === 'GET') {
+    if (url.pathname === '/ws' && request.method === 'GET') {
       const role = url.searchParams.get('role')
-      if (role !== 'client' && role !== 'device') {
-        return new Response('Invalid room socket role', { status: 400 })
-      }
+      if (role !== 'client' && role !== 'device') return new Response('Invalid room socket role', { status: 400 })
       return this.openSocket(request, role)
     }
-
     return new Response('not found', { status: 404 })
   }
 }

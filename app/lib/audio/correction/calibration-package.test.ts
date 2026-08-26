@@ -3,6 +3,7 @@ import {
   CALIBRATION_PACKAGE_FORMAT,
   MAX_PAYLOAD_BYTES,
   CALIBRATION_PACKAGE_VERSION,
+  CALIBRATION_ANALYSIS_REVISION,
   type CalibrationPackage,
 } from '../../../../shared/types/protocol'
 import {
@@ -15,6 +16,7 @@ function makePackage(overrides: Partial<CalibrationPackage> = {}): CalibrationPa
     format: CALIBRATION_PACKAGE_FORMAT,
     version: CALIBRATION_PACKAGE_VERSION,
     exportedAt: 1_757_000_000_000,
+    analysisRevision: CALIBRATION_ANALYSIS_REVISION,
     sourceDevice: { id: 'tv_test', name: 'Test TV', appVersion: '0.1.0' },
     active: true,
     frequenciesHz: Array.from({ length: 64 }, (_, index) => 20 + index * 10),

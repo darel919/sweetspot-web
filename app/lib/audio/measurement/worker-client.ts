@@ -20,6 +20,7 @@ interface MeasurementWorkerResponse {
 interface PendingRequest {
   resolve: (result: CompositeMeasurementAnalysis) => void
   reject: (error: Error) => void
+  cleanup?: () => void
 }
 
 let worker: Worker | null = null
@@ -34,7 +35,10 @@ function isResponse(value: unknown): value is MeasurementWorkerResponse {
 }
 
 function rejectAll(error: Error) {
-  for (const request of pending.values()) request.reject(error)
+  for (const request of pending.values()) {
+    request.cleanup?.()
+    request.reject(error)
+  }
   pending.clear()
 }
 
@@ -61,6 +65,7 @@ function getWorker(): Worker {
     const request = pending.get(event.data.id)
     if (!request) return
     pending.delete(event.data.id)
+    request.cleanup?.()
     if (event.data.ok && event.data.result) request.resolve(event.data.result)
     else request.reject(new Error(event.data.error ?? 'Measurement analysis failed.'))
   }
@@ -87,8 +92,13 @@ export function analyzeInWorker(
   sampleRate: number,
   sweep: MeasurementSweep,
   micProfile: MicCalibrationProfile,
+  signal?: AbortSignal,
 ): Promise<CompositeMeasurementAnalysis> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('Measurement analysis was cancelled.'))
+      return
+    }
     let currentWorker: Worker
     try {
       currentWorker = getWorker()
@@ -98,7 +108,15 @@ export function analyzeInWorker(
     }
 
     const id = nextRequestId++
-    pending.set(id, { resolve, reject })
+    const abort = () => {
+      resetWorker(new Error('Measurement analysis was cancelled.'))
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    pending.set(id, {
+      resolve,
+      reject,
+      cleanup: () => signal?.removeEventListener('abort', abort),
+    })
     try {
       let sampleBuffer: ArrayBuffer
       if (samples.byteOffset === 0 && samples.byteLength === samples.buffer.byteLength && samples.buffer instanceof ArrayBuffer) {
@@ -117,6 +135,7 @@ export function analyzeInWorker(
       currentWorker.postMessage(request, [sampleBuffer])
     } catch (error: unknown) {
       pending.delete(id)
+      signal?.removeEventListener('abort', abort)
       reject(error instanceof Error ? error : new Error('Could not send samples to the measurement worker.'))
     }
   })

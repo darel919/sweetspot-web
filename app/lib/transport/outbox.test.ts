@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { flushPendingEnvelopes } from './outbox'
+import { enqueuePendingEnvelope, flushPendingEnvelopes } from './outbox'
 
 type TestEnvelope = {
   id: string
@@ -47,5 +47,23 @@ describe('outbound envelope queue', () => {
     const remaining = flushPendingEnvelopes(pending, () => false, 1_000)
 
     expect(remaining).toEqual([{ id: 'live', expiresAt: 1_001 }])
+  })
+
+  test('bounds disconnected growth and coalesces state commands', () => {
+    let pending: Array<TestEnvelope & { type: string }> = []
+    for (let index = 0; index < 200; index++) {
+      pending = enqueuePendingEnvelope(pending, { id: `message-${index}`, type: 'profile.save' }, 1_000, { max: 8 })
+    }
+    expect(pending).toHaveLength(8)
+    expect(pending.at(-1)?.id).toBe('message-199')
+    pending = enqueuePendingEnvelope(pending, { id: 'latest-bands', type: 'engine.setBands' }, 1_000, {
+      max: 8,
+      coalesceTypes: ['engine.setBands'],
+    })
+    pending = enqueuePendingEnvelope(pending, { id: 'newest-bands', type: 'engine.setBands' }, 1_000, {
+      max: 8,
+      coalesceTypes: ['engine.setBands'],
+    })
+    expect(pending.filter((item) => item.type === 'engine.setBands')).toEqual([{ id: 'newest-bands', type: 'engine.setBands' }])
   })
 })

@@ -9,7 +9,7 @@ export interface AcousticPreflightResult {
   sampleCount: number
 }
 
-export function assessAcousticPreflight(samples: Float32Array, sampleRate: number): AcousticPreflightResult {
+export function assessCaptureLevelPreflight(samples: Float32Array, sampleRate: number): AcousticPreflightResult {
   let sumSquares = 0
   let peak = 0
   let clippedSamples = 0

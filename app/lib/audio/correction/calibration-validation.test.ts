@@ -4,6 +4,7 @@ import type { CalibrationPositionId } from '../../../../shared/types/protocol'
 import {
   classifyCalibrationValidation,
   matchedSpatialValidationMetrics,
+  selectValidationConfirmationPositions,
   shouldRunValidationConfirmation,
   shouldStartAutomaticValidation,
 } from './calibration-validation'
@@ -100,6 +101,12 @@ describe('calibration validation classification', () => {
     expect(shouldRunValidationConfirmation({ outcome, candidateId: 'candidate-1', confirmedCandidateId: null })).toBe(true)
     expect(shouldRunValidationConfirmation({ outcome, candidateId: 'candidate-1', confirmedCandidateId: 'candidate-1' })).toBe(false)
     expect(shouldRunValidationConfirmation({ outcome: { status: 'improved', beforeDb: 4, afterDb: 2 }, candidateId: 'candidate-1', confirmedCandidateId: null })).toBe(false)
+  })
+
+  test('targets one informative position for a borderline confirmation', () => {
+    expect(selectValidationConfirmationPositions(['left', 'center', 'right'])).toEqual(['center'])
+    expect(selectValidationConfirmationPositions(['right', 'backward'])).toEqual(['right'])
+    expect(selectValidationConfirmationPositions([])).toEqual([])
   })
 
   test('uses matched physical positions for the spatial validation objective', () => {

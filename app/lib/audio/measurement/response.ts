@@ -69,7 +69,7 @@ export interface SweepDetection {
   failureReason: SyncMarkerFailureReason | null
 }
 
-export type MeasurementAnalysisStatus = 'ok' | 'signal_too_low' | 'sweep_not_found' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
+export type MeasurementAnalysisStatus = 'ok' | 'signal_too_low' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
 export type MeasurementAnalysisFailure = Exclude<MeasurementAnalysisStatus, 'ok'>
 
 export interface MeasurementAnalysisDiagnostics {

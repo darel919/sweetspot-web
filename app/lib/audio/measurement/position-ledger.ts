@@ -81,7 +81,7 @@ function failureClass(status: MeasurementAnalysis['status']): CaptureFailureClas
   if (status === 'sync_marker_not_found' || status === 'clock_drift_unreliable' || status === 'capture_too_short') {
     return 'systemic'
   }
-  if (status === 'signal_too_low' || status === 'capture_clipped' || status === 'sweep_not_found' || status === 'direct_arrival_low_confidence' || status === 'impulse_not_found' || status === 'response_not_generated') return 'local'
+  if (status === 'signal_too_low' || status === 'capture_clipped' || status === 'direct_arrival_low_confidence' || status === 'impulse_not_found' || status === 'response_not_generated') return 'local'
   return null
 }
 

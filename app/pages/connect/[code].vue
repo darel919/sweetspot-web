@@ -191,6 +191,7 @@ import ConnectStateSection from '~/components/connect/ConnectStateSection.vue'
 import { isCalibrationActiveStage } from '~/composables/useCalibrationSession'
 import {
   classifyCalibrationValidation,
+  selectValidationConfirmationPositions,
   shouldRunValidationConfirmation,
   shouldStartAutomaticValidation,
   matchedSpatialValidationMetrics,
@@ -1027,7 +1028,10 @@ watch([measurementStage, validationOutcomeKey, deviceOnline], ([stage, outcomeKe
     confirmedCandidateId: validationConfirmationCandidateId.value,
   })) {
     validationConfirmationCandidateId.value = transaction.candidateId
-    startValidationSession(transaction.candidateId, validationPositionIds.value)
+    startValidationSession(
+      transaction.candidateId,
+      selectValidationConfirmationPositions(validationPositionIds.value),
+    )
     return
   }
   void sendValidationResultOnce(transaction.candidateId, outcome, outcomeKey)

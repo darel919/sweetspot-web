@@ -60,6 +60,7 @@ export interface PcmRecorder {
   start(): Promise<void>
   stop(): Promise<PcmRecording>
   dispose(): Promise<void>
+  sampleRate(): number | null
 }
 
 interface PcmChunk {
@@ -160,6 +161,11 @@ class PcmRecorderImpl implements PcmRecorder {
     }
     this.streamSampleCount = 0
     this.windowStartSample = 0
+  }
+
+  sampleRate(): number | null {
+    const value = this.context?.sampleRate ?? this.capture.settings.sampleRate ?? null
+    return value !== null && Number.isFinite(value) && value > 0 ? value : null
   }
 
   private async finishStop(): Promise<PcmRecording> {

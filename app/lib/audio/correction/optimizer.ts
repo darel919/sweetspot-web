@@ -54,6 +54,23 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value))
 }
 
+function interpolateMagnitude(points: readonly ResponsePoint[], frequencyHz: number): number | null {
+  if (points.length === 0) return null
+  const first = points[0]
+  const last = points.at(-1)
+  if (!first || !last) return null
+  if (frequencyHz <= first.frequencyHz) return first.magnitudeDb
+  if (frequencyHz >= last.frequencyHz) return last.magnitudeDb
+  for (let index = 1; index < points.length; index++) {
+    const lower = points[index - 1]
+    const upper = points[index]
+    if (!lower || !upper || frequencyHz > upper.frequencyHz) continue
+    const fraction = Math.log(frequencyHz / lower.frequencyHz) / Math.log(upper.frequencyHz / lower.frequencyHz)
+    return lower.magnitudeDb + (upper.magnitudeDb - lower.magnitudeDb) * fraction
+  }
+  return null
+}
+
 function smoothError(points: readonly ResponsePoint[]): ResponsePoint[] {
   return smoothResponsePoints(points.map((point) => ({ ...point })), 2)
 }
@@ -177,8 +194,8 @@ export function calculateCorrection(
     correction = limited
   }
   const gains = correction.map((point) => point.magnitudeDb)
-  const maxCutDb = Math.min(...gains)
-  const maxBoostDb = Math.max(...gains)
+  const maxCutDb = gains.length > 0 ? Math.min(...gains) : 0
+  const maxBoostDb = gains.length > 0 ? Math.max(...gains) : 0
   const headroomDb = maxBoostDb > 0 ? -(maxBoostDb + 0.5) : 0
   return {
     correction,
@@ -197,7 +214,7 @@ export function calculateCorrection(
 export function combineChannelAggregates(
   left: AggregateResponse,
   right: AggregateResponse,
-): AggregateResponse {
+): AggregateResponse | null {
   const byPosition = new Map<string, { left?: PositionResponse; right?: PositionResponse }>()
   for (const response of left.positionResponses) {
     byPosition.set(response.positionId, { left: response })
@@ -207,7 +224,15 @@ export function combineChannelAggregates(
     if (existing) existing.right = response
     else byPosition.set(response.positionId, { right: response })
   }
-  const positionResponses: PositionResponse[] = [...byPosition.values()]
+  const pairs = [...byPosition.values()]
+  if (pairs.length === 0 || pairs.some(({ left: leftPosition, right: rightPosition }) =>
+    !leftPosition
+      || !rightPosition
+      || leftPosition.points.length !== rightPosition.points.length
+      || leftPosition.points.some((point, index) => point.frequencyHz !== rightPosition.points[index]?.frequencyHz))) {
+    return null
+  }
+  const positionResponses: PositionResponse[] = pairs
     .flatMap(({ left: leftPosition, right: rightPosition }) => {
       if (!leftPosition || !rightPosition) return []
       const source = leftPosition
@@ -218,9 +243,7 @@ export function combineChannelAggregates(
         channel: 'both' as const,
         points: source.points.map((point, index) => ({
           frequencyHz: point.frequencyHz,
-          magnitudeDb: leftPosition && rightPosition
-            ? (point.magnitudeDb + (rightPosition.points[index]?.magnitudeDb ?? point.magnitudeDb)) / 2
-          : point.magnitudeDb,
+          magnitudeDb: (point.magnitudeDb + rightPosition.points[index]!.magnitudeDb) / 2,
         })),
         broadbandLevelDb: leftPosition.broadbandLevelDb !== null && rightPosition.broadbandLevelDb !== null
           ? (leftPosition.broadbandLevelDb + rightPosition.broadbandLevelDb) / 2
@@ -228,6 +251,7 @@ export function combineChannelAggregates(
       }
     })
     .sort((a, b) => a.positionIndex - b.positionIndex)
+  if (positionResponses.length === 0) return null
   const frequencies = positionResponses[0]?.points.map((point) => point.frequencyHz) ?? left.points.map((point) => point.frequencyHz)
   const median = (values: number[]): number => {
     const sorted = [...values].sort((a, b) => a - b)
@@ -236,12 +260,12 @@ export function combineChannelAggregates(
       ? ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
       : (sorted[middle] ?? 0)
   }
-  const points = frequencies.map((frequencyHz, index) => {
-    const values = positionResponses.map((response) => response.points[index]?.magnitudeDb ?? 0)
+  const points = frequencies.map((frequencyHz) => {
+    const values = positionResponses.map((response) => interpolateMagnitude(response.points, frequencyHz) ?? 0)
     return { frequencyHz, magnitudeDb: median(values) }
   })
-  const spreadDb = frequencies.map((frequencyHz, index) => {
-    const values = positionResponses.map((response) => response.points[index]?.magnitudeDb ?? 0)
+  const spreadDb = frequencies.map((frequencyHz) => {
+    const values = positionResponses.map((response) => interpolateMagnitude(response.points, frequencyHz) ?? 0)
     return { frequencyHz, magnitudeDb: values.length > 0 ? Math.max(...values) - Math.min(...values) : 0 }
   })
   return {

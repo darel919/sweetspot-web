@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = dirname(fileURLToPath(import.meta.url))
-const androidRoot = resolve(root, '../../sweetspot')
+const androidRoot = resolve(process.env.SWEETSPOT_ANDROID_ROOT ?? resolve(root, '../../sweetspot'))
 const webProtocol = await readFile(resolve(root, '../shared/types/protocol.ts'), 'utf8')
 const androidProtocol = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/CalibrationProtocol.kt'), 'utf8')
 const androidContext = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/MeasurementContext.kt'), 'utf8')

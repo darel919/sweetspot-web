@@ -21,8 +21,8 @@ const context: MeasurementContext = {
 function diagnostics(channel: 'left' | 'right'): MeasurementDiagnosticsValues {
   return {
     channel,
-    analysisStatus: 'sweep_not_found',
-    failureReason: 'sweep_not_found',
+    analysisStatus: 'sync_marker_not_found',
+    failureReason: 'sync_marker_not_found',
     signalRms: 0,
     signalPeak: 0,
     snrEstimateDb: null,

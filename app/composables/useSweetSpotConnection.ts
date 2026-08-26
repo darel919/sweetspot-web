@@ -10,10 +10,16 @@ import {
   connectionStateForDevice,
   type ConnectionState,
 } from './connectionState'
-import { flushPendingEnvelopes } from '../lib/transport/outbox'
+import {
+  enqueuePendingEnvelope,
+  flushPendingEnvelopes,
+  MAX_PENDING_ENVELOPES,
+} from '../lib/transport/outbox'
 
 const SOCKET_RECONNECT_MIN_MS = 800
 const SOCKET_RECONNECT_MAX_MS = 10_000
+const REQUEST_TIMEOUT_MS = 15_000
+const COALESCED_COMMAND_TYPES = ['engine.setBands', 'state.get'] as const
 
 let messageCounter = 0
 
@@ -43,6 +49,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
   let socketReady = false
   let socketAttempts = 0
   let pendingEnvelopes: Envelope[] = []
+  const pendingRequests = new Map<string, { cleanup: () => void; reject: (reason: Error) => void }>()
 
   const handlers = new Set<(env: Envelope) => void>()
   const seenMessageIds = new Set<string>()
@@ -101,7 +108,10 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
 
   function dispatchOrQueue(env: Envelope) {
     if (dispatch(env) || disposed) return
-    pendingEnvelopes.push(env)
+    pendingEnvelopes = enqueuePendingEnvelope(pendingEnvelopes, env, Date.now(), {
+      max: MAX_PENDING_ENVELOPES,
+      coalesceTypes: COALESCED_COMMAND_TYPES,
+    })
   }
 
   function send(type: string, payload: unknown = {}, replyTo?: string): string {
@@ -111,17 +121,61 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     return env.id
   }
 
-  function request<T = unknown>(type: string, payload: unknown = {}): Promise<Envelope<T>> {
-    return new Promise((resolve) => {
+  function request<T = unknown>(
+    type: string,
+    payload: unknown = {},
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<Envelope<T>> {
+    return new Promise((resolve, reject) => {
+      if (options.signal?.aborted) {
+        reject(new Error('Request aborted'))
+        return
+      }
       const env = makeEnvelope(type, payload)
-      const off = onMessage((incoming) => {
+      const timeoutMs = Math.max(1, options.timeoutMs ?? REQUEST_TIMEOUT_MS)
+      let timeout: ReturnType<typeof setTimeout> | null = null
+      let abortListener: (() => void) | null = null
+      const handler = (incoming: Envelope) => {
         if (incoming.replyTo !== env.id) return
-        off()
+        const pending = pendingRequests.get(env.id)
+        if (!pending) return
+        pending.cleanup()
+        pendingRequests.delete(env.id)
         resolve(incoming as Envelope<T>)
-      })
+      }
+      const off = () => handlers.delete(handler)
+      const removeQueued = () => {
+        pendingEnvelopes = pendingEnvelopes.filter((candidate) => candidate.id !== env.id)
+      }
+      const cleanup = () => {
+        off()
+        removeQueued()
+        if (timeout !== null) clearTimeout(timeout)
+        if (abortListener) options.signal?.removeEventListener('abort', abortListener)
+      }
+      const rejectRequest = (reason: Error) => {
+        const pending = pendingRequests.get(env.id)
+        if (!pending) return
+        pending.cleanup()
+        pendingRequests.delete(env.id)
+        reject(reason)
+      }
+      handlers.add(handler)
+      timeout = setTimeout(() => rejectRequest(new Error(`Request timed out: ${type}`)), timeoutMs)
+      if (options.signal) {
+        abortListener = () => rejectRequest(new Error(`Request aborted: ${type}`))
+        options.signal.addEventListener('abort', abortListener, { once: true })
+      }
+      pendingRequests.set(env.id, { cleanup, reject: rejectRequest })
       log('out', JSON.stringify(env))
       dispatchOrQueue(env)
     })
+  }
+
+  function rejectPendingRequests(reason: string) {
+    const error = new Error(reason)
+    for (const pending of [...pendingRequests.values()]) pending.reject(error)
+    pendingRequests.clear()
   }
 
   function onMessage(handler: (env: Envelope) => void): () => void {
@@ -203,6 +257,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       socketReady = false
       if (disposed) return
       markConnectionInterrupted()
+      rejectPendingRequests('Connection interrupted')
       scheduleReconnect()
     }
   }
@@ -222,6 +277,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     socket = null
     socketReady = false
     pendingEnvelopes = []
+    rejectPendingRequests('Connection disposed')
     status.value = 'disconnected'
   }
 

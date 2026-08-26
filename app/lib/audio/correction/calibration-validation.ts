@@ -76,6 +76,14 @@ export function shouldRunValidationConfirmation(input: {
     && input.candidateId !== input.confirmedCandidateId
 }
 
+export function selectValidationConfirmationPositions(
+  positionIds: readonly CalibrationPositionId[],
+): CalibrationPositionId[] {
+  if (positionIds.includes('center')) return ['center']
+  const first = positionIds[0]
+  return first ? [first] : []
+}
+
 export interface AutomaticValidationStartInput {
   measurementComplete: boolean
   measurementId: string | null

@@ -64,11 +64,13 @@ export interface DeviceInfo {
 export const CALIBRATION_PACKAGE_FORMAT = 'sweetspot.calibration' as const
 export const CALIBRATION_PACKAGE_VERSION = 1 as const
 export const CALIBRATION_PACKAGE_MAX_GAIN_DB = 12
+export const CALIBRATION_ANALYSIS_REVISION = 'response-direct-arrival-v3' as const
 
 export interface CalibrationPackage {
   format: typeof CALIBRATION_PACKAGE_FORMAT
   version: typeof CALIBRATION_PACKAGE_VERSION
   exportedAt: number
+  analysisRevision: typeof CALIBRATION_ANALYSIS_REVISION
   sourceDevice: DeviceInfo
   active: boolean
   frequenciesHz: number[]
@@ -244,7 +246,7 @@ export const CALIBRATION_ERROR_CODES = [
   'capture_clipped',
   'capture_too_short',
   'capture_sample_rate_changed',
-  'sweep_not_found',
+
   'direct_arrival_low_confidence',
   'impulse_not_found',
   'response_not_generated',
@@ -360,7 +362,7 @@ export type MeasurementSyncMarkerFailureReason =
 
 export interface MeasurementDiagnosticsValues {
   channel?: 'left' | 'right' | 'both'
-  analysisStatus?: 'ok' | 'signal_too_low' | 'sweep_not_found' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
+  analysisStatus?: 'ok' | 'signal_too_low' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
   failureReason?: string | null
   signalRms: number
   signalPeak: number
@@ -670,6 +672,8 @@ const DEVICE_TARGETED_TYPES = [
   'engine.bypass',
   'engine.setBands',
   'engine.applyPreset',
+  'virtualizer.on',
+  'virtualizer.off',
   'profile.list',
   'profile.save',
   'profile.load',
@@ -703,6 +707,32 @@ const DEVICE_TARGETED_TYPES = [
 ] as const
 
 export type DeviceTargetedType = (typeof DEVICE_TARGETED_TYPES)[number]
+
+export const CLIENT_TO_DEVICE_TYPES = new Set<string>([
+  ...DEVICE_TARGETED_TYPES,
+  'ping',
+])
+
+export const DEVICE_TO_CLIENT_TYPES = new Set<string>([
+  'pong',
+  'state.snapshot',
+  'state.changed',
+  'calibrationSession.started',
+  'calibrationSession.ended',
+  'calibrationSession.loudness.started',
+  'calibrationSession.loudness.stopped',
+  'calibrationSession.position.continued',
+  'measurement.ready',
+  'measurement.started',
+  'measurement.finished',
+  'measurement.error',
+  'calibration.exported',
+  'probe.status',
+  'probe.result',
+  'diagnostics.deviceInfo',
+  'diagnostics.probe',
+  'diagnostics.effects',
+])
 
 export const KNOWN_TYPES = new Set<string>([
   ...DEVICE_TARGETED_TYPES,
@@ -741,6 +771,14 @@ export const SESSION_ONLY_TYPES = new Set<string>([
 
 export function isDeviceTargeted(type: string): type is DeviceTargetedType {
   return DEVICE_TARGETED_TYPES.some((candidate) => candidate === type)
+}
+
+export function isClientToDevice(type: string): boolean {
+  return CLIENT_TO_DEVICE_TYPES.has(type)
+}
+
+export function isDeviceToClient(type: string): boolean {
+  return DEVICE_TO_CLIENT_TYPES.has(type)
 }
 
 export interface RoomSocketReadyMessage {
@@ -949,7 +987,7 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
   return (diagnostics.analysisStatus === undefined
       || diagnostics.analysisStatus === 'ok'
       || diagnostics.analysisStatus === 'signal_too_low'
-      || diagnostics.analysisStatus === 'sweep_not_found'
+
       || diagnostics.analysisStatus === 'direct_arrival_low_confidence'
       || diagnostics.analysisStatus === 'impulse_not_found'
       || diagnostics.analysisStatus === 'response_not_generated'
@@ -1106,6 +1144,7 @@ export function isCalibrationPackage(value: unknown): value is CalibrationPackag
     || value.version !== CALIBRATION_PACKAGE_VERSION
     || !isFiniteNumber(value.exportedAt)
     || value.exportedAt <= 0
+    || value.analysisRevision !== CALIBRATION_ANALYSIS_REVISION
     || typeof value.active !== 'boolean'
     || !isRecord(value.sourceDevice)
     || typeof value.sourceDevice.id !== 'string'
@@ -1117,6 +1156,10 @@ export function isCalibrationPackage(value: unknown): value is CalibrationPackag
     || typeof value.sourceDevice.appVersion !== 'string'
     || value.sourceDevice.appVersion.length === 0
     || value.sourceDevice.appVersion.length > 64
+    || (value.sourceDevice.buildId !== undefined
+      && (typeof value.sourceDevice.buildId !== 'string'
+        || value.sourceDevice.buildId.length === 0
+        || value.sourceDevice.buildId.length > 128))
     || !isCalibrationPackageFrequencyArray(value.frequenciesHz)
     || !isCalibrationPackageGainArray(value.bandsDb)) return false
 
@@ -1250,6 +1293,61 @@ function isCandidateId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 128
 }
 
+function isEmptyPayload(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length === 0
+}
+
+function isProfileNamePayload(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.name === 'string'
+    && value.name.trim().length > 0
+    && value.name.length <= 128
+}
+
+function isPresetPayload(value: unknown): boolean {
+  return isRecord(value) && isInteger(value.preset) && value.preset >= 0 && value.preset <= 128
+}
+
+function isProbeDiagnosticsPayload(value: unknown): boolean {
+  if (!isRecord(value)
+    || typeof value.running !== 'boolean'
+    || typeof value.available !== 'boolean'
+    || !isInteger(value.highest)
+    || !isInteger(value.recommended)
+    || !Array.isArray(value.results)
+    || value.results.length > 128) return false
+  return value.results.every((entry) => isRecord(entry)
+    && isInteger(entry.requested)
+    && entry.requested >= 1
+    && entry.requested <= 128
+    && typeof entry.constructed === 'boolean'
+    && typeof entry.hasControl === 'boolean'
+    && typeof entry.enabled === 'boolean'
+    && isInteger(entry.actualBands)
+    && entry.actualBands >= 0
+    && typeof entry.pass === 'boolean')
+}
+
+function isDiagnosticDeviceInfoPayload(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const numericFields = [
+    'javaHeapMax',
+    'javaHeapTotal',
+    'javaHeapFree',
+    'nativeHeapAllocated',
+    'nativeHeapSize',
+    'pssTotalKb',
+    'privateDirtyKb',
+    'sharedDirtyKb',
+    'cpuPercent',
+    'audioserverCpuPercent',
+    'persistentProbeBands',
+  ]
+  return numericFields.every((field) => isFiniteNumber(value[field]))
+    && (value.audioserverPid === null || isInteger(value.audioserverPid))
+    && typeof value.persistentProbeActive === 'boolean'
+}
+
 function isSessionWithChannel(value: unknown): value is Record<string, unknown> & CalibrationSessionBeginPayload {
   if (!isSessionPayload(value) || !isCalibrationChannel(value.channel)) return false
   if (value.phase !== undefined && !isMeasurementPhase(value.phase)) return false
@@ -1270,6 +1368,11 @@ function isSessionWithOptionalContext(value: unknown): value is Record<string, u
     && (value.context === undefined || isMeasurementContext(value.context))
 }
 
+function isMeasurementPreparePayload(value: unknown): boolean {
+  return isSessionWithChannel(value)
+    && (value.context === undefined || isMeasurementContext(value.context))
+}
+
 export function isCalibrationSessionPositionContinuedPayload(value: unknown): value is CalibrationSessionPositionContinuedPayload {
   return isSessionPayload(value) && isMeasurementContext(value.context)
 }
@@ -1286,14 +1389,50 @@ function isAbortPayload(value: unknown): value is Record<string, unknown> & Cali
 
 export function validatePayload(type: string, payload: unknown): string | null {
   switch (type) {
+    case 'ping':
+    case 'pong':
+    case 'state.get':
+    case 'engine.enable':
+    case 'engine.bypass':
+    case 'virtualizer.on':
+    case 'virtualizer.off':
+    case 'profile.list':
+    case 'calibration.get':
+    case 'calibration.reset':
+    case 'calibration.export':
+    case 'probe.persistent.release':
+      return isEmptyPayload(payload) ? null : `${type} requires an empty request payload`
+    case 'engine.applyPreset':
+      return isPresetPayload(payload) ? null : `${type} requires a valid preset id`
+    case 'profile.save':
+    case 'profile.load':
+    case 'profile.delete':
+      return isProfileNamePayload(payload) ? null : `${type} requires a bounded profile name`
+    case 'diagnostics.deviceInfo':
+      return isEmptyPayload(payload) || isDiagnosticDeviceInfoPayload(payload)
+        ? null
+        : `${type} requires an empty request or valid device diagnostics`
+    case 'probe.status':
+      return isEmptyPayload(payload) || isProbeDiagnosticsPayload(payload)
+        ? null
+        : `${type} requires an empty request or valid probe diagnostics`
+    case 'probe.result':
+      return isProbeDiagnosticsPayload(payload) ? null : `${type} requires valid probe diagnostics`
+    case 'diagnostics.effects':
+    case 'diagnostics.probe':
+      return isEmptyPayload(payload)
+        || (isRecord(payload) && Array.isArray(payload.inventory) && Array.isArray(payload.sessionProbes))
+        ? null
+        : `${type} requires an empty request or valid effect diagnostics`
     case 'state.snapshot':
     case 'state.changed':
       return isStateSnapshot(payload) ? null : `${type} requires a valid state snapshot`
     case 'engine.setBands':
       return isUserBandsPayload(payload) ? null : `${type} requires 24 finite bands within ±15 dB`
     case 'calibrationSession.begin':
-    case 'measurement.prepare':
       return isSessionWithChannel(payload) ? null : `${type} requires sessionId and channel`
+    case 'measurement.prepare':
+      return isMeasurementPreparePayload(payload) ? null : `${type} requires sessionId, channel, and an optional valid context`
     case 'probe.run':
       return isProbeRunPayload(payload) ? null : `${type} requires a band count from 1 to 128`
     case 'probe.persistent.start':
@@ -1325,8 +1464,7 @@ export function validatePayload(type: string, payload: unknown): string | null {
       return isAbortPayload(payload) ? null : `${type} requires sessionId and a valid code`
     case 'calibration.applyCandidate':
       return isCalibrationApplyPayload(payload) ? null : `${type} requires 64 finite bands and optional paired channel curves`
-    case 'calibration.export':
-      return isRecord(payload) && Object.keys(payload).length === 0 ? null : `${type} requires an empty request payload`
+
     case 'calibration.import':
       return isCalibrationPackage(payload) ? null : `${type} requires a valid SweetSpot calibration package`
     case 'calibration.acceptCandidate':
@@ -1350,7 +1488,7 @@ export function validatePayload(type: string, payload: unknown): string | null {
         ? null
         : `${type} requires sessionId and a valid code`
     default:
-      return null
+      return `${type} has no payload validator`
   }
 }
 

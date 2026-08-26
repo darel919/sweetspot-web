@@ -88,6 +88,18 @@ function record(
   return { context: context(contextOptions), channel, analysis: analysis(values, status, signalRms) }
 }
 
+function recordWithFrequencies(
+  frequencies: readonly number[],
+  options: Partial<MeasurementContext & { channel: 'left' | 'right' }> = {},
+): MeasurementRecord {
+  const base = record(frequencies.map(() => 1), options)
+  const points = frequencies.map((frequencyHz) => ({ frequencyHz, magnitudeDb: 1 }))
+  return {
+    ...base,
+    analysis: { ...base.analysis, rawPoints: points, correctedPoints: points, displayPoints: points },
+  }
+}
+
 describe('physical-position spatial aggregation', () => {
   test('uses one accepted physical capture per channel and reports spatial spread', () => {
     const records = [
@@ -114,6 +126,8 @@ describe('physical-position spatial aggregation', () => {
     expect(right).not.toBeNull()
     if (!left || !right) throw new Error('Expected channel aggregates.')
     const combined = combineChannelAggregates(left, right)
+    expect(combined).not.toBeNull()
+    if (!combined) throw new Error('Expected paired channel aggregate.')
     expect(combined.relativeChannelLevelDb).toBeCloseTo(6.0206, 3)
     expect(combined.points.map((point) => point.magnitudeDb)).toEqual([2, -1, 3])
   })
@@ -143,6 +157,20 @@ describe('physical-position spatial aggregation', () => {
     expect(aggregate?.positionResponses).toHaveLength(1)
     expect(aggregate?.positionResponses[0]?.positionId).toBe('center')
     expect(aggregate?.points[0]?.magnitudeDb).toBeCloseTo(5, 5)
+  })
+
+  test('rejects disjoint channel aggregates instead of manufacturing zero points', () => {
+    const left = aggregateResponse([record([1, 1, 1], { positionId: 'left', channel: 'left' })], 'left')
+    const right = aggregateResponse([record([1, 1, 1], { positionId: 'right', channel: 'right' })], 'right')
+    if (!left || !right) throw new Error('Expected channel aggregates.')
+    expect(combineChannelAggregates(left, right)).toBeNull()
+  })
+
+  test('rejects paired channels with mismatched frequency grids', () => {
+    const left = aggregateResponse([recordWithFrequencies([100, 200, 300], { channel: 'left' })], 'left')
+    const right = aggregateResponse([recordWithFrequencies([100, 220, 300], { channel: 'right' })], 'right')
+    if (!left || !right) throw new Error('Expected channel aggregates.')
+    expect(combineChannelAggregates(left, right)).toBeNull()
   })
 
   test('plans center, left, and right as three composite physical positions', () => {
@@ -186,6 +214,7 @@ describe('physical-position spatial aggregation', () => {
     const aggregate = aggregateResponse([
       record([8, 8, 8], { positionId: 'center', positionIndex: 0, channel: 'left' }),
       record([8, 8, 8], { positionId: 'left', positionIndex: 1, channel: 'left' }),
+      record([8, 8, 8], { positionId: 'right', positionIndex: 2, channel: 'left' }),
     ], 'left')
     expect(aggregate).not.toBeNull()
     expect(aggregate ? allCaptureQualityPassed(aggregate) : false).toBe(true)
