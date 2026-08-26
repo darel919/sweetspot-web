@@ -42,6 +42,11 @@ export interface DirectArrivalDiagnostics {
   candidateArrivalIndex: number | null
   acceptedArrivalIndex: number | null
   rejectionReason: DirectArrivalRejectionReason | null
+  supportWindowRms: number | null
+  supportWindowThreshold: number | null
+  supportSampleCount: number | null
+  laterReflectionIndex: number | null
+  laterReflectionPeak: number | null
 }
 
 export interface ImpulseResponsePoint {
@@ -219,7 +224,8 @@ function referenceCacheKey(
     sweep.durationMs,
     sweep.preRollMs,
     sweep.postRollMs,
-    sweep.levelDbfs,
+    sweep.sweepLevelDbfs,
+    sweep.markerLevelDbfs,
     sweep.fadeInMs,
     sweep.fadeOutMs,
     sampleRate,
@@ -408,6 +414,11 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
   directPeak: number
   acceptanceThreshold: number
   rejectionReason: DirectArrivalRejectionReason | null
+  supportWindowRms?: number
+  supportWindowThreshold?: number
+  supportSampleCount?: number
+  laterReflectionIndex?: number | null
+  laterReflectionPeak?: number | null
 } {
   // The causal impulse starts at the trimmed active-sweep boundary. A short
   // tail must not become the noise estimate for the direct path at index zero.
@@ -483,15 +494,32 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
       supportSamples++
     }
     const supportRms = Math.sqrt(supportEnergy / Math.max(1, supportSamples))
-    if (supportRms >= Math.max(noiseFloorRms * 1.5, threshold * 0.05)
-      || (index === 0 && directPeak >= threshold)) return {
-      index,
-      peakIndex: directPeakIndex,
-      noiseRms: noiseFloorRms,
-      peak,
-      directPeak,
-      acceptanceThreshold: threshold,
-      rejectionReason: null,
+    const supportThreshold = Math.max(noiseFloorRms * 1.5, threshold * 0.05)
+    if (supportRms >= supportThreshold
+      || (index === 0 && directPeak >= threshold)) {
+      let laterReflectionIndex: number | null = null
+      let laterReflectionPeak = 0
+      for (let cursor = Math.min(samples.length, index + supportRadius + 1); cursor < samples.length; cursor++) {
+        const value = Math.abs(samples[cursor] ?? 0)
+        if (value > laterReflectionPeak) {
+          laterReflectionPeak = value
+          laterReflectionIndex = cursor
+        }
+      }
+      return {
+        index,
+        peakIndex: directPeakIndex,
+        noiseRms: noiseFloorRms,
+        peak,
+        directPeak,
+        acceptanceThreshold: threshold,
+        rejectionReason: null,
+        supportWindowRms: supportRms,
+        supportWindowThreshold: supportThreshold,
+        supportSampleCount: supportSamples,
+        laterReflectionIndex,
+        laterReflectionPeak,
+      }
     }
   }
   return {
@@ -514,6 +542,11 @@ function directArrivalDiagnostics(arrival: ReturnType<typeof findDirectArrival>)
     candidateArrivalIndex: arrival.peakIndex,
     acceptedArrivalIndex: arrival.index,
     rejectionReason: arrival.rejectionReason,
+    supportWindowRms: arrival.supportWindowRms ?? null,
+    supportWindowThreshold: arrival.supportWindowThreshold ?? null,
+    supportSampleCount: arrival.supportSampleCount ?? null,
+    laterReflectionIndex: arrival.laterReflectionIndex ?? null,
+    laterReflectionPeak: arrival.laterReflectionPeak ?? null,
   }
 }
 

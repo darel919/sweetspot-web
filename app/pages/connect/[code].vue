@@ -122,6 +122,7 @@
           @apply-test-curve="applyTestCurve"
           @capture-transfer-probe="captureTransferProbe"
           @run-routing-probe="runRoutingProbe"
+          @run-marker-probe="runMarkerProbe"
           @clear-probe-evidence="probeEvidence = []"
           @export-probe-evidence="exportProbeEvidence"
           @set-virtualizer="setVirtualizer"
@@ -1688,6 +1689,38 @@ async function captureProbeSweep(kind: 'transfer' | 'routing'): Promise<Aggregat
     startProbeSession(kind)
   })
   return finished
+}
+
+async function runMarkerProbe() {
+  if (probeLabPending.value || measurementBusy.value || !deviceOnline.value) return
+  probeLabPending.value = true
+  probeLabMessage.value = 'Running the marker-only set at the five fixed positions…'
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let started = false
+      const stop = watch(measurementStage, (nextStage) => {
+        if (!started) return
+        if (nextStage === 'complete') {
+          stop()
+          resolve()
+        } else if (nextStage === 'error' || nextStage === 'idle') {
+          stop()
+          reject(new Error(measurementMessage.value || 'The marker probe was cancelled.'))
+        }
+      }, { immediate: true })
+      startProbeSession('marker-only')
+      started = true
+    })
+    const diagnostics = measurementTakeDiagnostics.value
+    const failed = diagnostics.filter((take) => take.diagnostics.analysisStatus !== 'ok')
+    probeLabMessage.value = failed.length === 0
+      ? `Marker-only set passed at ${diagnostics.length} positions.`
+      : `Marker-only set finished with ${failed.length} failed captures. Export the debug bundle for candidate and pair diagnostics.`
+  } catch (error: unknown) {
+    probeLabMessage.value = error instanceof Error ? error.message : 'Marker-only probe failed.'
+  } finally {
+    probeLabPending.value = false
+  }
 }
 
 async function applyProbeCurvePayload(payload: Record<string, number[]>) {

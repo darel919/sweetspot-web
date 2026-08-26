@@ -10,6 +10,7 @@ import {
 } from './impulse'
 
 const sweep = {
+  sweepRevision: 'android-sweep-v2' as const,
   algorithm: 'exponential-sine-v1' as const,
   captureKind: 'position-composite' as const,
   sampleRate: 8_000,
@@ -26,7 +27,8 @@ const sweep = {
   endMarkerEndHz: 1_200,
   endMarkerDurationMs: 20,
   interSweepGapMs: 20,
-  levelDbfs: -12,
+  sweepLevelDbfs: -12,
+  markerLevelDbfs: -12,
   fadeInMs: 10,
   fadeOutMs: 10,
 }
@@ -128,7 +130,14 @@ describe('browser-local impulse analysis', () => {
     impulse[99] = 0.25
     impulse[101] = 0.25
     impulse[1_000] = 1
-    expect(findDirectArrival(impulse, 8_000, 0.001).index).toBe(100)
+    const result = findDirectArrival(impulse, 8_000, 0.001)
+    expect(result.index).toBe(100)
+    expect(result.rejectionReason).toBeNull()
+    expect(result.supportWindowRms).toBeGreaterThan(0)
+    expect(result.supportWindowThreshold).toBeGreaterThan(0)
+    expect(result.supportSampleCount).toBeGreaterThan(0)
+    expect(result.laterReflectionIndex).toBe(1_000)
+    expect(result.laterReflectionPeak).toBe(1)
   })
 
   test('respects an external deconvolved noise estimate', () => {

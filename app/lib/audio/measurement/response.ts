@@ -1,4 +1,9 @@
-import type { MeasurementSweep, MeasurementSyncMarkerFailureReason } from '#shared/types/protocol'
+import type {
+  MeasurementMarkerCandidate,
+  MeasurementMarkerPairCandidate,
+  MeasurementSweep,
+  MeasurementSyncMarkerFailureReason,
+} from '#shared/types/protocol'
 import { generateSyncMarker, sweepSampleParts } from '../sweep-reference'
 import {
   micCompensationDbAtHz,
@@ -27,8 +32,10 @@ const CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION = 0.55
 /** Exact timing contributes half of the pair score, so timing can promote acoustic peaks. */
 const MARKER_PAIR_SCORE_THRESHOLD = 0.63
 const MARKER_PAIR_SEARCH_MAX_DRIFT_PPM = 5_000
-const MAX_MARKER_CANDIDATES = 64
+const MAX_MARKER_CANDIDATES = 16
 const MARKER_CANDIDATE_DEDUP_DISTANCE_FRACTION = 1 / 32
+const MARKER_PAIR_AMBIGUITY_MARGIN = 0.05
+const MARKER_PAIR_AMBIGUITY_RATIO = 1.1
 
 export type SyncMarkerFailureReason = MeasurementSyncMarkerFailureReason
 
@@ -55,7 +62,19 @@ export interface SweepDetection {
   rawTrailingMarkerConfidence: number
   bestLeadingMarkerSample: number | null
   bestTrailingMarkerSample: number | null
+  leadingMarkerCandidates: MeasurementMarkerCandidate[]
+  trailingMarkerCandidates: MeasurementMarkerCandidate[]
+  markerPairCandidates: MeasurementMarkerPairCandidate[]
+  leadingBestCorrelation: number | null
+  leadingSecondCorrelation: number | null
+  leadingCorrelationMargin: number | null
+  trailingBestCorrelation: number | null
+  trailingSecondCorrelation: number | null
+  trailingCorrelationMargin: number | null
   markerPairScore: number | null
+  secondMarkerPairScore: number | null
+  markerPairScoreMargin: number | null
+  markerPairScoreRatio: number | null
   markerSeparationError: number | null
   markerTimingAgreement: number | null
   /** Raw marker separation expressed in ppm; it may be acoustic localization bias. */
@@ -84,7 +103,19 @@ export interface MeasurementAnalysisDiagnostics {
   rawTrailingMarkerConfidence: number
   bestLeadingMarkerSample: number | null
   bestTrailingMarkerSample: number | null
+  leadingMarkerCandidates: MeasurementMarkerCandidate[]
+  trailingMarkerCandidates: MeasurementMarkerCandidate[]
+  markerPairCandidates: MeasurementMarkerPairCandidate[]
+  leadingBestCorrelation: number | null
+  leadingSecondCorrelation: number | null
+  leadingCorrelationMargin: number | null
+  trailingBestCorrelation: number | null
+  trailingSecondCorrelation: number | null
+  trailingCorrelationMargin: number | null
   markerPairScore: number | null
+  secondMarkerPairScore: number | null
+  markerPairScoreMargin: number | null
+  markerPairScoreRatio: number | null
   markerSeparationError: number | null
   markerTimingAgreement: number | null
   markerSeparationPpm: number | null
@@ -104,6 +135,11 @@ export interface MeasurementAnalysisDiagnostics {
   directArrivalCandidateSample?: number | null
   directArrivalAcceptedSample?: number | null
   directArrivalRejectionReason?: string | null
+  directSupportWindowRms?: number | null
+  directSupportWindowThreshold?: number | null
+  directSupportSampleCount?: number | null
+  bestLaterReflectionSample?: number | null
+  bestLaterReflectionPeak?: number | null
   failureReason: MeasurementAnalysisFailure | null
 }
 
@@ -233,7 +269,19 @@ function emptySweepDetection(failureReason: SweepDetection['failureReason'] = 'm
     rawTrailingMarkerConfidence: 0,
     bestLeadingMarkerSample: null,
     bestTrailingMarkerSample: null,
+    leadingMarkerCandidates: [],
+    trailingMarkerCandidates: [],
+    markerPairCandidates: [],
+    leadingBestCorrelation: null,
+    leadingSecondCorrelation: null,
+    leadingCorrelationMargin: null,
+    trailingBestCorrelation: null,
+    trailingSecondCorrelation: null,
+    trailingCorrelationMargin: null,
     markerPairScore: null,
+    secondMarkerPairScore: null,
+    markerPairScoreMargin: null,
+    markerPairScoreRatio: null,
     markerSeparationError: null,
     markerTimingAgreement: null,
     markerSeparationPpm: null,
@@ -447,7 +495,9 @@ function detectionFailureForPeaks(
   trailingConfidence: number,
 ): SyncMarkerFailureReason {
   if (leadingConfidence < MARKER_DISCOVERY_FLOOR && trailingConfidence < MARKER_DISCOVERY_FLOOR) return 'marker_absent'
-  if (leadingConfidence >= MARKER_MIN_CORRELATION && trailingConfidence < MARKER_MIN_CORRELATION) return 'end_marker_missing'
+  if (leadingConfidence < MARKER_MIN_CORRELATION && trailingConfidence < MARKER_MIN_CORRELATION) return 'marker_pair_low_confidence'
+  if (leadingConfidence < MARKER_MIN_CORRELATION) return 'leading_marker_weak'
+  if (trailingConfidence < MARKER_MIN_CORRELATION) return 'trailing_marker_weak'
   return 'marker_pair_low_confidence'
 }
 
@@ -455,6 +505,51 @@ function detectionFailureForTimingPair(pair: MarkerPair): SyncMarkerFailureReaso
   return Math.min(pair.leadingConfidence, pair.trailingConfidence) < CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION
     ? 'marker_pair_low_confidence'
     : 'clock_drift_unreliable'
+}
+
+function markerCandidateStats(candidates: readonly number[], correlation: Float64Array): {
+  values: MeasurementMarkerCandidate[]
+  best: number | null
+  second: number | null
+  margin: number | null
+} {
+  const values = candidates.map((sample) => ({ sample, correlation: correlation[sample] ?? 0 }))
+  const best = values[0]?.correlation ?? null
+  const second = values[1]?.correlation ?? null
+  return {
+    values,
+    best,
+    second,
+    margin: best === null || second === null ? null : best - second,
+  }
+}
+
+function markerPairRejectionReason(pair: MarkerPair): SyncMarkerFailureReason | null {
+  if (Math.abs(pair.driftPpm) > MARKER_PAIR_SEARCH_MAX_DRIFT_PPM) return 'marker_pair_bad_timing'
+  if (Math.abs(pair.driftPpm) > CLOCK_DRIFT_HARD_REJECT_PPM) return detectionFailureForTimingPair(pair)
+  if (Math.min(pair.leadingConfidence, pair.trailingConfidence) < MARKER_MIN_CORRELATION) {
+    return detectionFailureForPeaks(pair.leadingConfidence, pair.trailingConfidence)
+  }
+  return pair.score >= MARKER_PAIR_SCORE_THRESHOLD ? null : 'marker_pair_low_confidence'
+}
+
+function markerPairCandidate(
+  pair: MarkerPair,
+  accepted: boolean,
+  rejectionReason: MeasurementSyncMarkerFailureReason | null,
+): MeasurementMarkerPairCandidate {
+  return {
+    leadingSample: pair.leading,
+    trailingSample: pair.trailing,
+    leadingCorrelation: pair.leadingConfidence,
+    trailingCorrelation: pair.trailingConfidence,
+    observedSeparationSamples: pair.observedSeparationSamples,
+    separationPpm: pair.driftPpm,
+    timingAgreement: pair.timingAgreement,
+    pairScore: pair.score,
+    accepted,
+    rejectionReason,
+  }
 }
 
 function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampleRate: number): SweepDetection {
@@ -508,13 +603,28 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
     MARKER_DISCOVERY_FLOOR,
     Math.max(1, Math.floor(endMarker.length * MARKER_CANDIDATE_DEDUP_DISTANCE_FRACTION)),
   )
+  const leadingStats = markerCandidateStats(startCandidates, startCorrelation)
+  const trailingStats = markerCandidateStats(endCandidates, endCorrelation)
+  const baseWithCandidates: SweepDetection = {
+    ...base,
+    leadingMarkerCandidates: leadingStats.values,
+    trailingMarkerCandidates: trailingStats.values,
+    leadingBestCorrelation: leadingStats.best,
+    leadingSecondCorrelation: leadingStats.second,
+    leadingCorrelationMargin: leadingStats.margin,
+    trailingBestCorrelation: trailingStats.best,
+    trailingSecondCorrelation: trailingStats.second,
+    trailingCorrelationMargin: trailingStats.margin,
+  }
   let bestOrdered: MarkerPair | null = null
   let bestWithinSearchWindow: MarkerPair | null = null
   let bestWithinHardLimit: MarkerPair | null = null
+  const allPairs: MarkerPair[] = []
   for (const leading of startCandidates) {
     for (const trailing of endCandidates) {
       const pair = createMarkerPair(leading, trailing, startCorrelation[leading], endCorrelation[trailing], expectedSeparation)
       if (!pair) continue
+      allPairs.push(pair)
       bestOrdered = betterMarkerPair(pair, bestOrdered)
       if (Math.abs(pair.driftPpm) <= MARKER_PAIR_SEARCH_MAX_DRIFT_PPM) {
         bestWithinSearchWindow = betterMarkerPair(pair, bestWithinSearchWindow)
@@ -524,26 +634,72 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       }
     }
   }
-  if (bestWithinHardLimit) {
-    const minimumConfidence = Math.min(bestWithinHardLimit.leadingConfidence, bestWithinHardLimit.trailingConfidence)
-    const accepted = minimumConfidence >= MARKER_MIN_CORRELATION
-      && bestWithinHardLimit.score >= MARKER_PAIR_SCORE_THRESHOLD
-    const peakFailure = detectionFailureForPeaks(leadingPeak.confidence, trailingPeak.confidence)
+  allPairs.sort((left, right) => right.score - left.score || left.separationError - right.separationError)
+  const selectedPair = bestWithinHardLimit ?? bestWithinSearchWindow ?? bestOrdered
+  const hardPairs = allPairs.filter((pair) =>
+    Math.abs(pair.driftPpm) <= CLOCK_DRIFT_HARD_REJECT_PPM
+      && Math.min(pair.leadingConfidence, pair.trailingConfidence) >= CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION,
+  )
+  const secondPair = selectedPair
+    ? hardPairs.find((pair) => {
+      const leadingDistance = Math.abs(pair.leading - selectedPair.leading)
+      const trailingDistance = Math.abs(pair.trailing - selectedPair.trailing)
+      const markerLobeDistance = Math.max(4, Math.round(Math.min(startMarker.length, endMarker.length) * 0.25))
+      return (leadingDistance >= markerLobeDistance || trailingDistance >= markerLobeDistance)
+        && (pair.leading !== selectedPair.leading || pair.trailing !== selectedPair.trailing)
+    }) ?? null
+    : null
+  const pairIsAmbiguous = selectedPair !== null
+    && secondPair !== null
+    && (selectedPair.score - secondPair.score < MARKER_PAIR_AMBIGUITY_MARGIN
+      || (secondPair.score > 0 && selectedPair.score / secondPair.score < MARKER_PAIR_AMBIGUITY_RATIO))
+  const baseWithPairCandidates: SweepDetection = {
+    ...baseWithCandidates,
+    markerPairCandidates: allPairs.slice(0, MAX_MARKER_CANDIDATES).map((pair) => {
+      const rejectionReason = pair === selectedPair && pairIsAmbiguous
+        ? 'marker_pair_ambiguous'
+        : markerPairRejectionReason(pair)
+      return markerPairCandidate(pair, pair === selectedPair && rejectionReason === null, rejectionReason)
+    }),
+    secondMarkerPairScore: secondPair?.score ?? null,
+    markerPairScoreMargin: selectedPair && secondPair ? selectedPair.score - secondPair.score : null,
+    markerPairScoreRatio: selectedPair && secondPair && secondPair.score > 0 ? selectedPair.score / secondPair.score : null,
+  }
+  const peakFailure = detectionFailureForPeaks(leadingPeak.confidence, trailingPeak.confidence)
+  const minimumPeakConfidence = Math.min(leadingPeak.confidence, trailingPeak.confidence)
+  const weakPairEvidence = minimumPeakConfidence < CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION
+    && (minimumPeakConfidence < MARKER_MIN_CORRELATION || (bestOrdered?.score ?? 0) < MARKER_PAIR_SCORE_THRESHOLD)
+  if (bestOrdered && weakPairEvidence) {
     return detectionWithPair(
-      base,
+      baseWithPairCandidates,
+      bestOrdered,
+      sweep,
+      sampleRate,
+      tvParts,
+      false,
+      peakFailure,
+    )
+  }
+  if (bestWithinHardLimit) {
+    const selectedFailure = pairIsAmbiguous
+      ? 'marker_pair_ambiguous'
+      : markerPairRejectionReason(bestWithinHardLimit)
+    const accepted = selectedFailure === null
+    return detectionWithPair(
+      baseWithPairCandidates,
       bestWithinHardLimit,
       sweep,
       sampleRate,
       tvParts,
       accepted,
-      accepted ? null : peakFailure,
+      accepted ? null : (selectedFailure ?? peakFailure),
     )
   }
   if (bestWithinSearchWindow) {
     const peakFailure = detectionFailureForPeaks(leadingPeak.confidence, trailingPeak.confidence)
-    if (peakFailure === 'marker_absent' || peakFailure === 'end_marker_missing') {
+    if (peakFailure === 'marker_absent' || peakFailure === 'leading_marker_weak' || peakFailure === 'trailing_marker_weak') {
       return detectionWithPair(
-        base,
+        baseWithPairCandidates,
         bestWithinSearchWindow,
         sweep,
         sampleRate,
@@ -553,7 +709,7 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       )
     }
     return detectionWithPair(
-      base,
+      baseWithPairCandidates,
       bestWithinSearchWindow,
       sweep,
       sampleRate,
@@ -564,9 +720,9 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
   }
   if (bestOrdered) {
     const peakFailure = detectionFailureForPeaks(leadingPeak.confidence, trailingPeak.confidence)
-    if (peakFailure === 'marker_absent' || peakFailure === 'end_marker_missing') {
+    if (peakFailure === 'marker_absent' || peakFailure === 'leading_marker_weak' || peakFailure === 'trailing_marker_weak') {
       return detectionWithPair(
-        base,
+        baseWithPairCandidates,
         bestOrdered,
         sweep,
         sampleRate,
@@ -576,7 +732,7 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       )
     }
     return detectionWithPair(
-      base,
+      baseWithPairCandidates,
       bestOrdered,
       sweep,
       sampleRate,
@@ -585,21 +741,21 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       'marker_pair_bad_timing',
     )
   }
-  const peakFailure = detectionFailureForPeaks(leadingPeak.confidence, trailingPeak.confidence)
-  if (peakFailure === 'marker_absent' || peakFailure === 'end_marker_missing') {
+  const finalPeakFailure = detectionFailureForPeaks(leadingPeak.confidence, trailingPeak.confidence)
+  if (finalPeakFailure === 'marker_absent' || finalPeakFailure === 'leading_marker_weak' || finalPeakFailure === 'trailing_marker_weak') {
     return {
-      ...base,
-      failureReason: peakFailure,
+      ...baseWithPairCandidates,
+      failureReason: finalPeakFailure,
     }
   }
   if (startCandidates.length > 0 && endCandidates.length > 0) {
     return {
-      ...base,
+      ...baseWithPairCandidates,
       failureReason: 'marker_pair_bad_timing',
     }
   }
   return {
-    ...base,
+    ...baseWithPairCandidates,
     failureReason: detectionFailureForPeaks(leadingPeak.confidence, trailingPeak.confidence),
   }
 }
@@ -700,6 +856,7 @@ interface MeasurementWindowOptions {
   detection?: SweepDetection
   postRollMs?: number
   noiseAnchorSample?: number
+  markerOnly?: boolean
 }
 
 function analyzeMeasurementWindow(
@@ -735,7 +892,19 @@ function analyzeMeasurementWindow(
     rawTrailingMarkerConfidence: detection.rawTrailingMarkerConfidence,
     bestLeadingMarkerSample: detection.bestLeadingMarkerSample,
     bestTrailingMarkerSample: detection.bestTrailingMarkerSample,
+    leadingMarkerCandidates: detection.leadingMarkerCandidates,
+    trailingMarkerCandidates: detection.trailingMarkerCandidates,
+    markerPairCandidates: detection.markerPairCandidates,
+    leadingBestCorrelation: detection.leadingBestCorrelation,
+    leadingSecondCorrelation: detection.leadingSecondCorrelation,
+    leadingCorrelationMargin: detection.leadingCorrelationMargin,
+    trailingBestCorrelation: detection.trailingBestCorrelation,
+    trailingSecondCorrelation: detection.trailingSecondCorrelation,
+    trailingCorrelationMargin: detection.trailingCorrelationMargin,
     markerPairScore: detection.markerPairScore,
+    secondMarkerPairScore: detection.secondMarkerPairScore,
+    markerPairScoreMargin: detection.markerPairScoreMargin,
+    markerPairScoreRatio: detection.markerPairScoreRatio,
     markerSeparationError: detection.markerSeparationError,
     markerTimingAgreement: detection.markerTimingAgreement,
     markerSeparationPpm: detection.markerSeparationPpm,
@@ -752,6 +921,7 @@ function analyzeMeasurementWindow(
   }
 
   if (signal.rms < 0.0001) return emptyAnalysis('signal_too_low', micProfile, baseDiagnostics)
+  if (options.markerOnly) return emptyAnalysis(detection.found ? 'ok' : 'sync_marker_not_found', micProfile, baseDiagnostics)
   if (!detection.found || detection.startSample === null) {
     return emptyAnalysis(
       detection.failureReason === 'clock_drift_unreliable'
@@ -789,6 +959,11 @@ function analyzeMeasurementWindow(
     directArrivalCandidateSample: directArrival.candidateArrivalIndex,
     directArrivalAcceptedSample: directArrival.acceptedArrivalIndex,
     directArrivalRejectionReason: directArrival.rejectionReason,
+    directSupportWindowRms: directArrival.supportWindowRms,
+    directSupportWindowThreshold: directArrival.supportWindowThreshold,
+    directSupportSampleCount: directArrival.supportSampleCount,
+    bestLaterReflectionSample: directArrival.laterReflectionIndex,
+    bestLaterReflectionPeak: directArrival.laterReflectionPeak,
   }
   if (directArrival.acceptedArrivalIndex === null) {
     return emptyAnalysis(
@@ -852,6 +1027,13 @@ export function analyzeCompositeMeasurement(
 ): CompositeMeasurementAnalysis {
   const centeredSamples = removeDc(samples)
   const detection = detectSweepStart(centeredSamples, sweep, sampleRate)
+  if (sweep.captureKind === 'marker-only') {
+    const markerAnalysis = analyzeMeasurementWindow(centeredSamples, sampleRate, sweep, micProfile, {
+      detection,
+      markerOnly: true,
+    })
+    return { status: markerAnalysis.status, detection, left: markerAnalysis, right: markerAnalysis }
+  }
   if (!detection.found || detection.startSample === null || detection.rightStartSample === null) {
     const failed = analyzeMeasurementWindow(centeredSamples, sampleRate, sweep, micProfile, { detection })
     return { status: failed.status, detection, left: failed, right: failed }

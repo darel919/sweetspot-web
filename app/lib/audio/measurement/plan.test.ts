@@ -66,9 +66,13 @@ describe('physical-position measurement sequencing', () => {
     expect(validation).toMatchObject({ phase: 'validation', reference: 'center', xCm: 0, yCm: 0, zCm: 0 })
   })
 
-  test('probe plans remain composite and do not add duplicate takes', () => {
+  test('probe plans keep composite transfer and routing separate from marker-only captures', () => {
     expect(createProbeMeasurementPlan('transfer')).toHaveLength(1)
     expect(createProbeMeasurementPlan('routing').map((context) => context.positionId)).toEqual(['left', 'right'])
     expect(createProbeMeasurementPlan('routing').every((context) => context.channel === 'both')).toBe(true)
+    const markerPlan = createProbeMeasurementPlan('marker-only')
+    expect(markerPlan.map((context) => context.positionId)).toEqual(['center', 'left', 'right', 'forward', 'backward'])
+    expect(markerPlan.every((context) => context.captureKind === 'marker-only')).toBe(true)
+    expect(markerPlan.every((context) => isMeasurementContext(context))).toBe(true)
   })
 })

@@ -4,6 +4,7 @@ import golden from '../../../test-vectors/measurement-sweep-golden.json'
 import { generateCompositeSweepStereoReference, generateSweepReference, generateSweepSignal, generateSyncMarker, sweepSampleParts } from './sweep-reference'
 
 const sweep: MeasurementSweep = {
+  sweepRevision: 'android-sweep-v2',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
   sampleRate: 48_000,
@@ -20,12 +21,14 @@ const sweep: MeasurementSweep = {
   endMarkerEndHz: 1_500,
   endMarkerDurationMs: 40,
   interSweepGapMs: 50,
-  levelDbfs: -12,
+  sweepLevelDbfs: -12,
+  markerLevelDbfs: -12,
   fadeInMs: 20,
   fadeOutMs: 20,
 }
 
 const androidDefaultSweep: MeasurementSweep = {
+  sweepRevision: 'android-sweep-v2',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
   sampleRate: 48_000,
@@ -42,15 +45,16 @@ const androidDefaultSweep: MeasurementSweep = {
   endMarkerEndHz: 1_500,
   endMarkerDurationMs: 150,
   interSweepGapMs: 50,
-  levelDbfs: -12,
+  sweepLevelDbfs: -12,
+  markerLevelDbfs: -12,
   fadeInMs: 20,
   fadeOutMs: 20,
 }
 
 describe('sweep reference', () => {
   test('evaluates candidate field levels without clipping the deterministic sweep', () => {
-    for (const levelDbfs of [-18, -15, -12, -9, -6]) {
-      const signal = generateSweepSignal({ ...sweep, levelDbfs })
+    for (const sweepLevelDbfs of [-18, -15, -12, -9, -6]) {
+      const signal = generateSweepSignal({ ...sweep, sweepLevelDbfs })
       const peak = signal.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0)
       expect(peak).toBeLessThanOrEqual(1)
       expect(peak).toBeGreaterThan(0)

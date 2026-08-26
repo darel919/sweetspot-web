@@ -10,6 +10,7 @@ import { mapCorrectionToBandsConservative } from '../correction/bandMapper'
 import type { ResponsePoint } from './response'
 
 const sweep: MeasurementSweep = {
+  sweepRevision: 'android-sweep-v2',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
   sampleRate: 8_000,
@@ -26,12 +27,14 @@ const sweep: MeasurementSweep = {
   endMarkerEndHz: 1_200,
   endMarkerDurationMs: 20,
   interSweepGapMs: 20,
-  levelDbfs: -12,
+  sweepLevelDbfs: -12,
+  markerLevelDbfs: -12,
   fadeInMs: 10,
   fadeOutMs: 10,
 }
 
 const androidCalibrationSweep: MeasurementSweep = {
+  sweepRevision: 'android-sweep-v2',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
   sampleRate: 48_000,
@@ -48,7 +51,8 @@ const androidCalibrationSweep: MeasurementSweep = {
   endMarkerEndHz: 1_500,
   endMarkerDurationMs: 150,
   interSweepGapMs: 50,
-  levelDbfs: -12,
+  sweepLevelDbfs: -12,
+  markerLevelDbfs: -12,
   fadeInMs: 20,
   fadeOutMs: 20,
 }
@@ -211,6 +215,10 @@ describe('measurement response analysis', () => {
     expect(detection.trailingMarkerSample).toBe(delay + parts.trailingMarkerStartSamples)
     expect(detection.confidence).toBeGreaterThan(0.8)
     expect(detection.driftPpm).toBeCloseTo(0, 3)
+    expect(detection.leadingMarkerCandidates.length).toBeGreaterThan(0)
+    expect(detection.leadingMarkerCandidates.length).toBeLessThanOrEqual(16)
+    expect(detection.trailingMarkerCandidates.length).toBeGreaterThan(0)
+    expect(detection.markerPairCandidates[0]?.accepted).toBe(true)
   })
 
   test('accepts moderate acoustic marker correlation when marker timing is exact', () => {
@@ -309,7 +317,7 @@ describe('measurement response analysis', () => {
     const detection = detectSweepStart(capture, androidCalibrationSweep, androidCalibrationSweep.sampleRate)
 
     expect(detection.found).toBe(false)
-    expect(detection.failureReason).toBe('marker_pair_low_confidence')
+    expect(detection.failureReason).toBe('leading_marker_weak')
     expect(detection.expectedMarkerSeparationSamples).toBe(158_400)
     expect(detection.observedMarkerSeparationSamples).toBe(158_574)
     expect(detection.driftPpm).toBeNull()
@@ -395,6 +403,22 @@ describe('measurement response analysis', () => {
     expect(detection.found).toBe(true)
     expect(detection.leadingMarkerSample).toBe(parts.leadingMarkerStartSamples)
     expect(detection.trailingMarkerSample).toBe(parts.trailingMarkerStartSamples)
+  })
+
+  test('rejects an ambiguous pair when two independent marker pairs score alike', () => {
+    const parts = sweepSampleParts(sweep)
+    const capture = new Float32Array(parts.totalSamples + 400)
+    setMarkerCorrelation(capture, sweep, 'start', 0.75, parts.leadingMarkerStartSamples)
+    setMarkerCorrelation(capture, sweep, 'end', 0.75, parts.trailingMarkerStartSamples)
+    setMarkerCorrelation(capture, sweep, 'start', 0.75, parts.leadingMarkerStartSamples + 200)
+    setMarkerCorrelation(capture, sweep, 'end', 0.75, parts.trailingMarkerStartSamples + 200)
+
+    const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(false)
+    expect(detection.failureReason).toBe('marker_pair_ambiguous')
+    expect(detection.secondMarkerPairScore).not.toBeNull()
+    expect(detection.markerPairScoreMargin).toBeLessThan(0.05)
   })
 
   test('keeps detecting markers through low-level room coloration, reflections, noise, and clock mismatch', () => {
@@ -648,7 +672,7 @@ describe('measurement response analysis', () => {
     expect(result.diagnostics.rawLeadingMarkerConfidence).toBeGreaterThan(0.2)
     expect(result.diagnostics.rawTrailingMarkerConfidence).toBeGreaterThan(0)
     expect(result.diagnostics.endingMarkerConfidence).toBeGreaterThan(0)
-    expect(result.diagnostics.syncMarkerFailureReason).toBe('end_marker_missing')
+    expect(result.diagnostics.syncMarkerFailureReason).toBe('trailing_marker_weak')
     expect(result.correctedPoints).toHaveLength(0)
   })
 
@@ -714,6 +738,23 @@ describe('measurement response analysis', () => {
     const activeResult = analyzeMeasurement(activeClip, sweep.sampleRate, sweep, profile)
     expect(activeResult.status).toBe('capture_clipped')
     expect(activeResult.diagnostics.clipped).toBe(true)
+  })
+
+  test('analyzes marker-only captures without generating a response curve', () => {
+    const markerSweep: MeasurementSweep = { ...sweep, captureKind: 'marker-only' }
+    const result = analyzeCompositeMeasurement(
+      generateSweepReference(markerSweep),
+      markerSweep.sampleRate,
+      markerSweep,
+      profile,
+    )
+
+    expect(result.status).toBe('ok')
+    expect(result.left.status).toBe('ok')
+    expect(result.right.status).toBe('ok')
+    expect(result.left.correctedPoints).toHaveLength(0)
+    expect(result.left.diagnostics.bestLeadingMarkerSample).not.toBeNull()
+    expect(result.left.diagnostics.bestTrailingMarkerSample).not.toBeNull()
   })
 
   test('gates late response artifacts using the bounded direct path', () => {

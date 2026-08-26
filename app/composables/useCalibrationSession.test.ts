@@ -22,6 +22,7 @@ import {
 import { isCalibrationOperationCurrent, isSameMeasurementContext } from '../lib/audio/measurement/session-guard'
 
 const sweep: MeasurementSweep = {
+  sweepRevision: 'android-sweep-v2' as const,
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
   sampleRate: 48_000,
@@ -38,7 +39,8 @@ const sweep: MeasurementSweep = {
   endMarkerEndHz: 1_500,
   endMarkerDurationMs: 40,
   interSweepGapMs: 50,
-  levelDbfs: -12,
+  sweepLevelDbfs: -12,
+  markerLevelDbfs: -12,
   fadeInMs: 20,
   fadeOutMs: 20,
 }

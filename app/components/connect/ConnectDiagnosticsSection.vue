@@ -31,6 +31,7 @@ const emit = defineEmits<{
   (event: 'apply-test-curve', curve: 'hollow' | 'flat'): void
   (event: 'capture-transfer-probe'): void
   (event: 'run-routing-probe'): void
+  (event: 'run-marker-probe'): void
   (event: 'clear-probe-evidence'): void
   (event: 'export-probe-evidence'): void
   (event: 'set-virtualizer', enabled: boolean): void
@@ -125,6 +126,7 @@ function fmtBytes(bytes: number): string {
       <label>gain dB <input :value="probeGainDb" type="number" min="-6" max="6" step="0.5" @input="readNumber($event, 'set-probe-gain-db')" /></label>
       <button type="submit" :disabled="probeLabPending">Capture transfer</button>
       <button type="button" :disabled="probeLabPending" @click="emit('run-routing-probe')">Run L/R routing set</button>
+      <button type="button" :disabled="probeLabPending" @click="emit('run-marker-probe')">Run marker-only set</button>
     </form>
     <p v-if="probeLabMessage" class="note">{{ probeLabMessage }}</p>
     <div v-if="probeEvidence.length" class="actions">

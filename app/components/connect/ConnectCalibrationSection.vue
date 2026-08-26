@@ -121,8 +121,25 @@ function curveRange(curve: readonly number[] | undefined): string {
 }
 
 function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): string {
+  if (diagnostics.analysisStatus === 'not_measured') return 'This channel was not measured for the requested repair.'
+  switch (diagnostics.syncMarkerFailureReason) {
+    case 'leading_marker_weak':
+      return 'The start marker was too weak to identify reliably.'
+    case 'trailing_marker_weak':
+      return 'The end marker was too weak to identify reliably.'
+    case 'marker_pair_ambiguous':
+      return 'Multiple marker peaks looked plausible, so SweetSpot rejected the timing pair.'
+    case 'marker_pair_bad_timing':
+      return 'Marker peaks were found, but they did not form a trustworthy timing pair.'
+    case 'clock_drift_unreliable':
+      return 'The TV and iPhone timing was not stable enough for this reading.'
+    case 'marker_pair_low_confidence':
+      return 'Both markers were too weak to form a trustworthy timing pair.'
+    case 'marker_absent':
+      return "SweetSpot couldn't find the known TV test markers."
+  }
   if (typeof diagnostics.markerSeparationPpm === 'number' && diagnostics.clockDriftPpm === null) {
-    return 'The marker timing was ambiguous, so SweetSpot did not call it clock drift. Keep the phone still and retry.'
+    return 'The marker timing was ambiguous, so SweetSpot did not call it clock drift.'
   }
   switch (diagnostics.analysisStatus) {
     case 'sync_marker_not_found':

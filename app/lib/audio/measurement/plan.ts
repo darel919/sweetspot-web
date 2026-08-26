@@ -1,5 +1,6 @@
 import type {
   CalibrationChannel,
+  MeasurementCaptureKind,
   CalibrationPositionId,
   MeasurementContext,
 } from '#shared/types/protocol'
@@ -47,6 +48,7 @@ export function measurementContextForPosition(
   phase: MeasurementContext['phase'],
   repairChannel: MeasurementContext['repairChannel'] = 'both',
   attemptIndex = 0,
+  captureKind: MeasurementCaptureKind = 'position-composite',
 ): MeasurementContext {
   return {
     positionId: position.id,
@@ -57,7 +59,7 @@ export function measurementContextForPosition(
     positionIndex,
     positionCount,
     channel: 'both',
-    captureKind: 'position-composite',
+    captureKind,
     repairChannel,
     attemptIndex,
     attemptCount: MAX_ATTEMPT_COUNT,
@@ -85,7 +87,7 @@ export function createMeasurementPlanForGroups(
   return positions.map((position, positionIndex) => measurementContextForPosition(position, positionIndex, positionCount, phase))
 }
 
-export type ProbePlanKind = 'transfer' | 'routing'
+export type ProbePlanKind = 'transfer' | 'routing' | 'marker-only'
 
 export function createProbeMeasurementPlan(
   kind: ProbePlanKind,
@@ -93,8 +95,18 @@ export function createProbeMeasurementPlan(
 ): MeasurementContext[] {
   const positions = kind === 'transfer'
     ? [DEFAULT_POSITION_SPECS[0]!]
-    : [DEFAULT_POSITION_SPECS[1]!, DEFAULT_POSITION_SPECS[2]!]
-  return positions.map((position, positionIndex) => measurementContextForPosition(position, positionIndex, positions.length, 'measurement'))
+    : kind === 'routing'
+      ? [DEFAULT_POSITION_SPECS[1]!, DEFAULT_POSITION_SPECS[2]!]
+      : DEFAULT_POSITION_SPECS
+  return positions.map((position, positionIndex) => measurementContextForPosition(
+    position,
+    positionIndex,
+    positions.length,
+    'measurement',
+    'both',
+    0,
+    kind === 'marker-only' ? 'marker-only' : 'position-composite',
+  ))
 }
 
 export function createRetryContext(context: MeasurementContext): MeasurementContext | null {

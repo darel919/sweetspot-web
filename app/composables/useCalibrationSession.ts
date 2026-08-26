@@ -304,7 +304,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   const currentInstruction = computed(() => {
     const context = activeContext.value
     if (!context) return null
-    if (sessionMode === 'probe' && context.channel === 'both') {
+    if (sessionMode === 'probe' && context.captureKind !== 'marker-only' && context.channel === 'both') {
       if (context.positionId === 'left') return 'Place the single microphone at the fixed left-speaker position and keep its orientation unchanged.'
       if (context.positionId === 'right') return 'Move the same microphone to the fixed right-speaker position and keep its orientation unchanged.'
       return 'Place the single microphone at the fixed center listening position and keep its orientation unchanged.'
@@ -1324,7 +1324,19 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         rawTrailingMarkerConfidence: child.diagnostics.rawTrailingMarkerConfidence,
         bestLeadingMarkerSample: child.diagnostics.bestLeadingMarkerSample,
         bestTrailingMarkerSample: child.diagnostics.bestTrailingMarkerSample,
+        leadingMarkerCandidates: child.diagnostics.leadingMarkerCandidates,
+        trailingMarkerCandidates: child.diagnostics.trailingMarkerCandidates,
+        markerPairCandidates: child.diagnostics.markerPairCandidates,
+        leadingBestCorrelation: child.diagnostics.leadingBestCorrelation,
+        leadingSecondCorrelation: child.diagnostics.leadingSecondCorrelation,
+        leadingCorrelationMargin: child.diagnostics.leadingCorrelationMargin,
+        trailingBestCorrelation: child.diagnostics.trailingBestCorrelation,
+        trailingSecondCorrelation: child.diagnostics.trailingSecondCorrelation,
+        trailingCorrelationMargin: child.diagnostics.trailingCorrelationMargin,
         markerPairScore: child.diagnostics.markerPairScore,
+        secondMarkerPairScore: child.diagnostics.secondMarkerPairScore,
+        markerPairScoreMargin: child.diagnostics.markerPairScoreMargin,
+        markerPairScoreRatio: child.diagnostics.markerPairScoreRatio,
         markerSeparationError: child.diagnostics.markerSeparationError,
         markerTimingAgreement: child.diagnostics.markerTimingAgreement,
         markerSeparationPpm: child.diagnostics.markerSeparationPpm,
@@ -1350,8 +1362,21 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         decayConfidence: child.room?.decayConfidence ?? 'low',
         ...(captureMetadata.value ? { captureMetadata: captureMetadata.value } : {}),
       })
-      const leftDiagnostics = diagnosticsFor(result.left, 'left')
-      const rightDiagnostics = diagnosticsFor(result.right, 'right')
+      const suppressRepairChannelDiagnostics = (diagnostics: MeasurementDiagnosticsValues, channel: 'left' | 'right'): MeasurementDiagnosticsValues => {
+        const repairChannel = currentContext.repairChannel
+        if ((repairChannel !== 'left' && repairChannel !== 'right') || repairChannel === channel) return diagnostics
+        return {
+          ...diagnostics,
+          analysisStatus: 'not_measured',
+          failureReason: null,
+          syncMarkerFailureReason: null,
+          snrEstimateDb: null,
+          directArrivalMs: null,
+          directArrivalRejectionReason: null,
+        }
+      }
+      const leftDiagnostics = suppressRepairChannelDiagnostics(diagnosticsFor(result.left, 'left'), 'left')
+      const rightDiagnostics = suppressRepairChannelDiagnostics(diagnosticsFor(result.right, 'right'), 'right')
       takeDiagnostics.value = [...takeDiagnostics.value, {
         context: currentContext,
         capture: recording.diagnostics,

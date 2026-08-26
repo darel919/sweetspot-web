@@ -1,6 +1,7 @@
 import { generateCompositeSweepStereoReference } from '../app/lib/audio/sweep-reference.ts'
 
 const sweep = {
+  sweepRevision: 'android-sweep-v2',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
   sampleRate: 8_000,
@@ -17,7 +18,8 @@ const sweep = {
   endMarkerEndHz: 1_200,
   endMarkerDurationMs: 4,
   interSweepGapMs: 1,
-  levelDbfs: -12,
+  sweepLevelDbfs: -12,
+  markerLevelDbfs: -12,
   fadeInMs: 0,
   fadeOutMs: 0,
 }

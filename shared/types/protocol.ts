@@ -65,6 +65,7 @@ export const CALIBRATION_PACKAGE_FORMAT = 'sweetspot.calibration' as const
 export const CALIBRATION_PACKAGE_VERSION = 1 as const
 export const CALIBRATION_PACKAGE_MAX_GAIN_DB = 12
 export const CALIBRATION_ANALYSIS_REVISION = 'response-direct-arrival-v3' as const
+export const CALIBRATION_SWEEP_REVISION = 'android-sweep-v2' as const
 
 export interface CalibrationPackage {
   format: typeof CALIBRATION_PACKAGE_FORMAT
@@ -207,7 +208,7 @@ export type MeasurementPhase = 'measurement' | 'validation'
 
 export type MeasurementRepairChannel = 'both' | 'left' | 'right'
 
-export type MeasurementCaptureKind = 'position-composite'
+export type MeasurementCaptureKind = 'position-composite' | 'marker-only'
 
 export type CalibrationProgressStage =
   | 'loudness'
@@ -302,6 +303,7 @@ export interface CalibrationSessionPositionContinuedPayload extends CalibrationS
 }
 
 export interface MeasurementSweep {
+  sweepRevision: typeof CALIBRATION_SWEEP_REVISION
   algorithm: 'exponential-sine-v1'
   captureKind: MeasurementCaptureKind
   sampleRate: number
@@ -318,7 +320,8 @@ export interface MeasurementSweep {
   endMarkerEndHz: number
   endMarkerDurationMs: number
   interSweepGapMs: number
-  levelDbfs: number
+  sweepLevelDbfs: number
+  markerLevelDbfs: number
   fadeInMs: number
   fadeOutMs: number
 }
@@ -355,14 +358,35 @@ export interface MeasurementErrorPayload extends CalibrationSessionPayload {
 
 export type MeasurementSyncMarkerFailureReason =
   | 'marker_absent'
+  | 'leading_marker_weak'
+  | 'trailing_marker_weak'
   | 'marker_pair_low_confidence'
+  | 'marker_pair_ambiguous'
   | 'marker_pair_bad_timing'
   | 'end_marker_missing'
   | 'clock_drift_unreliable'
 
+export interface MeasurementMarkerCandidate {
+  sample: number
+  correlation: number
+}
+
+export interface MeasurementMarkerPairCandidate {
+  leadingSample: number
+  trailingSample: number
+  leadingCorrelation: number
+  trailingCorrelation: number
+  observedSeparationSamples: number
+  separationPpm: number
+  timingAgreement: number
+  pairScore: number
+  accepted: boolean
+  rejectionReason: MeasurementSyncMarkerFailureReason | null
+}
+
 export interface MeasurementDiagnosticsValues {
   channel?: 'left' | 'right' | 'both'
-  analysisStatus?: 'ok' | 'signal_too_low' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
+  analysisStatus?: 'ok' | 'not_measured' | 'signal_too_low' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
   failureReason?: string | null
   signalRms: number
   signalPeak: number
@@ -379,7 +403,19 @@ export interface MeasurementDiagnosticsValues {
   rawTrailingMarkerConfidence?: number
   bestLeadingMarkerSample?: number | null
   bestTrailingMarkerSample?: number | null
+  leadingMarkerCandidates?: MeasurementMarkerCandidate[]
+  trailingMarkerCandidates?: MeasurementMarkerCandidate[]
+  markerPairCandidates?: MeasurementMarkerPairCandidate[]
+  leadingBestCorrelation?: number | null
+  leadingSecondCorrelation?: number | null
+  leadingCorrelationMargin?: number | null
+  trailingBestCorrelation?: number | null
+  trailingSecondCorrelation?: number | null
+  trailingCorrelationMargin?: number | null
   markerPairScore?: number | null
+  secondMarkerPairScore?: number | null
+  markerPairScoreMargin?: number | null
+  markerPairScoreRatio?: number | null
   markerSeparationError?: number | null
   markerTimingAgreement?: number | null
   syncMarkerFailureReason?: MeasurementSyncMarkerFailureReason | null
@@ -396,6 +432,11 @@ export interface MeasurementDiagnosticsValues {
   directArrivalCandidateSample?: number | null
   directArrivalAcceptedSample?: number | null
   directArrivalRejectionReason?: string | null
+  directSupportWindowRms?: number | null
+  directSupportWindowThreshold?: number | null
+  directSupportSampleCount?: number | null
+  bestLaterReflectionSample?: number | null
+  bestLaterReflectionPeak?: number | null
   directToLateDb: number | null
   c50Db: number | null
   c80Db: number | null
@@ -889,7 +930,7 @@ export function isMeasurementContext(value: unknown): value is MeasurementContex
   if (!isInteger(value.positionCount) || value.positionCount < 1 || value.positionCount > 16) return false
   if (value.positionIndex >= value.positionCount) return false
   if (value.channel !== 'both') return false
-  if (value.captureKind !== 'position-composite') return false
+  if (value.captureKind !== 'position-composite' && value.captureKind !== 'marker-only') return false
   if (value.repairChannel !== 'both' && value.repairChannel !== 'left' && value.repairChannel !== 'right') return false
   if (!isInteger(value.attemptIndex) || value.attemptIndex < 0 || value.attemptIndex >= 2) return false
   if (!isInteger(value.attemptCount) || value.attemptCount < 1 || value.attemptCount > 2) return false
@@ -976,6 +1017,49 @@ function isMeasurementCaptureMetadata(value: unknown): value is MeasurementCaptu
     && (value.trackChannelCount === undefined || isNullableFiniteNumber(value.trackChannelCount))
 }
 
+function isMeasurementMarkerCandidate(value: unknown): value is MeasurementMarkerCandidate {
+  return isRecord(value)
+    && isFiniteNumber(value.sample)
+    && value.sample >= 0
+    && isFiniteNumber(value.correlation)
+    && value.correlation >= 0
+    && value.correlation <= 1
+}
+
+function isMeasurementMarkerPairCandidate(value: unknown): value is MeasurementMarkerPairCandidate {
+  return isRecord(value)
+    && isFiniteNumber(value.leadingSample)
+    && value.leadingSample >= 0
+    && isFiniteNumber(value.trailingSample)
+    && value.trailingSample > value.leadingSample
+    && isFiniteNumber(value.leadingCorrelation)
+    && value.leadingCorrelation >= 0
+    && value.leadingCorrelation <= 1
+    && isFiniteNumber(value.trailingCorrelation)
+    && value.trailingCorrelation >= 0
+    && value.trailingCorrelation <= 1
+    && isFiniteNumber(value.observedSeparationSamples)
+    && value.observedSeparationSamples > 0
+    && isFiniteNumber(value.separationPpm)
+    && isFiniteNumber(value.timingAgreement)
+    && value.timingAgreement >= 0
+    && value.timingAgreement <= 1
+    && isFiniteNumber(value.pairScore)
+    && value.pairScore >= 0
+    && value.pairScore <= 1
+    && typeof value.accepted === 'boolean'
+    && (value.rejectionReason === null
+      || value.rejectionReason === undefined
+      || value.rejectionReason === 'marker_absent'
+      || value.rejectionReason === 'leading_marker_weak'
+      || value.rejectionReason === 'trailing_marker_weak'
+      || value.rejectionReason === 'marker_pair_low_confidence'
+      || value.rejectionReason === 'marker_pair_ambiguous'
+      || value.rejectionReason === 'marker_pair_bad_timing'
+      || value.rejectionReason === 'end_marker_missing'
+      || value.rejectionReason === 'clock_drift_unreliable')
+}
+
 function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string, unknown> & MeasurementDiagnosticsPayload {
   if (!isSessionPayload(value) || !isMeasurementContext(value.context)) return false
   const current = value.current
@@ -986,6 +1070,7 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
   const diagnostics = value.diagnostics
   return (diagnostics.analysisStatus === undefined
       || diagnostics.analysisStatus === 'ok'
+      || diagnostics.analysisStatus === 'not_measured'
       || diagnostics.analysisStatus === 'signal_too_low'
 
       || diagnostics.analysisStatus === 'direct_arrival_low_confidence'
@@ -1027,10 +1112,34 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
       isNullableFiniteNumber(diagnostics.bestTrailingMarkerSample)
       && (diagnostics.bestTrailingMarkerSample === null || diagnostics.bestTrailingMarkerSample >= 0)
     ))
+    && (!('leadingMarkerCandidates' in diagnostics)
+      || (Array.isArray(diagnostics.leadingMarkerCandidates)
+        && diagnostics.leadingMarkerCandidates.length <= 16
+        && diagnostics.leadingMarkerCandidates.every(isMeasurementMarkerCandidate)))
+    && (!('trailingMarkerCandidates' in diagnostics)
+      || (Array.isArray(diagnostics.trailingMarkerCandidates)
+        && diagnostics.trailingMarkerCandidates.length <= 16
+        && diagnostics.trailingMarkerCandidates.every(isMeasurementMarkerCandidate)))
+    && (!('markerPairCandidates' in diagnostics)
+      || (Array.isArray(diagnostics.markerPairCandidates)
+        && diagnostics.markerPairCandidates.length <= 16
+        && diagnostics.markerPairCandidates.every(isMeasurementMarkerPairCandidate)))
+    && (!('leadingBestCorrelation' in diagnostics) || isNullableFiniteNumber(diagnostics.leadingBestCorrelation))
+    && (!('leadingSecondCorrelation' in diagnostics) || isNullableFiniteNumber(diagnostics.leadingSecondCorrelation))
+    && (!('leadingCorrelationMargin' in diagnostics) || isNullableFiniteNumber(diagnostics.leadingCorrelationMargin))
+    && (!('trailingBestCorrelation' in diagnostics) || isNullableFiniteNumber(diagnostics.trailingBestCorrelation))
+    && (!('trailingSecondCorrelation' in diagnostics) || isNullableFiniteNumber(diagnostics.trailingSecondCorrelation))
+    && (!('trailingCorrelationMargin' in diagnostics) || isNullableFiniteNumber(diagnostics.trailingCorrelationMargin))
     && (!('markerPairScore' in diagnostics) || (
       isNullableFiniteNumber(diagnostics.markerPairScore)
       && (diagnostics.markerPairScore === null || (diagnostics.markerPairScore >= 0 && diagnostics.markerPairScore <= 1))
     ))
+    && (!('secondMarkerPairScore' in diagnostics) || (
+      isNullableFiniteNumber(diagnostics.secondMarkerPairScore)
+      && (diagnostics.secondMarkerPairScore === null || (diagnostics.secondMarkerPairScore >= 0 && diagnostics.secondMarkerPairScore <= 1))
+    ))
+    && (!('markerPairScoreMargin' in diagnostics) || isNullableFiniteNumber(diagnostics.markerPairScoreMargin))
+    && (!('markerPairScoreRatio' in diagnostics) || isNullableFiniteNumber(diagnostics.markerPairScoreRatio))
     && (!('markerSeparationError' in diagnostics) || (
       isNullableFiniteNumber(diagnostics.markerSeparationError)
       && (diagnostics.markerSeparationError === null || diagnostics.markerSeparationError >= 0)
@@ -1043,7 +1152,10 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
     && (!('syncMarkerFailureReason' in diagnostics)
       || diagnostics.syncMarkerFailureReason === null
       || diagnostics.syncMarkerFailureReason === 'marker_absent'
+      || diagnostics.syncMarkerFailureReason === 'leading_marker_weak'
+      || diagnostics.syncMarkerFailureReason === 'trailing_marker_weak'
       || diagnostics.syncMarkerFailureReason === 'marker_pair_low_confidence'
+      || diagnostics.syncMarkerFailureReason === 'marker_pair_ambiguous'
       || diagnostics.syncMarkerFailureReason === 'marker_pair_bad_timing'
       || diagnostics.syncMarkerFailureReason === 'end_marker_missing'
       || diagnostics.syncMarkerFailureReason === 'clock_drift_unreliable')
@@ -1069,6 +1181,11 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
     && (!('directArrivalRejectionReason' in diagnostics)
       || diagnostics.directArrivalRejectionReason === null
       || typeof diagnostics.directArrivalRejectionReason === 'string')
+    && (!('directSupportWindowRms' in diagnostics) || isNullableFiniteNumber(diagnostics.directSupportWindowRms))
+    && (!('directSupportWindowThreshold' in diagnostics) || isNullableFiniteNumber(diagnostics.directSupportWindowThreshold))
+    && (!('directSupportSampleCount' in diagnostics) || (isInteger(diagnostics.directSupportSampleCount) && diagnostics.directSupportSampleCount >= 0))
+    && (!('bestLaterReflectionSample' in diagnostics) || isNullableFiniteNumber(diagnostics.bestLaterReflectionSample))
+    && (!('bestLaterReflectionPeak' in diagnostics) || isNullableFiniteNumber(diagnostics.bestLaterReflectionPeak))
     && isNullableFiniteNumber(diagnostics.directToLateDb)
     && isNullableFiniteNumber(diagnostics.c50Db)
     && isNullableFiniteNumber(diagnostics.c80Db)
@@ -1243,8 +1360,9 @@ function isCalibrationValidationResultPayload(value: unknown): value is Calibrat
 
 export function isMeasurementSweep(value: unknown): value is MeasurementSweep {
   if (!isRecord(value)) return false
+  if (value.sweepRevision !== CALIBRATION_SWEEP_REVISION) return false
   if (value.algorithm !== 'exponential-sine-v1') return false
-  if (value.captureKind !== 'position-composite') return false
+  if (value.captureKind !== 'position-composite' && value.captureKind !== 'marker-only') return false
   if (!isFiniteNumber(value.sampleRate) || !Number.isInteger(value.sampleRate)) return false
   if (value.sampleRate < 8_000 || value.sampleRate > 192_000) return false
   if (!isFiniteNumber(value.startHz) || value.startHz <= 0) return false
@@ -1264,7 +1382,8 @@ export function isMeasurementSweep(value: unknown): value is MeasurementSweep {
   if (!isFiniteNumber(value.endMarkerDurationMs) || value.endMarkerDurationMs <= 0 || value.endMarkerDurationMs > 1_000) return false
   if (!isFiniteNumber(value.interSweepGapMs) || value.interSweepGapMs < 0 || value.interSweepGapMs > 1_000) return false
   if (value.preRollMs < value.syncMarkerDurationMs + value.syncMarkerGapMs) return false
-  if (!isFiniteNumber(value.levelDbfs) || value.levelDbfs > 0 || value.levelDbfs < -120) return false
+  if (!isFiniteNumber(value.sweepLevelDbfs) || value.sweepLevelDbfs > 0 || value.sweepLevelDbfs < -120) return false
+  if (!isFiniteNumber(value.markerLevelDbfs) || value.markerLevelDbfs > 0 || value.markerLevelDbfs < -120) return false
   if (!isFiniteNumber(value.fadeInMs) || value.fadeInMs < 0 || value.fadeInMs > value.durationMs) return false
   if (!isFiniteNumber(value.fadeOutMs) || value.fadeOutMs < 0 || value.fadeOutMs > value.durationMs) return false
   return value.fadeInMs + value.fadeOutMs <= value.durationMs

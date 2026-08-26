@@ -1,4 +1,10 @@
-import { isMeasurementContext, type MeasurementCaptureMetadata, type MeasurementContext } from '../../../../shared/types/protocol'
+import {
+  CALIBRATION_ANALYSIS_REVISION as PROTOCOL_CALIBRATION_ANALYSIS_REVISION,
+  CALIBRATION_SWEEP_REVISION as PROTOCOL_CALIBRATION_SWEEP_REVISION,
+  isMeasurementContext,
+  type MeasurementCaptureMetadata,
+  type MeasurementContext,
+} from '../../../../shared/types/protocol'
 import type { PositionLedger } from './position-ledger'
 
 export const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 3 as const
@@ -6,8 +12,8 @@ export const CALIBRATION_CHECKPOINT_ORIENTATION = 'iphone-upright-bottom-edge-to
 export const CALIBRATION_CHECKPOINT_STORE = 'sweetspot-calibration-checkpoints'
 const configuredBuildSha = import.meta.env.NUXT_PUBLIC_BUILD_SHA
 
-export const CALIBRATION_ANALYSIS_REVISION = 'response-direct-arrival-v3' as const
-export const CALIBRATION_SWEEP_REVISION = 'android-sweep-v1' as const
+export const CALIBRATION_ANALYSIS_REVISION = PROTOCOL_CALIBRATION_ANALYSIS_REVISION
+export const CALIBRATION_SWEEP_REVISION = PROTOCOL_CALIBRATION_SWEEP_REVISION
 export const CALIBRATION_WEB_BUILD_SHA = configuredBuildSha || 'local'
 export type CalibrationConvergenceOutcome = 'sufficient' | 'bounded' | 'insufficient'
 

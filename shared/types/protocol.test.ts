@@ -15,6 +15,7 @@ import {
 } from './protocol'
 
 const sweep = {
+  sweepRevision: 'android-sweep-v2',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
   sampleRate: 48_000,
@@ -31,7 +32,8 @@ const sweep = {
   endMarkerEndHz: 1_500,
   endMarkerDurationMs: 40,
   interSweepGapMs: 50,
-  levelDbfs: -12,
+  sweepLevelDbfs: -12,
+  markerLevelDbfs: -12,
   fadeInMs: 20,
   fadeOutMs: 20,
 }
@@ -78,6 +80,7 @@ describe('measurement protocol boundary', () => {
 
   test('accepts the deterministic sweep descriptor', () => {
     expect(isMeasurementSweep(sweep)).toBe(true)
+    expect(isMeasurementSweep({ ...sweep, captureKind: 'marker-only' })).toBe(true)
     expect(validatePayload('measurement.ready', { sessionId: 'cal_test', sweep })).toBeNull()
   })
 
@@ -88,6 +91,7 @@ describe('measurement protocol boundary', () => {
 
   test('accepts a composite position context and rejects invalid indexes', () => {
     expect(isMeasurementContext(context)).toBe(true)
+    expect(isMeasurementContext({ ...context, captureKind: 'marker-only' })).toBe(true)
     expect(validatePayload('measurement.prepare', {
       sessionId: 'cal_test',
       channel: 'both',
