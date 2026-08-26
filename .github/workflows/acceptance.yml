@@ -25,5 +25,8 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      - name: Prepare Nuxt types
+        run: bunx nuxi prepare
+
       - name: Typecheck
         run: bun run typecheck
