@@ -9,14 +9,14 @@ import type {
   MeasurementCaptureMetadata,
   MeasurementResponsePayload,
   MeasurementSweep,
-} from '#shared/types/protocol'
+} from '../../shared/types/protocol'
 import {
   CALIBRATION_ERROR_CODES,
   PROTOCOL_VERSION,
   isCalibrationSessionPositionContinuedPayload,
   isMeasurementContext,
   isMeasurementReadyPayload,
-} from '#shared/types/protocol'
+} from '../../shared/types/protocol'
 import { openMicrophone, closeMicrophone, type MicrophoneCapture } from '../lib/audio/capture/microphone'
 import { createPcmRecorder, type CaptureSignalDiagnostics, type PcmRecorder } from '../lib/audio/capture/pcm-recorder'
 import { analyzeInWorker } from '../lib/audio/measurement/worker-client'
@@ -99,9 +99,22 @@ type Connection = {
   isDeviceOnline: () => boolean
 }
 
-interface CalibrationSessionOptions {
+export interface CalibrationSessionDependencies {
+  openMicrophone: typeof openMicrophone
+  closeMicrophone: typeof closeMicrophone
+  createPcmRecorder: typeof createPcmRecorder
+  analyzeInWorker: typeof analyzeInWorker
+  discoverMicCalibrationProfiles: typeof discoverMicCalibrationProfiles
+  loadCalibrationCheckpoint: typeof loadCalibrationCheckpoint
+  saveCalibrationCheckpoint: typeof saveCalibrationCheckpoint
+  clearCalibrationCheckpoint: typeof clearCalibrationCheckpoint
+  downloadCalibrationDebugBundle: typeof downloadCalibrationDebugBundle
+}
+
+export interface CalibrationSessionOptions {
   getDeviceIdentity?: () => { id: string; appVersion: string; buildId: string } | null
   debugCaptureExport?: boolean
+  dependencies?: Partial<CalibrationSessionDependencies>
 }
 
 const ABORT_RECOVERY_POLL_INTERVAL_MS = 400
@@ -173,6 +186,18 @@ function isUserCancellationCode(code: CalibrationErrorCode): boolean {
 }
 
 export function useCalibrationSession(connection: Connection, options: CalibrationSessionOptions = {}) {
+  const dependencies: CalibrationSessionDependencies = {
+    openMicrophone,
+    closeMicrophone,
+    createPcmRecorder,
+    analyzeInWorker,
+    discoverMicCalibrationProfiles,
+    loadCalibrationCheckpoint,
+    saveCalibrationCheckpoint,
+    clearCalibrationCheckpoint,
+    downloadCalibrationDebugBundle,
+    ...options.dependencies,
+  }
   const stage = ref<CalibrationStage>('idle')
   const message = ref('')
   const analysis = shallowRef<MeasurementAnalysis | null>(null)
@@ -291,7 +316,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   async function loadProfiles(): Promise<MicCalibrationProfile[]> {
     if (profiles.value.length > 0) return profiles.value
     if (profileLoadPromise) return profileLoadPromise
-    profileLoadPromise = discoverMicCalibrationProfiles()
+    profileLoadPromise = dependencies.discoverMicCalibrationProfiles()
       .then((loadedProfiles) => {
         profiles.value = loadedProfiles
         if (!loadedProfiles.some((candidate) => candidate.id === selectedProfileId.value)) {
@@ -420,7 +445,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     recorder = null
     capture = null
     if (currentRecorder) await currentRecorder.dispose()
-    if (currentCapture) closeMicrophone(currentCapture)
+    if (currentCapture) dependencies.closeMicrophone(currentCapture)
   }
 
   function currentCheckpointIdentity(): CalibrationCheckpointIdentity | null {
@@ -450,7 +475,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       return
     }
     try {
-      const checkpoint = await loadCalibrationCheckpoint(identity.deviceId)
+      const checkpoint = await dependencies.loadCalibrationCheckpoint(identity.deviceId)
       loadedResumeCheckpoint = checkpoint
       if (!checkpoint) {
         loadedResumeCheckpoint = null
@@ -496,7 +521,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       validationStarted: false,
     })
     checkpointWriteChain = checkpointWriteChain
-      .then(() => saveCalibrationCheckpoint(checkpoint))
+      .then(() => dependencies.saveCalibrationCheckpoint(checkpoint))
       .catch(() => undefined)
     loadedResumeCheckpoint = checkpoint
     resumeAvailable.value = true
@@ -507,7 +532,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     const device = options.getDeviceIdentity?.() ?? null
     if (!device) return
     checkpointWriteChain = checkpointWriteChain
-      .then(() => clearCalibrationCheckpoint(device.id))
+      .then(() => dependencies.clearCalibrationCheckpoint(device.id))
       .catch(() => undefined)
     loadedResumeCheckpoint = null
     resumeAvailable.value = false
@@ -518,7 +543,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   function exportDebugBundle(): void {
     const exportCalibrationId = calibrationId ?? completedMeasurementId.value
     if (!options.debugCaptureExport || !exportCalibrationId || debugCaptures.length === 0) return
-    downloadCalibrationDebugBundle(createCalibrationDebugBundle(exportCalibrationId, debugCaptures, {
+    dependencies.downloadCalibrationDebugBundle(createCalibrationDebugBundle(exportCalibrationId, debugCaptures, {
       tvAppVersion: options.getDeviceIdentity?.()?.appVersion ?? null,
       tvBuildId: options.getDeviceIdentity?.()?.buildId ?? null,
       webBuildSha: CALIBRATION_WEB_BUILD_SHA,
@@ -943,7 +968,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     const selectedProfile = loadedProfiles.find((candidate) => candidate.id === selectedProfileId.value) ?? loadedProfiles[0]
     if (!selectedProfile) throw new Error('No microphone calibration profiles are available.')
     profile = selectedProfile
-    capture = await openMicrophone()
+    capture = await dependencies.openMicrophone()
     captureInfo.value = { settings: capture.settings, capabilities: capture.capabilities }
     captureMetadata.value = {
       ...capture.settings,
@@ -957,7 +982,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       ...(profile.sourceDate ? { micProfileSourceDate: profile.sourceDate } : {}),
       micProfileCapturePathStatus: profile.capturePathStatus,
     }
-    recorder = createPcmRecorder(capture, {
+    recorder = dependencies.createPcmRecorder(capture, {
       onTrackEnded: () => {
         void fail('signal_too_low', 'The microphone ended during calibration.')
       },
@@ -1260,7 +1285,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         : -1
       const analysisController = new AbortController()
       analysisAbortController = analysisController
-      const result = await analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile, analysisController.signal)
+      const result = await dependencies.analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile, analysisController.signal)
       if (analysisAbortController === analysisController) analysisAbortController = null
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       if (debugCaptureIndex >= 0) {

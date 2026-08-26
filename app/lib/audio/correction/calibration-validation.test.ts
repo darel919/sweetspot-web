@@ -96,6 +96,23 @@ describe('calibration validation classification', () => {
     expect(classifyCalibrationValidation({ ...quality, validationQualityValid: false, beforeDb: 4, afterDb: 1 }).status).toBe('inconclusive')
   })
 
+  test('preserves explicit failed and inconclusive results without metrics', () => {
+    expect(classifyCalibrationValidation({
+      ...quality,
+      requestedStatus: 'failed',
+      reason: 'marker timing failed',
+      beforeDb: null,
+      afterDb: null,
+    })).toEqual({ status: 'failed', reason: 'marker timing failed' })
+    expect(classifyCalibrationValidation({
+      ...quality,
+      requestedStatus: 'inconclusive',
+      reason: 'within tolerance',
+      beforeDb: null,
+      afterDb: null,
+    })).toEqual({ status: 'inconclusive', reason: 'within tolerance' })
+  })
+
   test('allows exactly one confirmation capture for a borderline candidate', () => {
     const outcome = { status: 'inconclusive' as const, reason: 'borderline' }
     expect(shouldRunValidationConfirmation({ outcome, candidateId: 'candidate-1', confirmedCandidateId: null })).toBe(true)

@@ -135,8 +135,6 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
       return 'The microphone clipped during this reading.'
     case 'signal_too_low':
       return 'The reading was too quiet or noisy to trust.'
-    case 'sweep_not_found':
-      return 'The complete test signal was not clear enough to analyze.'
     case 'direct_arrival_low_confidence':
     case 'impulse_not_found':
       return 'Synchronization succeeded, but the direct acoustic arrival was too weak to trust.'

@@ -9,12 +9,15 @@ export interface CalibrationValidationInput {
   afterDb: number | null
   baselineQualityValid: boolean
   validationQualityValid: boolean
+  requestedStatus?: 'passed' | 'worse' | 'inconclusive' | 'failed'
+  reason?: string
 }
 
 export type CalibrationValidationOutcome =
   | { status: 'improved'; beforeDb: number; afterDb: number }
   | { status: 'worse'; beforeDb: number; afterDb: number }
   | { status: 'inconclusive'; reason: string; beforeDb?: number; afterDb?: number }
+  | { status: 'failed'; reason: string; beforeDb?: number; afterDb?: number }
 
 export interface SpatialValidationMetrics {
   before: number
@@ -112,6 +115,24 @@ export function shouldStartAutomaticValidation(input: AutomaticValidationStartIn
 
 export function classifyCalibrationValidation(input: CalibrationValidationInput): CalibrationValidationOutcome {
   const { beforeDb, afterDb } = input
+  const finiteBefore = typeof beforeDb === 'number' && Number.isFinite(beforeDb) ? beforeDb : undefined
+  const finiteAfter = typeof afterDb === 'number' && Number.isFinite(afterDb) ? afterDb : undefined
+  if (input.requestedStatus === 'failed') {
+    return {
+      status: 'failed',
+      reason: input.reason ?? 'Validation failed.',
+      ...(finiteBefore === undefined ? {} : { beforeDb: finiteBefore }),
+      ...(finiteAfter === undefined ? {} : { afterDb: finiteAfter }),
+    }
+  }
+  if (input.requestedStatus === 'inconclusive') {
+    return {
+      status: 'inconclusive',
+      reason: input.reason ?? 'Validation was inconclusive.',
+      ...(finiteBefore === undefined ? {} : { beforeDb: finiteBefore }),
+      ...(finiteAfter === undefined ? {} : { afterDb: finiteAfter }),
+    }
+  }
   if (!input.baselineQualityValid || !input.validationQualityValid) {
     return {
       status: 'inconclusive',
