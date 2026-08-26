@@ -14,12 +14,6 @@ function literals(source, pattern, label) {
   return [...match[1].matchAll(/['"]([^'"]+)['"]/g)].map((entry) => entry[1])
 }
 
-function constant(source, pattern, label) {
-  const match = source.match(pattern)
-  if (!match) throw new Error(`Could not locate ${label}.`)
-  return [match[1]]
-}
-
 function androidGeometry(source) {
   const match = source.match(/private fun positionTarget\(positionId: String\): MeasurementGeometry\? = when \(positionId\) \{([\s\S]*?)\n\s*else -> null/)
   if (!match) throw new Error('Could not locate Android position geometry.')
@@ -42,7 +36,7 @@ const checks = [
     literals(androidContext, /CHANNELS = setOf\(([\s\S]*?)\)/, 'Android repair channels')],
   ['measurement capture kinds',
     literals(webProtocol, /export type MeasurementCaptureKind = ([\s\S]*?)\n\n/, 'web capture kinds'),
-    constant(androidContext, /CAPTURE_KIND = "([^"\n]+)"/, 'Android capture kind')],
+    literals(androidContext, /CAPTURE_KINDS = setOf\(([\s\S]*?)\)/, 'Android capture kinds')],
 ]
 
 for (const [label, webValues, androidValues] of checks) {

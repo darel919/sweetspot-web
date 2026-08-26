@@ -211,6 +211,22 @@ function reliableEnergyBetween(samples: Float32Array, start: number, end: number
   return correctedEnergy
 }
 
+function strongestLaterReflection(samples: Float32Array, start: number): {
+  index: number | null
+  peak: number
+} {
+  let index: number | null = null
+  let peak = 0
+  for (let cursor = Math.max(0, start); cursor < samples.length; cursor++) {
+    const value = Math.abs(samples[cursor] ?? 0)
+    if (value > peak) {
+      peak = value
+      index = cursor
+    }
+  }
+  return { index, peak }
+}
+
 function referenceCacheKey(
   sweep: MeasurementSweep,
   sampleRate: number,
@@ -477,6 +493,13 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
 
   const threshold = Math.max(directPeak * 0.03, noiseFloorRms * 8, 1e-7)
   const supportRadius = Math.max(1, Math.round(sampleRate * 0.0001))
+  let rejectedCandidate: {
+    index: number
+    peak: number
+    supportWindowRms: number
+    supportWindowThreshold: number
+    supportSampleCount: number
+  } | null = null
   for (let index = 0; index <= directPeakIndex; index++) {
     const value = Math.abs(samples[index])
     const left = index > 0 ? Math.abs(samples[index - 1]) : value
@@ -497,15 +520,7 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
     const supportThreshold = Math.max(noiseFloorRms * 1.5, threshold * 0.05)
     if (supportRms >= supportThreshold
       || (index === 0 && directPeak >= threshold)) {
-      let laterReflectionIndex: number | null = null
-      let laterReflectionPeak = 0
-      for (let cursor = Math.min(samples.length, index + supportRadius + 1); cursor < samples.length; cursor++) {
-        const value = Math.abs(samples[cursor] ?? 0)
-        if (value > laterReflectionPeak) {
-          laterReflectionPeak = value
-          laterReflectionIndex = cursor
-        }
-      }
+      const laterReflection = strongestLaterReflection(samples, index + supportRadius + 1)
       return {
         index,
         peakIndex: directPeakIndex,
@@ -517,18 +532,37 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
         supportWindowRms: supportRms,
         supportWindowThreshold: supportThreshold,
         supportSampleCount: supportSamples,
-        laterReflectionIndex,
-        laterReflectionPeak,
+        laterReflectionIndex: laterReflection.index,
+        laterReflectionPeak: laterReflection.peak,
+      }
+    }
+    if (rejectedCandidate === null
+      || value > rejectedCandidate.peak
+      || (value === rejectedCandidate.peak && index < rejectedCandidate.index)) {
+      rejectedCandidate = {
+        index,
+        peak: value,
+        supportWindowRms: supportRms,
+        supportWindowThreshold: supportThreshold,
+        supportSampleCount: supportSamples,
       }
     }
   }
+  const rejectedLaterReflection = rejectedCandidate === null
+    ? { index: null, peak: 0 }
+    : strongestLaterReflection(samples, rejectedCandidate.index + supportRadius + 1)
   return {
     index: null,
-    peakIndex: directPeakIndex,
+    peakIndex: rejectedCandidate?.index ?? directPeakIndex,
     noiseRms: noiseFloorRms,
     peak,
     directPeak,
     acceptanceThreshold: threshold,
+    supportWindowRms: rejectedCandidate?.supportWindowRms ?? null,
+    supportWindowThreshold: rejectedCandidate?.supportWindowThreshold ?? null,
+    supportSampleCount: rejectedCandidate?.supportSampleCount ?? null,
+    laterReflectionIndex: rejectedLaterReflection.index,
+    laterReflectionPeak: rejectedLaterReflection.peak,
     rejectionReason: 'candidate_not_sustained',
   }
 }

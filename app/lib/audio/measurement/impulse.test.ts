@@ -112,6 +112,22 @@ describe('browser-local impulse analysis', () => {
     expect(findDirectArrival(impulse, 8_000, 0.001).rejectionReason).toBe('candidate_not_sustained')
   })
 
+  test('retains support and later-reflection diagnostics for a rejected candidate', () => {
+    const impulse = new Float32Array(8_000)
+    impulse[100] = 1
+    impulse[1_460] = 0.0043
+
+    const result = findDirectArrival(impulse, 8_000, 0.001)
+
+    expect(result.rejectionReason).toBe('candidate_not_sustained')
+    expect(result.peakIndex).toBe(100)
+    expect(result.supportWindowRms).toBe(0)
+    expect(result.supportWindowThreshold).toBeGreaterThan(0)
+    expect(result.supportSampleCount).toBe(2)
+    expect(result.laterReflectionIndex).toBe(1_460)
+    expect(result.laterReflectionPeak).toBeCloseTo(0.0043, 6)
+  })
+
   test('rejects an empty impulse as having no candidate', () => {
     expect(findDirectArrival(new Float32Array(8_000), 8_000, 0.001).rejectionReason).toBe('no_candidate')
   })

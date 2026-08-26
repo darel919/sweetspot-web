@@ -87,7 +87,7 @@ export function createMeasurementPlanForGroups(
   return positions.map((position, positionIndex) => measurementContextForPosition(position, positionIndex, positionCount, phase))
 }
 
-export type ProbePlanKind = 'transfer' | 'routing' | 'marker-only'
+export type ProbePlanKind = 'transfer' | 'routing' | 'marker-only' | 'marker-production-spacing'
 
 export function createProbeMeasurementPlan(
   kind: ProbePlanKind,
@@ -105,7 +105,7 @@ export function createProbeMeasurementPlan(
     'measurement',
     'both',
     0,
-    kind === 'marker-only' ? 'marker-only' : 'position-composite',
+    kind === 'marker-only' || kind === 'marker-production-spacing' ? kind : 'position-composite',
   ))
 }
 

@@ -18,6 +18,10 @@ import {
 } from './impulse'
 import { fftInPlace, nextPowerOfTwo } from './fft'
 
+function isMarkerDiagnosticCaptureKind(value: MeasurementSweep['captureKind']): boolean {
+  return value === 'marker-only' || value === 'marker-production-spacing'
+}
+
 /** Expected recorder/TV clock mismatch is normally within 250 ppm. */
 export const CLOCK_DRIFT_WARNING_PPM = 250
 /** Larger mismatch is retained for diagnosis, but not accepted for analysis. */
@@ -32,8 +36,10 @@ const CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION = 0.55
 /** Exact timing contributes half of the pair score, so timing can promote acoustic peaks. */
 const MARKER_PAIR_SCORE_THRESHOLD = 0.63
 const MARKER_PAIR_SEARCH_MAX_DRIFT_PPM = 5_000
-const MAX_MARKER_CANDIDATES = 16
+const MAX_EXPORTED_MARKER_CANDIDATES = 16
+const MAX_MARKER_SEARCH_CANDIDATES = 64
 const MARKER_CANDIDATE_DEDUP_DISTANCE_FRACTION = 1 / 32
+const MARKER_AMBIGUITY_MIN_CORRELATION = MARKER_MIN_CORRELATION
 const MARKER_PAIR_AMBIGUITY_MARGIN = 0.05
 const MARKER_PAIR_AMBIGUITY_RATIO = 1.1
 
@@ -343,6 +349,7 @@ function markerCandidates(
   correlation: Float64Array,
   threshold = MARKER_DISCOVERY_FLOOR,
   minimumDistance = 1,
+  maxCandidates = MAX_MARKER_SEARCH_CANDIDATES,
 ): number[] {
   const candidates: number[] = []
   for (let index = 0; index < correlation.length; index++) {
@@ -357,7 +364,7 @@ function markerCandidates(
   for (const candidate of candidates) {
     if (selected.some((existing) => Math.abs(existing - candidate) < minimumDistance)) continue
     selected.push(candidate)
-    if (selected.length >= MAX_MARKER_CANDIDATES) break
+    if (selected.length >= maxCandidates) break
   }
   return selected
 }
@@ -605,10 +612,12 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
   )
   const leadingStats = markerCandidateStats(startCandidates, startCorrelation)
   const trailingStats = markerCandidateStats(endCandidates, endCorrelation)
+  const exportedLeadingStats = markerCandidateStats(startCandidates.slice(0, MAX_EXPORTED_MARKER_CANDIDATES), startCorrelation)
+  const exportedTrailingStats = markerCandidateStats(endCandidates.slice(0, MAX_EXPORTED_MARKER_CANDIDATES), endCorrelation)
   const baseWithCandidates: SweepDetection = {
     ...base,
-    leadingMarkerCandidates: leadingStats.values,
-    trailingMarkerCandidates: trailingStats.values,
+    leadingMarkerCandidates: exportedLeadingStats.values,
+    trailingMarkerCandidates: exportedTrailingStats.values,
     leadingBestCorrelation: leadingStats.best,
     leadingSecondCorrelation: leadingStats.second,
     leadingCorrelationMargin: leadingStats.margin,
@@ -636,12 +645,12 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
   }
   allPairs.sort((left, right) => right.score - left.score || left.separationError - right.separationError)
   const selectedPair = bestWithinHardLimit ?? bestWithinSearchWindow ?? bestOrdered
-  const hardPairs = allPairs.filter((pair) =>
-    Math.abs(pair.driftPpm) <= CLOCK_DRIFT_HARD_REJECT_PPM
-      && Math.min(pair.leadingConfidence, pair.trailingConfidence) >= CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION,
+  const plausiblePairs = allPairs.filter((pair) =>
+    Math.abs(pair.driftPpm) <= MARKER_PAIR_SEARCH_MAX_DRIFT_PPM
+      && Math.min(pair.leadingConfidence, pair.trailingConfidence) >= MARKER_AMBIGUITY_MIN_CORRELATION,
   )
   const secondPair = selectedPair
-    ? hardPairs.find((pair) => {
+    ? plausiblePairs.find((pair) => {
       const leadingDistance = Math.abs(pair.leading - selectedPair.leading)
       const trailingDistance = Math.abs(pair.trailing - selectedPair.trailing)
       const markerLobeDistance = Math.max(4, Math.round(Math.min(startMarker.length, endMarker.length) * 0.25))
@@ -655,7 +664,9 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       || (secondPair.score > 0 && selectedPair.score / secondPair.score < MARKER_PAIR_AMBIGUITY_RATIO))
   const baseWithPairCandidates: SweepDetection = {
     ...baseWithCandidates,
-    markerPairCandidates: allPairs.slice(0, MAX_MARKER_CANDIDATES).map((pair) => {
+    markerPairCandidates: (selectedPair === null
+      ? allPairs.slice(0, MAX_EXPORTED_MARKER_CANDIDATES)
+      : [selectedPair, ...allPairs.filter((pair) => pair !== selectedPair).slice(0, MAX_EXPORTED_MARKER_CANDIDATES - 1)]).map((pair) => {
       const rejectionReason = pair === selectedPair && pairIsAmbiguous
         ? 'marker_pair_ambiguous'
         : markerPairRejectionReason(pair)
@@ -669,6 +680,17 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
   const minimumPeakConfidence = Math.min(leadingPeak.confidence, trailingPeak.confidence)
   const weakPairEvidence = minimumPeakConfidence < CLOCK_DRIFT_ESTIMATE_MIN_CORRELATION
     && (minimumPeakConfidence < MARKER_MIN_CORRELATION || (bestOrdered?.score ?? 0) < MARKER_PAIR_SCORE_THRESHOLD)
+  if (bestOrdered && pairIsAmbiguous) {
+    return detectionWithPair(
+      baseWithPairCandidates,
+      bestOrdered,
+      sweep,
+      sampleRate,
+      tvParts,
+      false,
+      'marker_pair_ambiguous',
+    )
+  }
   if (bestOrdered && weakPairEvidence) {
     return detectionWithPair(
       baseWithPairCandidates,
@@ -677,7 +699,9 @@ function detectSyncMarkers(samples: Float32Array, sweep: MeasurementSweep, sampl
       sampleRate,
       tvParts,
       false,
-      peakFailure,
+      Math.abs(bestOrdered.driftPpm) > MARKER_PAIR_SEARCH_MAX_DRIFT_PPM && peakFailure === 'marker_pair_low_confidence'
+        ? 'marker_pair_bad_timing'
+        : peakFailure,
     )
   }
   if (bestWithinHardLimit) {
@@ -1027,7 +1051,7 @@ export function analyzeCompositeMeasurement(
 ): CompositeMeasurementAnalysis {
   const centeredSamples = removeDc(samples)
   const detection = detectSweepStart(centeredSamples, sweep, sampleRate)
-  if (sweep.captureKind === 'marker-only') {
+  if (isMarkerDiagnosticCaptureKind(sweep.captureKind)) {
     const markerAnalysis = analyzeMeasurementWindow(centeredSamples, sampleRate, sweep, micProfile, {
       detection,
       markerOnly: true,

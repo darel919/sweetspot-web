@@ -67,6 +67,13 @@ describe('calibration checkpoint persistence contract', () => {
     }, identity)).toEqual({ compatible: false, reason: 'pending-transaction' })
   })
 
+  test('rejects checkpoints created by the previous analyzer revision', () => {
+    const previousRevision = serializeCalibrationCheckpoint(checkpoint)
+      .replace(CALIBRATION_ANALYSIS_REVISION, 'response-direct-arrival-v3')
+
+    expect(parseSerializedCalibrationCheckpoint(previousRevision)).toBeNull()
+  })
+
   test('does not reject resume when both stored and current track rates are initially unknown', () => {
     const unknownRateCheckpoint = { ...checkpoint, microphone: { ...checkpoint.microphone, sampleRate: null } }
     expect(checkCalibrationCheckpointCompatibility(unknownRateCheckpoint, { ...identity, sampleRate: null })).toEqual({ compatible: true })

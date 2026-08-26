@@ -74,5 +74,8 @@ describe('physical-position measurement sequencing', () => {
     expect(markerPlan.map((context) => context.positionId)).toEqual(['center', 'left', 'right', 'forward', 'backward'])
     expect(markerPlan.every((context) => context.captureKind === 'marker-only')).toBe(true)
     expect(markerPlan.every((context) => isMeasurementContext(context))).toBe(true)
+    const productionSpacingPlan = createProbeMeasurementPlan('marker-production-spacing')
+    expect(productionSpacingPlan).toHaveLength(5)
+    expect(productionSpacingPlan.every((context) => context.captureKind === 'marker-production-spacing')).toBe(true)
   })
 })

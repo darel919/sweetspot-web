@@ -291,11 +291,15 @@ class CalibrationHarness {
     const prepare = this.connection.last('measurement.prepare')
     const sessionId = prepare?.payload.sessionId
     const context = prepare?.payload.context as MeasurementContext
+    const playSweepCount = this.connection.sent.filter((entry) => entry.type === 'measurement.playSweep').length
     this.connection.emit('measurement.ready', { sessionId, sweep, context })
     if (this.session.stage.value === 'position-pause') {
       this.connection.emit('calibrationSession.position.continued', { sessionId, context })
     }
-    await this.waitFor(() => this.connection.last('measurement.playSweep')?.payload.context === context)
+    await this.waitFor(() =>
+      this.connection.sent.filter((entry) => entry.type === 'measurement.playSweep').length > playSweepCount
+        && this.connection.last('measurement.playSweep')?.payload.context === context,
+    )
     this.connection.emit('measurement.finished', { sessionId, context })
     await this.waitFor(() => this.session.stage.value !== 'analyzing')
   }
@@ -306,6 +310,86 @@ class CalibrationHarness {
 }
 
 describe('useCalibrationSession integration state machine', () => {
+  test('completes a marker-only probe without response records', async () => {
+    const harness = new CalibrationHarness()
+    try {
+      harness.session.startProbe('marker-only')
+      await harness.waitFor(() => harness.connection.last('calibrationSession.begin') !== undefined)
+      const sessionId = harness.connection.last('calibrationSession.begin')?.payload.sessionId
+      harness.connection.emit('measurement.ready', { sessionId, sweep })
+      await harness.waitFor(() => harness.connection.last('measurement.prepare') !== undefined)
+      for (let index = 0; index < 5; index++) await harness.completeTake()
+      await harness.waitFor(() => harness.connection.last('calibrationSession.end') !== undefined)
+      harness.connection.emit('calibrationSession.ended', { sessionId })
+      await harness.waitFor(() => harness.session.stage.value === 'complete')
+
+      expect(harness.session.records.value).toHaveLength(0)
+      expect(harness.session.takeDiagnostics.value).toHaveLength(5)
+      expect(harness.session.message.value).toContain('Diagnostic marker probe complete')
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  test('completes a marker-only probe with failed positions as diagnostics', async () => {
+    const statuses = [
+      ...Array.from({ length: 8 }, () => 'ok' as const),
+      'sync_marker_not_found' as const,
+      'sync_marker_not_found' as const,
+      'sync_marker_not_found' as const,
+      'sync_marker_not_found' as const,
+    ]
+    const harness = new CalibrationHarness(48_000, statuses)
+    try {
+      harness.session.startProbe('marker-only')
+      await harness.waitFor(() => harness.connection.last('calibrationSession.begin') !== undefined)
+      const sessionId = harness.connection.last('calibrationSession.begin')?.payload.sessionId
+      harness.connection.emit('measurement.ready', { sessionId, sweep })
+      await harness.waitFor(() => harness.connection.last('measurement.prepare') !== undefined)
+      for (let index = 0; index < 5; index++) {
+        await harness.completeTake()
+      }
+      await harness.completeTake()
+      await harness.waitFor(() => harness.connection.last('calibrationSession.end') !== undefined)
+      harness.connection.emit('calibrationSession.ended', { sessionId })
+      await harness.waitFor(() => harness.session.stage.value === 'complete')
+
+      expect(harness.session.records.value).toHaveLength(0)
+      expect(harness.session.takeDiagnostics.value).toHaveLength(6)
+      expect(harness.session.failedTakeDiagnostics.value).toHaveLength(1)
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  test('aborting a marker-only probe returns to idle', async () => {
+    const harness = new CalibrationHarness()
+    try {
+      harness.session.startProbe('marker-only')
+      await harness.waitFor(() => harness.connection.last('calibrationSession.begin') !== undefined)
+      harness.session.cancel()
+      await harness.waitFor(() => harness.session.stage.value === 'idle')
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  test('reports a marker-only transport failure as an error', async () => {
+    const harness = new CalibrationHarness()
+    try {
+      harness.session.startProbe('marker-only')
+      await harness.waitFor(() => harness.connection.last('calibrationSession.begin') !== undefined)
+      const sessionId = harness.connection.last('calibrationSession.begin')?.payload.sessionId
+      harness.connection.emit('measurement.ready', { sessionId, sweep })
+      await harness.waitFor(() => harness.connection.last('measurement.prepare') !== undefined)
+      harness.connection.emit('measurement.error', { sessionId, code: 'sweep_playback_failed', message: 'transport failed' })
+      await harness.waitFor(() => harness.session.stage.value === 'error')
+      expect(harness.session.message.value).toBe('transport failed')
+    } finally {
+      harness.dispose()
+    }
+  })
+
   test('runs microphone opening, loudness preflight, center capture, and ignores stale events', async () => {
     const harness = new CalibrationHarness()
     try {

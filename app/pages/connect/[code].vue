@@ -123,6 +123,7 @@
           @capture-transfer-probe="captureTransferProbe"
           @run-routing-probe="runRoutingProbe"
           @run-marker-probe="runMarkerProbe"
+          @run-production-spacing-marker-probe="runProductionSpacingMarkerProbe"
           @clear-probe-evidence="probeEvidence = []"
           @export-probe-evidence="exportProbeEvidence"
           @set-virtualizer="setVirtualizer"
@@ -221,6 +222,7 @@ import type {
   AggregateResponse,
 } from '~/lib/audio/measurement/aggregation'
 import { allCaptureQualityPassed } from '~/lib/audio/measurement/aggregation'
+import { countFailedPhysicalTakes } from '~/lib/audio/measurement/failure-diagnostics'
 import { CALIBRATION_WEB_BUILD_SHA } from '~/lib/audio/measurement/checkpoint'
 import { EqCommandRevisionGate } from '~/lib/eq-command-revision'
 import type {
@@ -1691,10 +1693,13 @@ async function captureProbeSweep(kind: 'transfer' | 'routing'): Promise<Aggregat
   return finished
 }
 
-async function runMarkerProbe() {
+type MarkerProbeKind = 'marker-only' | 'marker-production-spacing'
+
+async function runMarkerProbe(kind: MarkerProbeKind = 'marker-only') {
   if (probeLabPending.value || measurementBusy.value || !deviceOnline.value) return
   probeLabPending.value = true
-  probeLabMessage.value = 'Running the marker-only set at the five fixed positions…'
+  const label = kind === 'marker-only' ? 'marker-only' : 'production-spacing marker'
+  probeLabMessage.value = `Running the ${label} set at the five fixed positions…`
   try {
     await new Promise<void>((resolve, reject) => {
       let started = false
@@ -1708,19 +1713,24 @@ async function runMarkerProbe() {
           reject(new Error(measurementMessage.value || 'The marker probe was cancelled.'))
         }
       }, { immediate: true })
-      startProbeSession('marker-only')
+      startProbeSession(kind)
       started = true
     })
     const diagnostics = measurementTakeDiagnostics.value
-    const failed = diagnostics.filter((take) => take.diagnostics.analysisStatus !== 'ok')
-    probeLabMessage.value = failed.length === 0
-      ? `Marker-only set passed at ${diagnostics.length} positions.`
-      : `Marker-only set finished with ${failed.length} failed captures. Export the debug bundle for candidate and pair diagnostics.`
+    const failed = countFailedPhysicalTakes(diagnostics)
+    const displayLabel = `${label[0]?.toUpperCase() ?? ''}${label.slice(1)}`
+    probeLabMessage.value = failed === 0
+      ? `${displayLabel} set passed at ${diagnostics.length} positions.`
+      : `${displayLabel} set finished with ${failed} failed captures. Export the debug bundle for candidate and pair diagnostics.`
   } catch (error: unknown) {
-    probeLabMessage.value = error instanceof Error ? error.message : 'Marker-only probe failed.'
+    probeLabMessage.value = error instanceof Error ? error.message : `${label[0]?.toUpperCase() ?? ''}${label.slice(1)} probe failed.`
   } finally {
     probeLabPending.value = false
   }
+}
+
+function runProductionSpacingMarkerProbe() {
+  return runMarkerProbe('marker-production-spacing')
 }
 
 async function applyProbeCurvePayload(payload: Record<string, number[]>) {

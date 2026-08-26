@@ -32,6 +32,7 @@ const emit = defineEmits<{
   (event: 'capture-transfer-probe'): void
   (event: 'run-routing-probe'): void
   (event: 'run-marker-probe'): void
+  (event: 'run-production-spacing-marker-probe'): void
   (event: 'clear-probe-evidence'): void
   (event: 'export-probe-evidence'): void
   (event: 'set-virtualizer', enabled: boolean): void
@@ -127,6 +128,7 @@ function fmtBytes(bytes: number): string {
       <button type="submit" :disabled="probeLabPending">Capture transfer</button>
       <button type="button" :disabled="probeLabPending" @click="emit('run-routing-probe')">Run L/R routing set</button>
       <button type="button" :disabled="probeLabPending" @click="emit('run-marker-probe')">Run marker-only set</button>
+      <button type="button" :disabled="probeLabPending" @click="emit('run-production-spacing-marker-probe')">Run production-spacing marker set</button>
     </form>
     <p v-if="probeLabMessage" class="note">{{ probeLabMessage }}</p>
     <div v-if="probeEvidence.length" class="actions">

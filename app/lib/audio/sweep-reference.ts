@@ -1,5 +1,9 @@
 import type { MeasurementSweep } from '#shared/types/protocol'
 
+function isMarkerDiagnosticCaptureKind(value: MeasurementSweep['captureKind']): boolean {
+  return value === 'marker-only' || value === 'marker-production-spacing'
+}
+
 export function sampleCountForMilliseconds(milliseconds: number, sampleRate: number): number {
   return Math.max(0, Math.round(milliseconds * sampleRate / 1000))
 }
@@ -93,7 +97,7 @@ export function generateSweepReference(sweep: MeasurementSweep, sampleRate = swe
   const parts = sweepSampleParts(sweep, sampleRate)
   const reference = new Float32Array(parts.totalSamples)
   reference.set(generateSyncMarker(sweep, sampleRate, 'start'), parts.leadingMarkerStartSamples)
-  if (sweep.captureKind !== 'marker-only') reference.set(generateSweepSignal(sweep, sampleRate), parts.sweepStartSamples)
+  if (sweep.captureKind === 'position-composite') reference.set(generateSweepSignal(sweep, sampleRate), parts.sweepStartSamples)
   reference.set(generateSyncMarker(sweep, sampleRate, 'end'), parts.trailingMarkerStartSamples)
   return reference
 }
@@ -116,8 +120,8 @@ export function generateCompositeSweepStereoReference(
   const parts = sweepSampleParts(sweep, sampleRate)
   const start = generateSyncMarker(sweep, sampleRate, 'start')
   const end = generateSyncMarker(sweep, sampleRate, 'end')
-  const leftSweep = sweep.captureKind === 'marker-only' ? new Float32Array(0) : generateSweepSignal(sweep, sampleRate)
-  const rightSweep = sweep.captureKind === 'marker-only' ? new Float32Array(0) : generateSweepSignal(sweep, sampleRate)
+  const leftSweep = isMarkerDiagnosticCaptureKind(sweep.captureKind) ? new Float32Array(0) : generateSweepSignal(sweep, sampleRate)
+  const rightSweep = isMarkerDiagnosticCaptureKind(sweep.captureKind) ? new Float32Array(0) : generateSweepSignal(sweep, sampleRate)
   const left = new Float32Array(parts.totalSamples)
   const right = new Float32Array(parts.totalSamples)
   left.set(start, parts.leadingMarkerStartSamples)

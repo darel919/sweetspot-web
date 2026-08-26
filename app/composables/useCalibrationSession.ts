@@ -14,6 +14,7 @@ import {
   CALIBRATION_ERROR_CODES,
   PROTOCOL_VERSION,
   isCalibrationSessionPositionContinuedPayload,
+  isMarkerDiagnosticCaptureKind,
   isMeasurementContext,
   isMeasurementReadyPayload,
 } from '../../shared/types/protocol'
@@ -38,6 +39,8 @@ import {
   type ProbePlanKind,
 } from '../lib/audio/measurement/plan'
 import {
+  countFailedPhysicalTakes,
+  failedPhysicalTakePositions,
   reconcileFailedTakeDiagnostics,
   type FailedTakeDiagnostic,
 } from '../lib/audio/measurement/failure-diagnostics'
@@ -293,7 +296,12 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     spatialConsistencySummaries.value.filter((summary) => !summary.passed))
   const probeRepeatabilitySummaries = computed<RepeatabilitySummary[]>(() =>
     aggregateBoth.value?.spatialConsistency ?? [])
-  const probeCaptureQualityPassed = computed(() => allCaptureQualityPassed(aggregateBoth.value))
+  const probeCaptureQualityPassed = computed(() => {
+    if (probePlanKind !== 'marker-only' && probePlanKind !== 'marker-production-spacing') {
+      return allCaptureQualityPassed(aggregateBoth.value)
+    }
+    return takeDiagnostics.value.length > 0 && countFailedPhysicalTakes(takeDiagnostics.value) === 0
+  })
   const probeFailedRepeatabilityGroups = computed(() =>
     probeRepeatabilitySummaries.value.filter((summary) => !summary.passed))
   const currentPosition = computed(() => activeContext.value ? positionForContext(activeContext.value) : null)
@@ -304,7 +312,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   const currentInstruction = computed(() => {
     const context = activeContext.value
     if (!context) return null
-    if (sessionMode === 'probe' && context.captureKind !== 'marker-only' && context.channel === 'both') {
+    if (sessionMode === 'probe' && !isMarkerDiagnosticCaptureKind(context.captureKind) && context.channel === 'both') {
       if (context.positionId === 'left') return 'Place the single microphone at the fixed left-speaker position and keep its orientation unchanged.'
       if (context.positionId === 'right') return 'Move the same microphone to the fixed right-speaker position and keep its orientation unchanged.'
       return 'Place the single microphone at the fixed center listening position and keep its orientation unchanged.'
@@ -1352,6 +1360,11 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         directArrivalCandidateSample: child.diagnostics.directArrivalCandidateSample ?? child.impulse?.directArrival.candidateArrivalIndex ?? null,
         directArrivalAcceptedSample: child.diagnostics.directArrivalAcceptedSample ?? child.impulse?.directArrival.acceptedArrivalIndex ?? null,
         directArrivalRejectionReason: child.diagnostics.directArrivalRejectionReason ?? child.impulse?.directArrival.rejectionReason ?? null,
+        directSupportWindowRms: child.diagnostics.directSupportWindowRms ?? child.impulse?.directArrival.supportWindowRms ?? null,
+        directSupportWindowThreshold: child.diagnostics.directSupportWindowThreshold ?? child.impulse?.directArrival.supportWindowThreshold ?? null,
+        directSupportSampleCount: child.diagnostics.directSupportSampleCount ?? child.impulse?.directArrival.supportSampleCount ?? null,
+        bestLaterReflectionSample: child.diagnostics.bestLaterReflectionSample ?? child.impulse?.directArrival.laterReflectionIndex ?? null,
+        bestLaterReflectionPeak: child.diagnostics.bestLaterReflectionPeak ?? child.impulse?.directArrival.laterReflectionPeak ?? null,
         directToLateDb: child.room?.directToLateDb ?? null,
         c50Db: child.room?.c50Db ?? null,
         c80Db: child.room?.c80Db ?? null,
@@ -1403,7 +1416,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       })
 
       const acceptedRecords = (child: MeasurementAnalysis, channel: 'left' | 'right'): MeasurementRecord[] =>
-        child.status === 'ok' && child.correctedPoints.length > 1
+        currentContext.captureKind === 'position-composite' && child.status === 'ok' && child.correctedPoints.length > 1
           ? [{ context: currentContext, channel, analysis: child }]
           : []
       failedTakeDiagnostics.value = reconcileFailedTakeDiagnostics(
@@ -1512,6 +1525,18 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }
 
   function measurementFailureMessage(result: MeasurementAnalysis): string {
+    switch (result.diagnostics.syncMarkerFailureReason) {
+      case 'leading_marker_weak':
+        return 'The start marker was too weak to identify reliably. Retry this position without moving the phone.'
+      case 'trailing_marker_weak':
+        return 'The end marker was too weak to identify reliably. Retry this position without moving the phone.'
+      case 'marker_pair_low_confidence':
+        return 'The marker pair confidence was too low to trust. Retry this position without moving the phone.'
+      case 'marker_pair_ambiguous':
+        return 'Multiple marker pairs looked plausible, so the timing could not be trusted. Retry this position without moving the phone.'
+      case 'marker_pair_bad_timing':
+        return 'Marker peaks were found, but their separation did not match the known TV signal timing. Retry this position without moving the phone.'
+    }
     if (result.status === 'capture_clipped') {
       return 'Capture rejected because the microphone clipped. Keep the phone still and lower background noise; the TV volume does not need to be raised.'
     }
@@ -1697,8 +1722,15 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       'sessionId' in env.payload && env.payload.sessionId === sessionId) {
       const endedSessionId = sessionId
       const endedMode = sessionMode
+      const endedProbePlanKind = probePlanKind
       const endedAbort = abortRecovery.value
-      const hadAnalysis = records.value.length > 0 || validationRecords.value.length > 0
+      const hadMarkerProbeAnalysis = endedMode === 'probe'
+        && (endedProbePlanKind === 'marker-only' || endedProbePlanKind === 'marker-production-spacing')
+        && takeDiagnostics.value.length > 0
+      const hadAnalysis = hadMarkerProbeAnalysis || records.value.length > 0 || validationRecords.value.length > 0
+      const failedMarkerProbePositions = hadMarkerProbeAnalysis
+        ? failedPhysicalTakePositions(takeDiagnostics.value)
+        : []
       invalidateSessionGeneration()
       clearTimeoutTimer()
       clearPositionKeepAlive()
@@ -1734,9 +1766,13 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         ? endedMode === 'validation'
           ? 'Validation complete. Compare the measured result with the original response.'
           : endedMode === 'probe'
-            ? probeCaptureQualityPassed.value
-              ? 'Diagnostic probe complete. Export the captured response before changing the curve.'
-              : `Diagnostic probe capture quality is inconclusive at ${spatialConsistencyFailureMessage(probeFailedRepeatabilityGroups.value)}.`
+            ? (endedProbePlanKind === 'marker-only' || endedProbePlanKind === 'marker-production-spacing')
+              ? failedMarkerProbePositions.length > 0
+                ? `Diagnostic marker probe complete with ${failedMarkerProbePositions.length} failed physical position${failedMarkerProbePositions.length === 1 ? '' : 's'}: ${failedMarkerProbePositions.map((position) => `${position} position`).join(', ')}.`
+                : 'Diagnostic marker probe complete. Review the marker timing diagnostics before changing the curve.'
+              : probeCaptureQualityPassed.value
+                ? 'Diagnostic probe complete. Export the captured response before changing the curve.'
+                : `Diagnostic probe capture quality is inconclusive at ${spatialConsistencyFailureMessage(probeFailedRepeatabilityGroups.value)}.`
             : measurementQualityPassed.value
               && convergenceOutcome.value === 'sufficient'
               ? 'Advanced measurement complete. Review the response and room metrics below.'

@@ -112,6 +112,18 @@ describe('sweep reference', () => {
     expect(rightOnlyFrame).toBe(true)
   })
 
+  test('keeps production marker spacing while removing sweep energy', () => {
+    const markerOnly: MeasurementSweep = { ...androidDefaultSweep, captureKind: 'marker-production-spacing' }
+    const parts = sweepSampleParts(markerOnly)
+    const reference = generateCompositeSweepStereoReference(markerOnly)
+
+    expect(parts.trailingMarkerStartSamples - parts.leadingMarkerStartSamples).toBe(158_400)
+    expect(reference.length).toBe(parts.totalSamples * 2)
+    expect(reference.slice(parts.sweepStartSamples * 2, parts.trailingMarkerStartSamples * 2).every((sample) => sample === 0)).toBe(true)
+    expect(reference.slice(parts.leadingMarkerStartSamples * 2, parts.sweepStartSamples * 2).some((sample) => sample !== 0)).toBe(true)
+    expect(reference.slice(parts.trailingMarkerStartSamples * 2, (parts.trailingMarkerStartSamples + parts.endMarkerSamples) * 2).some((sample) => sample !== 0)).toBe(true)
+  })
+
   test('matches the deterministic cross-language PCM golden vector', () => {
     const fixture = golden as { sweep: MeasurementSweep; pcm16: number[] }
     const reference = generateCompositeSweepStereoReference(fixture.sweep)

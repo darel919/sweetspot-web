@@ -371,6 +371,30 @@ describe('measurement response analysis', () => {
     expect(detection.driftPpm).toBeNull()
   })
 
+  test('classifies a -887 sample marker separation error as bad timing', () => {
+    const parts = sweepSampleParts(androidCalibrationSweep)
+    const capture = generateMeasurementReference(androidCalibrationSweep)
+    capture.fill(0, parts.trailingMarkerStartSamples, parts.trailingMarkerStartSamples + parts.endMarkerSamples)
+    setMarkerCorrelation(capture, androidCalibrationSweep, 'start', 0.40, parts.leadingMarkerStartSamples)
+    setMarkerCorrelation(
+      capture,
+      androidCalibrationSweep,
+      'end',
+      0.45,
+      parts.trailingMarkerStartSamples - 887,
+    )
+
+    const detection = detectSweepStart(capture, androidCalibrationSweep, androidCalibrationSweep.sampleRate)
+
+    expect(detection.found).toBe(false)
+    expect(detection.failureReason).toBe('marker_pair_bad_timing')
+    expect(detection.expectedMarkerSeparationSamples).toBe(158_400)
+    expect(detection.observedMarkerSeparationSamples).toBe(157_513)
+    expect(detection.markerSeparationPpm).toBeCloseTo(-5_599.75, 2)
+    expect(detection.clockRatio).not.toBeNull()
+    expect(detection.driftPpm).toBeNull()
+  })
+
   test('selects the valid temporal pair instead of two stronger independent peaks', () => {
     const capture = generateMeasurementReference(sweep)
     const parts = sweepSampleParts(sweep)
@@ -421,6 +445,43 @@ describe('measurement response analysis', () => {
     expect(detection.markerPairScoreMargin).toBeLessThan(0.05)
   })
 
+  test('rejects plausible moderate-confidence competing pairs as ambiguous', () => {
+    const parts = sweepSampleParts(sweep)
+    const capture = new Float32Array(parts.totalSamples + 400)
+    setMarkerCorrelation(capture, sweep, 'start', 0.40, parts.leadingMarkerStartSamples)
+    setMarkerCorrelation(capture, sweep, 'end', 0.45, parts.trailingMarkerStartSamples)
+    setMarkerCorrelation(capture, sweep, 'start', 0.40, parts.leadingMarkerStartSamples + 200)
+    setMarkerCorrelation(capture, sweep, 'end', 0.45, parts.trailingMarkerStartSamples + 200)
+
+    const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(false)
+    expect(detection.failureReason).toBe('marker_pair_ambiguous')
+    expect(detection.driftPpm).toBeNull()
+  })
+
+  test('searches beyond the exported marker candidate limit for a valid pair', () => {
+    const parts = sweepSampleParts(sweep)
+    const capture = new Float32Array(parts.totalSamples + 10_000)
+    const expectedLeading = parts.leadingMarkerStartSamples
+    const expectedTrailing = parts.trailingMarkerStartSamples
+    for (let index = 1; index <= 20; index++) {
+      setMarkerCorrelation(capture, sweep, 'start', 0.90, expectedLeading + index * 400)
+    }
+    setMarkerCorrelation(capture, sweep, 'start', 0.36, expectedLeading)
+    setMarkerCorrelation(capture, sweep, 'end', 0.40, expectedTrailing)
+
+    const detection = detectSweepStart(capture, sweep, sweep.sampleRate)
+
+    expect(detection.found).toBe(true)
+    expect(detection.leadingMarkerSample).toBe(expectedLeading)
+    expect(detection.trailingMarkerSample).toBe(expectedTrailing)
+    expect(detection.leadingMarkerCandidates).toHaveLength(16)
+    expect(detection.trailingMarkerCandidates).toHaveLength(1)
+    expect(detection.leadingMarkerCandidates.some((candidate) => candidate.sample === expectedLeading)).toBe(false)
+    expect(detection.markerPairCandidates.length).toBeLessThanOrEqual(16)
+  })
+
   test('keeps detecting markers through low-level room coloration, reflections, noise, and clock mismatch', () => {
     const reference = generateMeasurementReference(sweep)
     const roomImpulse = new Float32Array(32)
@@ -464,6 +525,22 @@ describe('measurement response analysis', () => {
     expect(detection.rawTrailingMarkerConfidence).toBeGreaterThan(0.25)
     expect(detection.driftPpm).toBeGreaterThan(200)
     expect(detection.driftPpm).toBeLessThan(800)
+  })
+
+  test('analyzes marker-only captures without producing a response curve', () => {
+    const markerOnlySweep: MeasurementSweep = { ...androidCalibrationSweep, captureKind: 'marker-only' }
+    const result = analyzeCompositeMeasurement(
+      generateSweepReference(markerOnlySweep),
+      markerOnlySweep.sampleRate,
+      markerOnlySweep,
+      profile,
+    )
+
+    expect(result.status).toBe('ok')
+    expect(result.left.status).toBe('ok')
+    expect(result.right.status).toBe('ok')
+    expect(result.left.correctedPoints).toHaveLength(0)
+    expect(result.right.correctedPoints).toHaveLength(0)
   })
 
   test('scales marker timing for a 44.1 kHz recorder against the Android sweep', () => {

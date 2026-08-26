@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { MeasurementContext, MeasurementDiagnosticsValues } from '#shared/types/protocol'
-import { reconcileFailedTakeDiagnostics } from './failure-diagnostics'
+import { countFailedPhysicalTakes, reconcileFailedTakeDiagnostics } from './failure-diagnostics'
 
 const context: MeasurementContext = {
   positionId: 'center',
@@ -45,6 +45,14 @@ function diagnostics(channel: 'left' | 'right'): MeasurementDiagnosticsValues {
 }
 
 describe('failed take diagnostics', () => {
+  test('counts a marker-only failure once per physical position', () => {
+    const markerContext = { ...context, captureKind: 'marker-only' as const }
+    const failed = diagnostics('left')
+    const takes = [{ context: markerContext, left: failed, right: { ...failed, channel: 'right' as const } }]
+
+    expect(countFailedPhysicalTakes(takes)).toBe(1)
+  })
+
   test('a successful retry resolves the earlier position/channel failure', () => {
     const failure = { context, diagnostics: diagnostics('left') }
     expect(reconcileFailedTakeDiagnostics(

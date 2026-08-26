@@ -128,13 +128,13 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
     case 'trailing_marker_weak':
       return 'The end marker was too weak to identify reliably.'
     case 'marker_pair_ambiguous':
-      return 'Multiple marker peaks looked plausible, so SweetSpot rejected the timing pair.'
+      return 'Multiple marker pairs looked plausible, so the timing could not be trusted.'
     case 'marker_pair_bad_timing':
-      return 'Marker peaks were found, but they did not form a trustworthy timing pair.'
+      return 'Marker peaks were found, but their separation did not match the known TV signal timing.'
     case 'clock_drift_unreliable':
       return 'The TV and iPhone timing was not stable enough for this reading.'
     case 'marker_pair_low_confidence':
-      return 'Both markers were too weak to form a trustworthy timing pair.'
+      return 'The marker pair confidence was too low to trust.'
     case 'marker_absent':
       return "SweetSpot couldn't find the known TV test markers."
   }
@@ -160,6 +160,12 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
     default:
       return 'The reading was not clear enough to trust.'
   }
+}
+
+function captureFailureLabel(failure: { context: MeasurementContext; diagnostics: MeasurementDiagnosticsValues }): string {
+  return failure.context.captureKind === 'marker-only' || failure.context.captureKind === 'marker-production-spacing'
+    ? `${failure.context.positionId} position`
+    : `${failure.context.positionId} / ${failure.diagnostics.channel ?? failure.context.repairChannel}`
 }
 </script>
 
@@ -216,7 +222,7 @@ function captureFailureMessage(diagnostics: MeasurementDiagnosticsValues): strin
     <p v-if="measurementMessage" class="note">{{ measurementMessage }}</p>
     <ul v-if="measurementFailedDiagnostics.length" class="calibration-failures">
       <li v-for="failure in measurementFailedDiagnostics" :key="`${failure.context.positionId}:${failure.diagnostics.channel ?? failure.context.repairChannel}`">
-        {{ failure.context.positionId }} / {{ failure.diagnostics.channel ?? failure.context.repairChannel }}:
+        {{ captureFailureLabel(failure) }}:
         {{ captureFailureMessage(failure.diagnostics) }}
       </li>
     </ul>

@@ -64,7 +64,7 @@ export interface DeviceInfo {
 export const CALIBRATION_PACKAGE_FORMAT = 'sweetspot.calibration' as const
 export const CALIBRATION_PACKAGE_VERSION = 1 as const
 export const CALIBRATION_PACKAGE_MAX_GAIN_DB = 12
-export const CALIBRATION_ANALYSIS_REVISION = 'response-direct-arrival-v3' as const
+export const CALIBRATION_ANALYSIS_REVISION = 'response-marker-pair-v4' as const
 export const CALIBRATION_SWEEP_REVISION = 'android-sweep-v2' as const
 
 export interface CalibrationPackage {
@@ -208,7 +208,17 @@ export type MeasurementPhase = 'measurement' | 'validation'
 
 export type MeasurementRepairChannel = 'both' | 'left' | 'right'
 
-export type MeasurementCaptureKind = 'position-composite' | 'marker-only'
+export type MeasurementCaptureKind = 'position-composite' | 'marker-only' | 'marker-production-spacing'
+
+export function isMeasurementCaptureKind(value: unknown): value is MeasurementCaptureKind {
+  return value === 'position-composite'
+    || value === 'marker-only'
+    || value === 'marker-production-spacing'
+}
+
+export function isMarkerDiagnosticCaptureKind(value: MeasurementCaptureKind): boolean {
+  return value === 'marker-only' || value === 'marker-production-spacing'
+}
 
 export type CalibrationProgressStage =
   | 'loudness'
@@ -930,7 +940,7 @@ export function isMeasurementContext(value: unknown): value is MeasurementContex
   if (!isInteger(value.positionCount) || value.positionCount < 1 || value.positionCount > 16) return false
   if (value.positionIndex >= value.positionCount) return false
   if (value.channel !== 'both') return false
-  if (value.captureKind !== 'position-composite' && value.captureKind !== 'marker-only') return false
+  if (!isMeasurementCaptureKind(value.captureKind)) return false
   if (value.repairChannel !== 'both' && value.repairChannel !== 'left' && value.repairChannel !== 'right') return false
   if (!isInteger(value.attemptIndex) || value.attemptIndex < 0 || value.attemptIndex >= 2) return false
   if (!isInteger(value.attemptCount) || value.attemptCount < 1 || value.attemptCount > 2) return false
@@ -1362,7 +1372,7 @@ export function isMeasurementSweep(value: unknown): value is MeasurementSweep {
   if (!isRecord(value)) return false
   if (value.sweepRevision !== CALIBRATION_SWEEP_REVISION) return false
   if (value.algorithm !== 'exponential-sine-v1') return false
-  if (value.captureKind !== 'position-composite' && value.captureKind !== 'marker-only') return false
+  if (!isMeasurementCaptureKind(value.captureKind)) return false
   if (!isFiniteNumber(value.sampleRate) || !Number.isInteger(value.sampleRate)) return false
   if (value.sampleRate < 8_000 || value.sampleRate > 192_000) return false
   if (!isFiniteNumber(value.startHz) || value.startHz <= 0) return false
