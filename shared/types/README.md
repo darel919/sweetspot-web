@@ -21,7 +21,8 @@ Rules:
 
 - Unknown optional fields must be ignored.
 - Unknown `type` values are rejected by the mailbox with `unknown_type`.
-- Payloads above `MAX_PAYLOAD_BYTES` (16 KiB) are rejected.
+- JSON payloads above `MAX_PAYLOAD_BYTES` (16 KiB) are rejected. Calibration
+  capture frames use the separate `MAX_CALIBRATION_CAPTURE_FRAME_BYTES` limit.
 - `ping`/`pong` carry no payload. Either side may ping; the receiver must pong.
 - The room transport has no `room.ping` control frame.
 
@@ -38,6 +39,10 @@ Device-targeted (client -> device): `state.get`, `engine.enable`,
 `calibration.applyCandidate`, `calibration.acceptCandidate`,
 `calibration.rollbackCandidate`, `calibration.validation.result`,
 `calibration.reset`, `calibration.export`, `calibration.import`,
+`calibration.job.start`, `calibration.job.get`, `calibration.job.cancel`,
+`calibration.job.discard`, `calibration.job.finish`,
+`calibration.capture.ready`, `calibration.capture.metadata`,
+`calibration.validation.capture.ready`,
 `calibrationSession.begin`,
 `calibrationSession.end`, `calibrationSession.abort`,
 `calibrationSession.loudness.start`, `calibrationSession.loudness.stop`,
@@ -49,7 +54,12 @@ Device-published (device -> clients): `state.snapshot`, `state.changed`,
 `calibrationSession.loudness.started`, `calibrationSession.loudness.stopped`,
 `calibrationSession.position.continued`,
 `measurement.ready`, `measurement.started`, `measurement.finished`,
-`measurement.error`, `calibration.exported`.
+`measurement.error`, `calibration.exported`, `calibration.capture.uploaded`,
+`calibration.job.state`.
+
+`calibration.job.state` carries a compact `CalibrationJobView`. Its
+`nextAction` is a discriminated capture, validation, wait, or complete action.
+The browser renders that action and never computes the calibration plan.
 
 `calibration.export` returns the active final EQ curve as a versioned
 `sweetspot.calibration` package. The package contains the TV frequency grid,
@@ -79,6 +89,20 @@ reviewed.
 
 `measurement.diagnostics` carries compact scalar diagnostics only. Candidate,
 pair, and early-impulse arrays remain in the browser-local debug bundle.
+
+## Calibration capture frames
+
+The browser sends raw microphone PCM to the TV as one binary WebSocket frame.
+The frame starts with the ASCII magic `SSCP`, a big-endian uint32 version, and
+a big-endian uint32 metadata length. The metadata is UTF-8 JSON, followed by
+little-endian Float32 mono PCM bytes.
+
+The frame version is `1`. Metadata is limited to 64 KiB and the whole frame is
+limited to 8 MiB. The metadata includes the job and capture IDs, physical
+position, channel, actual sample rate, sample count, browser settings,
+microphone profile identity, timestamp, and SHA-256 content hash. The TV
+validates the frame before analysis. The relay forwards a valid frame without
+changing its bytes.
 
 ## State snapshot
 

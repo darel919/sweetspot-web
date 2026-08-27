@@ -1,6 +1,10 @@
 export const PROTOCOL_VERSION = 1 as const
 
 export const MAX_PAYLOAD_BYTES = 16 * 1024
+export const CALIBRATION_CAPTURE_FRAME_VERSION = 1 as const
+export const CALIBRATION_CAPTURE_FRAME_MAGIC = 'SSCP' as const
+export const MAX_CALIBRATION_CAPTURE_METADATA_BYTES = 64 * 1024
+export const MAX_CALIBRATION_CAPTURE_FRAME_BYTES = 8 * 1024 * 1024
 
 export type Role = 'device' | 'client'
 
@@ -185,6 +189,187 @@ export type CalibrationChannel = 'both' | 'left' | 'right'
 export type CalibrationPositionId = 'center' | 'left' | 'right' | 'forward' | 'backward'
 
 export type CalibrationPositionReference = 'center'
+
+export type CalibrationJobStartMode = 'auto' | 'advanced'
+
+export interface CalibrationJobStartPayload {
+  mode?: CalibrationJobStartMode
+}
+
+export interface CalibrationJobGetPayload {
+  jobId?: string
+}
+
+export interface CalibrationJobIdPayload {
+  jobId: string
+}
+
+export type CalibrationJobCancelScope = 'capture' | 'optional_refinement'
+
+export interface CalibrationJobCancelPayload extends CalibrationJobIdPayload {
+  scope: CalibrationJobCancelScope
+  captureId?: string
+}
+
+export interface CalibrationJobDiscardPayload extends CalibrationJobIdPayload {}
+
+export interface CalibrationJobFinishPayload extends CalibrationJobIdPayload {}
+
+export type CalibrationJobPhase =
+  | 'center_preflight'
+  | 'measuring_required'
+  | 'usable'
+  | 'refining'
+  | 'candidate_pending'
+  | 'validating'
+  | 'reoptimizing'
+  | 'restoring'
+  | 'complete'
+  | 'failed'
+  | 'cancelled'
+
+export type CalibrationUsabilityGrade = 'bounded_usable' | 'sufficient'
+
+export type CalibrationCorrectionMode = 'normal' | 'gentle' | 'restricted_band'
+
+export type CalibrationValidationOutcome =
+  | 'improved'
+  | 'neutral'
+  | 'worse'
+  | 'inconclusive_capture'
+  | 'dsp_error'
+
+export type CalibrationValidationState =
+  | 'none'
+  | 'pending'
+  | 'rolling_back'
+  | 'passed'
+  | 'worse'
+  | 'inconclusive'
+  | 'failed'
+
+export interface CalibrationConfidenceView {
+  usableBandCount: number
+  totalBandCount: 64
+  score: number
+  grade: CalibrationUsabilityGrade | null
+}
+
+export interface CalibrationSolutionView {
+  solutionId: string
+  sourcePositionIds: CalibrationPositionId[]
+  confidence: CalibrationConfidenceView
+  score: number
+  correctionMode: CalibrationCorrectionMode
+}
+
+export type CalibrationNextAction =
+  | {
+      kind: 'capture'
+      captureId: string
+      positionId: CalibrationPositionId
+      channel: 'left' | 'right'
+      attemptIndex: number
+      optional: boolean
+      instruction: string
+    }
+  | {
+      kind: 'validate'
+      captureId: string
+      positionId: 'center'
+      candidateId: string
+      attemptIndex: number
+      instruction: string
+    }
+  | {
+      kind: 'wait'
+      message: string
+    }
+  | {
+      kind: 'complete'
+      solutionId: string
+    }
+
+export interface CalibrationJobErrorView {
+  code: string
+  message: string
+}
+
+export interface CalibrationJobView {
+  jobId: string
+  createdAtMs: number
+  revision: number
+  analyzerRevision: string
+  sweepRevision: string
+  phase: CalibrationJobPhase
+  acceptedPositions: CalibrationPositionId[]
+  excludedPositions: CalibrationPositionId[]
+  historicalAttemptCount: number
+  optionalFailureCount: number
+  minimumViableCalibration: boolean
+  bestSolution: CalibrationSolutionView | null
+  confidence: CalibrationConfidenceView | null
+  nextAction: CalibrationNextAction | null
+  activeCandidateId: string | null
+  validationState: CalibrationValidationState
+  lastError: CalibrationJobErrorView | null
+}
+
+export interface CalibrationJobStatePayload extends CalibrationJobView {}
+
+export type CalibrationCaptureChannel = 'left' | 'right'
+
+export interface CalibrationCaptureSettings {
+  echoCancellation: boolean | null
+  noiseSuppression: boolean | null
+  autoGainControl: boolean | null
+}
+
+export interface CalibrationCaptureMetadata {
+  jobId: string
+  captureId: string
+  positionId: CalibrationPositionId
+  attemptIndex: number
+  channel: CalibrationCaptureChannel
+  sampleRate: number
+  channelCount: 1
+  sampleCount: number
+  byteCount: number
+  settings: CalibrationCaptureSettings
+  userAgent: string
+  microphoneProfileId: string
+  microphoneProfileRevision: string
+  capturedAtMs: number
+}
+
+export interface CalibrationCaptureFrameMetadata extends CalibrationCaptureMetadata {
+  contentSha256: string
+}
+
+export interface CalibrationCaptureReadyPayload {
+  jobId: string
+  captureId: string
+}
+
+export interface CalibrationCaptureMetadataPayload extends CalibrationCaptureMetadata {}
+
+export type CalibrationCaptureUploadStatus = 'accepted' | 'rejected' | 'duplicate'
+
+export interface CalibrationCaptureUploadedPayload {
+  jobId: string
+  captureId: string
+  contentSha256: string
+  sampleCount: number
+  byteCount: number
+  status: CalibrationCaptureUploadStatus
+  reason?: string
+}
+
+export interface CalibrationValidationCaptureReadyPayload {
+  jobId: string
+  captureId: string
+  candidateId: string
+}
 
 /** Absolute microphone target from the original center listening point. */
 export interface CalibrationPositionTarget {
@@ -782,6 +967,14 @@ const DEVICE_TARGETED_TYPES = [
   'calibration.reset',
   'calibration.export',
   'calibration.import',
+  'calibration.job.start',
+  'calibration.job.get',
+  'calibration.job.cancel',
+  'calibration.job.discard',
+  'calibration.job.finish',
+  'calibration.capture.ready',
+  'calibration.capture.metadata',
+  'calibration.validation.capture.ready',
   'calibrationSession.begin',
   'calibrationSession.end',
   'calibrationSession.abort',
@@ -823,6 +1016,8 @@ export const DEVICE_TO_CLIENT_TYPES = new Set<string>([
   'measurement.finished',
   'measurement.error',
   'calibration.exported',
+  'calibration.capture.uploaded',
+  'calibration.job.state',
   'probe.status',
   'probe.result',
   'diagnostics.deviceInfo',
@@ -851,6 +1046,8 @@ export const KNOWN_TYPES = new Set<string>([
   'measurement.finished',
   'measurement.error',
   'calibration.exported',
+  'calibration.capture.uploaded',
+  'calibration.job.state',
   'probe.status',
   'probe.result',
   'diagnostics.deviceInfo',
@@ -1565,6 +1762,231 @@ export function isMeasurementReadyPayload(value: unknown): value is MeasurementR
   return isSessionWithSweep(value)
 }
 
+function isBoundedText(value: unknown, maximum: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum
+}
+
+function isUniquePositionList(value: unknown): value is CalibrationPositionId[] {
+  return Array.isArray(value)
+    && value.length <= 5
+    && value.every(isCalibrationPositionId)
+    && new Set(value).size === value.length
+}
+
+const MANDATORY_CALIBRATION_POSITIONS: readonly CalibrationPositionId[] = ['center', 'left', 'right']
+
+function isCalibrationJobPhase(value: unknown): value is CalibrationJobPhase {
+  return value === 'center_preflight'
+    || value === 'measuring_required'
+    || value === 'usable'
+    || value === 'refining'
+    || value === 'candidate_pending'
+    || value === 'validating'
+    || value === 'reoptimizing'
+    || value === 'restoring'
+    || value === 'complete'
+    || value === 'failed'
+    || value === 'cancelled'
+}
+
+function isCalibrationUsabilityGrade(value: unknown): value is CalibrationUsabilityGrade {
+  return value === 'bounded_usable' || value === 'sufficient'
+}
+
+function isCalibrationCorrectionMode(value: unknown): value is CalibrationCorrectionMode {
+  return value === 'normal' || value === 'gentle' || value === 'restricted_band'
+}
+
+function isCalibrationValidationState(value: unknown): value is CalibrationValidationState {
+  return value === 'none'
+    || value === 'pending'
+    || value === 'rolling_back'
+    || value === 'passed'
+    || value === 'worse'
+    || value === 'inconclusive'
+    || value === 'failed'
+}
+
+function isCalibrationConfidenceView(value: unknown): value is CalibrationConfidenceView {
+  if (!isRecord(value)) return false
+  return isInteger(value.usableBandCount)
+    && value.usableBandCount >= 0
+    && value.usableBandCount <= 64
+    && value.totalBandCount === 64
+    && isFiniteNumber(value.score)
+    && value.score >= 0
+    && value.score <= 1
+    && (value.grade === null || isCalibrationUsabilityGrade(value.grade))
+}
+
+function isCalibrationSolutionView(value: unknown): value is CalibrationSolutionView {
+  if (!isRecord(value)) return false
+  return isBoundedText(value.solutionId, 128)
+    && isUniquePositionList(value.sourcePositionIds)
+    && value.sourcePositionIds.length > 0
+    && isCalibrationConfidenceView(value.confidence)
+    && isFiniteNumber(value.score)
+    && value.score >= 0
+    && value.score <= 1
+    && isCalibrationCorrectionMode(value.correctionMode)
+}
+
+function isCalibrationNextAction(value: unknown): value is CalibrationNextAction {
+  if (!isRecord(value) || typeof value.kind !== 'string') return false
+  if (value.kind === 'capture') {
+    if (!isBoundedText(value.captureId, 128)
+      || !isCalibrationPositionId(value.positionId)
+      || (value.channel !== 'left' && value.channel !== 'right')
+      || !isInteger(value.attemptIndex)
+      || value.attemptIndex < 0
+      || value.attemptIndex >= 2
+      || typeof value.optional !== 'boolean'
+      || !isBoundedText(value.instruction, 1024)) return false
+    return value.optional === (value.positionId === 'forward' || value.positionId === 'backward')
+  }
+  if (value.kind === 'validate') {
+    return isBoundedText(value.captureId, 128)
+      && value.positionId === 'center'
+      && isBoundedText(value.candidateId, 128)
+      && isInteger(value.attemptIndex)
+      && value.attemptIndex >= 0
+      && value.attemptIndex < 2
+      && isBoundedText(value.instruction, 1024)
+  }
+  if (value.kind === 'wait') return isBoundedText(value.message, 1024)
+  if (value.kind === 'complete') return isBoundedText(value.solutionId, 128)
+  return false
+}
+
+function isCalibrationJobErrorView(value: unknown): value is CalibrationJobErrorView {
+  return isRecord(value)
+    && isBoundedText(value.code, 128)
+    && isBoundedText(value.message, 1024)
+}
+
+export function isCalibrationJobView(value: unknown): value is CalibrationJobView {
+  if (!isRecord(value)) return false
+  if (!isBoundedText(value.jobId, 128)
+    || !isFiniteNumber(value.createdAtMs)
+    || value.createdAtMs <= 0
+    || !isInteger(value.revision)
+    || value.revision < 0
+    || !isBoundedText(value.analyzerRevision, 128)
+    || !isBoundedText(value.sweepRevision, 128)
+    || !isCalibrationJobPhase(value.phase)
+    || !isUniquePositionList(value.acceptedPositions)
+    || !isUniquePositionList(value.excludedPositions)
+    || value.acceptedPositions.some((position) => value.excludedPositions.includes(position))
+    || !isInteger(value.historicalAttemptCount)
+    || value.historicalAttemptCount < 0
+    || value.historicalAttemptCount > 256
+    || !isInteger(value.optionalFailureCount)
+    || value.optionalFailureCount < 0
+    || value.optionalFailureCount > value.historicalAttemptCount
+    || typeof value.minimumViableCalibration !== 'boolean'
+    || !isCalibrationValidationState(value.validationState)) return false
+  if (value.bestSolution !== null && !isCalibrationSolutionView(value.bestSolution)) return false
+  if (value.confidence !== null && !isCalibrationConfidenceView(value.confidence)) return false
+  if (value.nextAction !== null && !isCalibrationNextAction(value.nextAction)) return false
+  if (value.activeCandidateId !== null && !isBoundedText(value.activeCandidateId, 128)) return false
+  if (value.lastError !== null && !isCalibrationJobErrorView(value.lastError)) return false
+  if (value.minimumViableCalibration
+    && !MANDATORY_CALIBRATION_POSITIONS.every((position) => value.acceptedPositions.includes(position))) return false
+  if (value.bestSolution !== null
+    && !value.bestSolution.sourcePositionIds.every((position) => value.acceptedPositions.includes(position))) return false
+  return value.minimumViableCalibration === (value.bestSolution !== null)
+}
+
+function isCalibrationJobStartPayload(value: unknown): value is CalibrationJobStartPayload {
+  return isRecord(value)
+    && (value.mode === undefined || value.mode === 'auto' || value.mode === 'advanced')
+}
+
+function isCalibrationJobGetPayload(value: unknown): value is CalibrationJobGetPayload {
+  return isRecord(value)
+    && (value.jobId === undefined || isBoundedText(value.jobId, 128))
+}
+
+function isCalibrationJobIdPayload(value: unknown): value is CalibrationJobIdPayload {
+  return isRecord(value) && isBoundedText(value.jobId, 128)
+}
+
+function isCalibrationJobCancelPayload(value: unknown): value is CalibrationJobCancelPayload {
+  if (!isCalibrationJobIdPayload(value)) return false
+  if (value.scope !== 'capture' && value.scope !== 'optional_refinement') return false
+  if (value.scope === 'capture') return isBoundedText(value.captureId, 128)
+  return value.captureId === undefined
+}
+
+function isCalibrationCaptureIdPayload(value: unknown): value is CalibrationCaptureReadyPayload {
+  return isCalibrationJobIdPayload(value) && isBoundedText(value.captureId, 128)
+}
+
+function isCalibrationCaptureChannel(value: unknown): value is CalibrationCaptureChannel {
+  return value === 'left' || value === 'right'
+}
+
+function isCalibrationCaptureSettings(value: unknown): value is CalibrationCaptureSettings {
+  return isRecord(value)
+    && (value.echoCancellation === null || typeof value.echoCancellation === 'boolean')
+    && (value.noiseSuppression === null || typeof value.noiseSuppression === 'boolean')
+    && (value.autoGainControl === null || typeof value.autoGainControl === 'boolean')
+}
+
+export function isCalibrationCaptureMetadata(value: unknown): value is CalibrationCaptureMetadata {
+  if (!isRecord(value)) return false
+  if (!isBoundedText(value.jobId, 128)
+    || !isBoundedText(value.captureId, 128)
+    || !isCalibrationPositionId(value.positionId)
+    || !isInteger(value.attemptIndex)
+    || value.attemptIndex < 0
+    || value.attemptIndex >= 2
+    || !isCalibrationCaptureChannel(value.channel)
+    || !isInteger(value.sampleRate)
+    || value.sampleRate < 8_000
+    || value.sampleRate > 192_000
+    || value.channelCount !== 1
+    || !isInteger(value.sampleCount)
+    || value.sampleCount <= 0
+    || value.sampleCount > Math.floor(MAX_CALIBRATION_CAPTURE_FRAME_BYTES / 4)
+    || !isInteger(value.byteCount)
+    || value.byteCount !== value.sampleCount * 4
+    || !isCalibrationCaptureSettings(value.settings)
+    || !isBoundedText(value.userAgent, 512)
+    || !isBoundedText(value.microphoneProfileId, 128)
+    || !isBoundedText(value.microphoneProfileRevision, 128)
+    || !isFiniteNumber(value.capturedAtMs)
+    || value.capturedAtMs <= 0) return false
+  return true
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
+}
+
+export function isCalibrationCaptureFrameMetadata(value: unknown): value is CalibrationCaptureFrameMetadata {
+  return isCalibrationCaptureMetadata(value) && isSha256(value.contentSha256)
+}
+
+function isCalibrationCaptureUploadedPayload(value: unknown): value is CalibrationCaptureUploadedPayload {
+  if (!isRecord(value)
+    || !isBoundedText(value.jobId, 128)
+    || !isBoundedText(value.captureId, 128)
+    || !isSha256(value.contentSha256)
+    || !isInteger(value.sampleCount)
+    || value.sampleCount <= 0
+    || value.sampleCount > Math.floor(MAX_CALIBRATION_CAPTURE_FRAME_BYTES / 4)
+    || !isInteger(value.byteCount)
+    || value.byteCount !== value.sampleCount * 4
+    || (value.status !== 'accepted' && value.status !== 'rejected' && value.status !== 'duplicate')) return false
+  return value.reason === undefined || isBoundedText(value.reason, 1024)
+}
+
+function isCalibrationValidationCaptureReadyPayload(value: unknown): value is CalibrationValidationCaptureReadyPayload {
+  return isCalibrationCaptureIdPayload(value)
+    && isBoundedText(value.candidateId, 128)
+}
+
 function isAbortPayload(value: unknown): value is Record<string, unknown> & CalibrationSessionAbortPayload {
   return isSessionPayload(value)
     && isCalibrationErrorCode(value.code)
@@ -1586,6 +2008,23 @@ export function validatePayload(type: string, payload: unknown): string | null {
     case 'calibration.export':
     case 'probe.persistent.release':
       return isEmptyPayload(payload) ? null : `${type} requires an empty request payload`
+    case 'calibration.job.start':
+      return isCalibrationJobStartPayload(payload) ? null : `${type} requires a valid calibration mode`
+    case 'calibration.job.get':
+      return isCalibrationJobGetPayload(payload) ? null : `${type} requires an optional job id`
+    case 'calibration.job.cancel':
+      return isCalibrationJobCancelPayload(payload) ? null : `${type} requires a job id and valid cancel scope`
+    case 'calibration.job.discard':
+    case 'calibration.job.finish':
+      return isCalibrationJobIdPayload(payload) ? null : `${type} requires a job id`
+    case 'calibration.capture.ready':
+      return isCalibrationCaptureIdPayload(payload) ? null : `${type} requires a job id and capture id`
+    case 'calibration.capture.metadata':
+      return isCalibrationCaptureMetadata(payload) ? null : `${type} requires valid capture metadata`
+    case 'calibration.validation.capture.ready':
+      return isCalibrationValidationCaptureReadyPayload(payload)
+        ? null
+        : `${type} requires a job id, capture id, and candidate id`
     case 'engine.applyPreset':
       return isPresetPayload(payload) ? null : `${type} requires a valid preset id`
     case 'profile.save':
@@ -1660,6 +2099,10 @@ export function validatePayload(type: string, payload: unknown): string | null {
       return isCalibrationValidationResultPayload(payload) ? null : `${type} requires a candidateId and a valid validation result`
     case 'calibration.exported':
       return isCalibrationPackage(payload) ? null : `${type} requires a valid SweetSpot calibration package`
+    case 'calibration.capture.uploaded':
+      return isCalibrationCaptureUploadedPayload(payload) ? null : `${type} requires a valid upload result`
+    case 'calibration.job.state':
+      return isCalibrationJobView(payload) ? null : `${type} requires a valid calibration job view`
     case 'measurement.ready':
     case 'measurement.started':
       return isSessionWithSweep(payload) ? null : `${type} requires sessionId and sweep`

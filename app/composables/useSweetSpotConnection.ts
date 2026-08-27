@@ -1,5 +1,6 @@
 import { onScopeDispose, readonly, ref, shallowRef } from 'vue'
 import {
+  MAX_CALIBRATION_CAPTURE_FRAME_BYTES,
   PROTOCOL_VERSION,
   isEnvelope,
   isRoomSocketServerMessage,
@@ -122,6 +123,22 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     return env.id
   }
 
+  function uploadBinary(data: ArrayBuffer): boolean {
+    if (role !== 'client'
+      || data.byteLength > MAX_CALIBRATION_CAPTURE_FRAME_BYTES
+      || !socketReady
+      || socket?.readyState !== WebSocket.OPEN) return false
+    try {
+      socket.send(data)
+      log('out', `binary:${data.byteLength}`)
+      return true
+    } catch {
+      markConnectionInterrupted()
+      socket?.close()
+      return false
+    }
+  }
+
   function request<T = unknown>(
     type: string,
     payload: unknown = {},
@@ -231,6 +248,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
       return
     }
     socket = next
+    next.binaryType = 'arraybuffer'
     next.onopen = () => {
       if (socket !== next || disposed) return
       socketReady = true
@@ -240,9 +258,14 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     }
     next.onmessage = (event) => {
       if (socket !== next || disposed) return
+      const data: unknown = event.data
+      if (typeof data !== 'string') {
+        if (data instanceof ArrayBuffer) log('in', `binary:${data.byteLength}`)
+        return
+      }
       let value: unknown
       try {
-        value = JSON.parse(typeof event.data === 'string' ? event.data : '')
+        value = JSON.parse(data)
       } catch {
         return
       }
@@ -291,6 +314,7 @@ export function useSweetSpotConnection(role: Role, pairCode: () => string) {
     connect,
     disconnect,
     send,
+    uploadBinary,
     request,
     onMessage,
   }

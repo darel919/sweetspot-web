@@ -47,11 +47,22 @@ Room messages use the v1 envelope from `protocol.ts`.
 { "v": 1, "id": "msg_01J...", "type": "state.get", "ts": 1787520000000, "payload": {}, "replyTo": "msg_01J..." }
 ```
 
-The room validates known types, rejects session-only types, enforces the
+The room validates known types, rejects session-only types, enforces the JSON
 payload limit, and rate-limits each socket. Commands go directly to an open
 device socket. If the device is offline, the client receives an error instead
 of creating an unbounded mailbox. Device messages are broadcast only to open
 client sockets. Nothing is replayed after reconnect.
+
+Calibration PCM uses a separate binary WebSocket frame. A client frame must
+contain the `SSCP` capture format, use version 1, and stay below 8 MiB. The
+metadata JSON is limited to 64 KiB. The room validates the frame and forwards
+the original bytes to the device. A device-origin binary frame is rejected.
+
+The browser sends `calibration.capture.ready` and
+`calibration.capture.metadata` envelopes around the binary upload. The TV
+publishes `calibration.capture.uploaded` and `calibration.job.state` after it
+stores and analyzes the capture. A reconnecting browser requests
+`calibration.job.get` and renders the returned TV-owned view.
 
 Delivery is at-most-once. The dashboard requests a fresh state snapshot after
 it connects or the device becomes available. Calibration flows remain

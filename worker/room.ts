@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import {
+  MAX_CALIBRATION_CAPTURE_FRAME_BYTES,
   MAX_PAYLOAD_BYTES,
   KNOWN_TYPES,
   SESSION_ONLY_TYPES,
@@ -10,6 +11,7 @@ import {
   type Envelope,
   type ErrorPayload,
 } from '../shared/types/protocol'
+import { decodeCalibrationCaptureFrame } from '../shared/transport/calibrationCaptureFrame'
 
 const RATE_WINDOW_MS = 10_000
 const MESSAGE_RATE_MAX = 60
@@ -127,6 +129,21 @@ export class RoomDO extends DurableObject<unknown> {
     return device ? this.sendSocket(device, env) : false
   }
 
+  private sendBinaryCommandToDevice(data: ArrayBuffer): boolean {
+    const device = this.state.getWebSockets().find((ws) => {
+      const attachment = this.socketAttachment(ws)
+      return attachment?.role === 'device' && ws.readyState === WebSocket.OPEN
+    })
+    if (!device || device.readyState !== WebSocket.OPEN) return false
+    try {
+      device.send(data)
+      return true
+    } catch {
+      try { device.close(1011, 'room send failed') } catch {}
+      return false
+    }
+  }
+
   private socketError(ws: WebSocket, code: ErrorPayload['code'] | 'bad_json' | 'bad_message', message: string) {
     this.sendSocket(ws, { kind: 'room.error', code, message })
   }
@@ -141,12 +158,27 @@ export class RoomDO extends DurableObject<unknown> {
       this.socketError(ws, 'rate_limited', 'Too many messages')
       return
     }
-    if (typeof message !== 'string' && message.byteLength > MAX_PAYLOAD_BYTES) {
-      this.socketError(ws, 'payload_too_large', 'Message exceeds the room payload limit')
+    if (typeof message !== 'string') {
+      if (attachment.role !== 'client') {
+        this.socketError(ws, 'bad_message', 'The TV may only send JSON protocol envelopes')
+        return
+      }
+      if (message.byteLength > MAX_CALIBRATION_CAPTURE_FRAME_BYTES) {
+        this.socketError(ws, 'payload_too_large', 'Calibration capture exceeds the binary room limit')
+        return
+      }
+      const frame = decodeCalibrationCaptureFrame(message)
+      if (!frame.ok) {
+        this.socketError(ws, 'bad_message', frame.message)
+        return
+      }
+      if (!this.sendBinaryCommandToDevice(message)) {
+        this.socketError(ws, 'not_in_room', 'The TV is not connected to this pairing session')
+      }
       return
     }
-    const body = typeof message === 'string' ? message : new TextDecoder().decode(message)
-    if (typeof message === 'string' && new TextEncoder().encode(body).byteLength > MAX_PAYLOAD_BYTES) {
+    const body = message
+    if (new TextEncoder().encode(body).byteLength > MAX_PAYLOAD_BYTES) {
       this.socketError(ws, 'payload_too_large', 'Message exceeds the room payload limit')
       return
     }
