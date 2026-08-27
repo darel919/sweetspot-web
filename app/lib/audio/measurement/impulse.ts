@@ -492,12 +492,10 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
     ? Math.max(0, externalNoiseRms)
     : tailNoiseRms
   let peak = 0
-  let peakIndex = -1
   for (let index = 0; index < samples.length; index++) {
     const value = Math.abs(samples[index])
     if (value > peak) {
       peak = value
-      peakIndex = index
     }
   }
   const searchEnd = Math.min(samples.length, Math.max(1, Math.round(sampleRate * DIRECT_SEARCH_WINDOW_MS / 1000)))

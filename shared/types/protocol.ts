@@ -940,6 +940,7 @@ function isSessionId(value: unknown): value is string {
   return typeof value === 'string'
     && value.length > 0
     && value.length <= 128
+    // eslint-disable-next-line no-control-regex -- intentionally rejects control characters and whitespace in session ids
     && !/[\u0000-\u001f\u007f\s]/.test(value)
 }
 

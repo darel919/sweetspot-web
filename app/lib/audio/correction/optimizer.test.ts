@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { parseMicCalibrationProfile } from '../mics/profile'
-import { aggregateResponse, type AggregateResponse } from '../measurement/aggregation'
+import { type AggregateResponse } from '../measurement/aggregation'
 import type { ResponsePoint } from '../measurement/response'
 import { calculateCorrection, limitAdjacentSlope, targetErrorRms } from './optimizer'
 import { mapCorrectionToBands, mapCorrectionToBandsConservative } from './bandMapper'
@@ -61,19 +61,6 @@ function responseWithLowFrequencyRolloff(enteringHz: number): ResponsePoint[] {
   })
 }
 
-function interpolateLog(points: readonly ResponsePoint[], frequencyHz: number): number {
-  if (frequencyHz <= points[0].frequencyHz) return points[0].magnitudeDb
-  if (frequencyHz >= points[points.length - 1].frequencyHz) return points[points.length - 1].magnitudeDb
-  for (let index = 1; index < points.length; index++) {
-    const lower = points[index - 1]
-    const upper = points[index]
-    if (frequencyHz > upper.frequencyHz) continue
-    const fraction = Math.log(frequencyHz / lower.frequencyHz) / Math.log(upper.frequencyHz / lower.frequencyHz)
-    return lower.magnitudeDb + (upper.magnitudeDb - lower.magnitudeDb) * fraction
-  }
-  return points[points.length - 1].magnitudeDb
-}
-
 function applyMappedCorrection(points: readonly ResponsePoint[], bandsDb: readonly number[]): ResponsePoint[] {
   const cutoffs = Array.from({ length: bandsDb.length }, (_, index) =>
     20 * (20_000 / 20) ** ((index + 1) / bandsDb.length))
@@ -86,19 +73,19 @@ function applyMappedCorrection(points: readonly ResponsePoint[], bandsDb: readon
 
 describe('constrained room correction', () => {
   test('cuts a broad low-frequency peak', () => {
-    const result = calculateCorrection(aggregate(new Array(48).fill(0).map((_, index) => index < 15 ? 8 : 0)), profile, { headroomVerified: false })
+    const result = calculateCorrection(aggregate(Array.from({ length: 48 }, () => 0).map((_, index) => index < 15 ? 8 : 0)), profile, { headroomVerified: false })
     expect(Math.min(...result.correction.map((point) => point.magnitudeDb))).toBeLessThan(-1)
   })
 
   test('does not boost an isolated null', () => {
-    const values = new Array(48).fill(0)
+    const values = Array.from({ length: 48 }, () => 0)
     values[12] = -12
     const result = calculateCorrection(aggregate(values), profile, { headroomVerified: true })
     expect(result.correction[12].magnitudeDb).toBeLessThanOrEqual(0)
   })
 
   test('does not let slope limiting leak a boost into an unsafe spatial region', () => {
-    const values = new Array(48).fill(0)
+    const values = Array.from({ length: 48 }, () => 0)
     const measured = aggregate(values)
     measured.spreadDb[8].magnitudeDb = 10
 
@@ -108,14 +95,14 @@ describe('constrained room correction', () => {
   })
 
   test('turns spatial confidence off for arbitrarily high spread, including cuts', () => {
-    const values = new Array(48).fill(0).map((_, index) => index < 15 ? 8 : 0)
+    const values = Array.from({ length: 48 }, () => 0).map((_, index) => index < 15 ? 8 : 0)
     const result = calculateCorrection(aggregate(values, 10), profile, { headroomVerified: false })
 
     expect(result.correction.every((point) => point.magnitudeDb >= 0)).toBe(true)
   })
 
   test('does not leak a neighboring cut into a zero-confidence position', () => {
-    const values = new Array(48).fill(0).map((_, index) => index < 15 ? 8 : 0)
+    const values = Array.from({ length: 48 }, () => 0).map((_, index) => index < 15 ? 8 : 0)
     const measured = aggregate(values)
     measured.spreadDb[5].magnitudeDb = 10
 
@@ -151,7 +138,7 @@ describe('constrained room correction', () => {
   })
 
   test('finds the upper recovery boundary for a broad low-frequency rolloff', () => {
-    const points = new Array(29).fill(0).map((_, index) => {
+    const points = Array.from({ length: 29 }, () => 0).map((_, index) => {
       const frequencyHz = 20 + index * 10
       return { frequencyHz, magnitudeDb: frequencyHz < 60 ? -8 : 0 }
     })
@@ -161,7 +148,7 @@ describe('constrained room correction', () => {
   })
 
   test('ignores a narrow low-frequency null when finding extension', () => {
-    const points = new Array(29).fill(0).map((_, index) => ({
+    const points = Array.from({ length: 29 }, () => 0).map((_, index) => ({
       frequencyHz: 20 + index * 10,
       magnitudeDb: index === 3 ? -12 : 0,
     }))
@@ -170,7 +157,7 @@ describe('constrained room correction', () => {
   })
 
   test('does not treat a broad low-frequency feature as a lower extension', () => {
-    const points = new Array(29).fill(0).map((_, index) => {
+    const points = Array.from({ length: 29 }, () => 0).map((_, index) => {
       const frequencyHz = 20 + index * 10
       return { frequencyHz, magnitudeDb: frequencyHz < 100 ? -8 : 0 }
     })

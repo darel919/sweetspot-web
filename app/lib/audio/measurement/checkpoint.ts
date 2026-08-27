@@ -3,7 +3,6 @@ import {
   CALIBRATION_SWEEP_REVISION as PROTOCOL_CALIBRATION_SWEEP_REVISION,
   isMeasurementContext,
   type MeasurementCaptureMetadata,
-  type MeasurementContext,
 } from '../../../../shared/types/protocol'
 import type { PositionLedger } from './position-ledger'
 import type { ResponsePoint } from './response'
@@ -286,6 +285,8 @@ export function checkCalibrationCheckpointCompatibility(
     } else if (Math.abs(checkpoint.microphone.sampleRate - expected.sampleRate) > 1) {
       return { compatible: false, reason: 'sample-rate' }
     }
+  } else if (options.requireSampleRate && expected.sampleRate !== null) {
+    return { compatible: false, reason: 'sample-rate' }
   }
   return { compatible: true }
 }
