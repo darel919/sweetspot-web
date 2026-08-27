@@ -54,8 +54,8 @@ Device-published (device -> clients): `state.snapshot`, `state.changed`,
 `calibrationSession.loudness.started`, `calibrationSession.loudness.stopped`,
 `calibrationSession.position.continued`,
 `measurement.ready`, `measurement.started`, `measurement.finished`,
-`measurement.error`, `calibration.exported`, `calibration.capture.uploaded`,
-`calibration.job.state`.
+`measurement.error`, `calibration.exported`, `calibration.capture.finished`,
+`calibration.capture.uploaded`, `calibration.job.state`.
 
 `calibration.job.state` carries a compact `CalibrationJobView`. Its
 `nextAction` is a discriminated capture, validation, wait, or complete action.

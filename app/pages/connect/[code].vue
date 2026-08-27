@@ -32,72 +32,25 @@
           @delete-profile="deleteProfile"
         />
 
-        <ConnectCalibrationSection
+        <ConnectCalibrationRemoteSection
           v-if="snapshot"
           :snapshot="snapshot"
-          :measurement-stage="measurementStage"
-          :measurement-busy="measurementBusy"
-          :measurement-message="measurementMessage"
-          :measurement-analysis="measurementAnalysis"
-          :measurement-records="measurementRecords"
-          :measurement-aggregate-left="measurementAggregateLeft"
-          :measurement-aggregate-right="measurementAggregateRight"
-          :measurement-validation-analysis="measurementValidationAnalysis"
-          :measurement-quality-passed="measurementQualityPassed"
-          :measurement-failed-attempt-count="measurementFailedAttemptCount"
-          :measurement-complete-position-count="measurementCompletePositionCount"
-          :web-build-sha="CALIBRATION_WEB_BUILD_SHA"
-          :measurement-convergence-outcome="measurementConvergenceOutcome"
-          :measurement-failed-groups="measurementFailedGroups"
-          :measurement-current-context="measurementCurrentContext"
-          :measurement-current-position="measurementCurrentPosition"
-          :measurement-progress="measurementProgress"
-          :measurement-capture-info="measurementCaptureInfo"
-          :measurement-failed-diagnostics="measurementFailedDiagnostics"
-          :measurement-take-diagnostics="measurementTakeDiagnostics"
-          :measurement-probe-summary="measurementProbeSummary"
-          :debug-capture-export-enabled="debugCaptureExportEnabled"
-          :measurement-resume-available="measurementResumeAvailable"
-          :measurement-resume-position-count="measurementResumePositionCount"
-          :measurement-resume-message="measurementResumeMessage"
-          :measurement-profiles="measurementProfiles"
-          :measurement-selected-profile-id="measurementSelectedProfileId"
-          :measurement-profile-error="measurementProfileError"
-          :recommended-correction="recommendedCorrection"
-          :correction-strength="correctionStrength"
-          :correction-strength-options="correctionStrengthOptions"
-          :correction-pending="correctionPending"
-          :calibration-applied="calibrationApplied"
-          :calibration-finalization-pending="calibrationFinalizationPending"
-          :calibration-result="calibrationResult"
-          :calibration-result-message="calibrationResultMessage"
-          :calibration-rollback-target-active="calibrationRollbackTargetActive"
-          :rollback-available="candidateTransaction !== null"
-          :validation-worse="validationWorse"
-          :candidate-pending="candidateTransaction !== null"
-          :candidate-validation-status="candidateTransaction?.validationStatus ?? null"
-          :validation-ready="validationReady"
-          :cal-json="calJson"
-          :cal-status="calStatus"
-          :calibration-file-pending="calibrationFilePending"
-          :calibration-file-status="calibrationFileStatus"
-          :validation-metrics="validationMetrics"
-          @select-profile="measurementSelectedProfileId = $event"
-          @select-strength="correctionStrength = $event"
-          @edit-curve="calJson = $event"
-          @start-measurement="startMeasurement"
-          @resume-measurement="resumeMeasurement"
-          @cancel-measurement="cancelCalibration"
-          @retry-failed-groups="retryFailedGroups"
-          @start-validation="startValidation"
-          @apply-recommended-correction="applyRecommendedCorrection"
-          @apply-calibration="applyCalibration"
-          @reset-calibration="resetCalibration"
-          @rollback-calibration="rollbackCalibration"
-          @accept-candidate="acceptCandidate"
-          @download-calibration="downloadCalibration"
-          @export-debug-bundle="exportDebugBundle"
-          @import-calibration="importCalibration"
+          :device-online="deviceOnline"
+          :job="remoteCalibrationJob"
+          :capture-state="remoteCaptureState"
+          :capture-error="remoteCaptureError"
+          :capture-metadata="remoteCaptureMetadata"
+          :profiles="remoteCalibrationProfiles"
+          :selected-profile-id="remoteSelectedProfileId"
+          :profile-error="remoteProfileError"
+          @start="startRemoteCalibration"
+          @resume="resumeRemoteCalibration"
+          @cancel-capture="cancelRemoteCapture"
+          @cancel-refinement="cancelRemoteRefinement"
+          @finish="finishRemoteCalibration"
+          @discard="discardRemoteCalibration"
+          @retry-upload="retryRemoteUpload"
+          @select-profile="selectRemoteProfile"
         />
 
         <ConnectDiagnosticsSection
@@ -181,7 +134,7 @@ import { useScreenWakeLock } from '~/composables/useScreenWakeLock'
 import { onMounted, onScopeDispose, ref, watch } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import '~/components/connect/connect.css'
-import ConnectCalibrationSection from '~/components/connect/ConnectCalibrationSection.vue'
+import ConnectCalibrationRemoteSection from '~/components/connect/ConnectCalibrationRemoteSection.vue'
 import ConnectCalibrationOverlay from '~/components/connect/ConnectCalibrationOverlay.vue'
 import ConnectDebugPanel from '~/components/connect/ConnectDebugPanel.vue'
 import ConnectDeviceSection from '~/components/connect/ConnectDeviceSection.vue'
@@ -190,6 +143,7 @@ import ConnectEffectChainSection from '~/components/connect/ConnectEffectChainSe
 import ConnectEqualizerSection from '~/components/connect/ConnectEqualizerSection.vue'
 import ConnectFooter from '~/components/connect/ConnectFooter.vue'
 import ConnectHeaderStatus from '~/components/connect/ConnectHeaderStatus.vue'
+import { useCalibrationRemoteMic } from '~/composables/useCalibrationRemoteMic'
 import ConnectStateSection from '~/components/connect/ConnectStateSection.vue'
 import { isCalibrationActiveStage } from '~/composables/useCalibrationSession'
 import {
@@ -224,7 +178,6 @@ import type {
   AggregateResponse,
 } from '~/lib/audio/measurement/aggregation'
 import { allCaptureQualityPassed } from '~/lib/audio/measurement/aggregation'
-import { CALIBRATION_WEB_BUILD_SHA } from '~/lib/audio/measurement/checkpoint'
 import { EqCommandRevisionGate } from '~/lib/eq-command-revision'
 import { SweetSpotRequestError } from '~/lib/transport/errors'
 import type {
@@ -246,6 +199,26 @@ const debugCaptureExportEnabled = computed(() => route.query.debug === '1')
 const connection = useSweetSpotConnection('client', () => rawCode.value)
 const { status, deviceOnline, debugLog, connect, send, request, onMessage } = connection
 const snapshot = ref<StateSnapshot | null>(null)
+const remoteCalibration = useCalibrationRemoteMic(connection)
+const {
+  job: remoteCalibrationJob,
+  captureState: remoteCaptureState,
+  captureError: remoteCaptureError,
+  captureMetadata: remoteCaptureMetadata,
+  profiles: remoteCalibrationProfiles,
+  selectedProfileId: remoteSelectedProfileId,
+  profileError: remoteProfileError,
+  loadProfiles: loadRemoteCalibrationProfiles,
+  refreshJob: refreshRemoteCalibrationJob,
+  selectProfile: selectRemoteProfile,
+  startNewJob: startRemoteCalibration,
+  resumeJob: resumeRemoteCalibration,
+  cancelCapture: cancelRemoteCapture,
+  cancelOptionalRefinement: cancelRemoteRefinement,
+  finishWithBest: finishRemoteCalibration,
+  discardJob: discardRemoteCalibration,
+  retryUpload: retryRemoteUpload,
+} = remoteCalibration
 const {
   stage: measurementStage,
   message: measurementMessage,
@@ -661,9 +634,15 @@ let validationResultInFlight = false
 const validationConfirmationCandidateId = ref<string | null>(null)
 
 onMounted(() => {
+  void loadRemoteCalibrationProfiles().catch(() => undefined)
+  refreshRemoteCalibrationJob()
   void loadMeasurementProfiles()
     .then(() => refreshMeasurementResume())
     .catch(() => undefined)
+})
+
+watch(deviceOnline, (online) => {
+  if (online) refreshRemoteCalibrationJob()
 })
 
 function showToast(message: string) {

@@ -317,7 +317,7 @@ export interface CalibrationJobView {
 
 export interface CalibrationJobStatePayload extends CalibrationJobView {}
 
-export type CalibrationCaptureChannel = 'left' | 'right'
+export type CalibrationCaptureChannel = 'left' | 'right' | 'both'
 
 export interface CalibrationCaptureSettings {
   echoCancellation: boolean | null
@@ -350,6 +350,8 @@ export interface CalibrationCaptureReadyPayload {
   jobId: string
   captureId: string
 }
+
+export interface CalibrationCaptureFinishedPayload extends CalibrationCaptureReadyPayload {}
 
 export interface CalibrationCaptureMetadataPayload extends CalibrationCaptureMetadata {}
 
@@ -1017,6 +1019,7 @@ export const DEVICE_TO_CLIENT_TYPES = new Set<string>([
   'measurement.error',
   'calibration.exported',
   'calibration.capture.uploaded',
+  'calibration.capture.finished',
   'calibration.job.state',
   'probe.status',
   'probe.result',
@@ -1047,6 +1050,7 @@ export const KNOWN_TYPES = new Set<string>([
   'measurement.error',
   'calibration.exported',
   'calibration.capture.uploaded',
+  'calibration.capture.finished',
   'calibration.job.state',
   'probe.status',
   'probe.result',
@@ -1923,7 +1927,7 @@ function isCalibrationCaptureIdPayload(value: unknown): value is CalibrationCapt
 }
 
 function isCalibrationCaptureChannel(value: unknown): value is CalibrationCaptureChannel {
-  return value === 'left' || value === 'right'
+  return value === 'left' || value === 'right' || value === 'both'
 }
 
 function isCalibrationCaptureSettings(value: unknown): value is CalibrationCaptureSettings {
@@ -1980,6 +1984,10 @@ function isCalibrationCaptureUploadedPayload(value: unknown): value is Calibrati
     || value.byteCount !== value.sampleCount * 4
     || (value.status !== 'accepted' && value.status !== 'rejected' && value.status !== 'duplicate')) return false
   return value.reason === undefined || isBoundedText(value.reason, 1024)
+}
+
+function isCalibrationCaptureFinishedPayload(value: unknown): value is CalibrationCaptureFinishedPayload {
+  return isCalibrationCaptureIdPayload(value)
 }
 
 function isCalibrationValidationCaptureReadyPayload(value: unknown): value is CalibrationValidationCaptureReadyPayload {
@@ -2101,6 +2109,8 @@ export function validatePayload(type: string, payload: unknown): string | null {
       return isCalibrationPackage(payload) ? null : `${type} requires a valid SweetSpot calibration package`
     case 'calibration.capture.uploaded':
       return isCalibrationCaptureUploadedPayload(payload) ? null : `${type} requires a valid upload result`
+    case 'calibration.capture.finished':
+      return isCalibrationCaptureFinishedPayload(payload) ? null : `${type} requires a job id and capture id`
     case 'calibration.job.state':
       return isCalibrationJobView(payload) ? null : `${type} requires a valid calibration job view`
     case 'measurement.ready':
