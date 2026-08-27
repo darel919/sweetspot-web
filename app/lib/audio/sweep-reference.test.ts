@@ -4,9 +4,10 @@ import golden from '../../../test-vectors/measurement-sweep-golden.json'
 import { generateCompositeSweepReference, generateCompositeSweepStereoReference, generateSweepReference, generateSweepSignal, generateSyncMarker, sweepSampleParts } from './sweep-reference'
 
 const sweep: MeasurementSweep = {
-  sweepRevision: 'android-sweep-v2',
+  sweepRevision: 'android-sweep-v3',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
+  markerChannel: 'left',
   sampleRate: 48_000,
   startHz: 20,
   endHz: 20_000,
@@ -28,9 +29,10 @@ const sweep: MeasurementSweep = {
 }
 
 const androidDefaultSweep: MeasurementSweep = {
-  sweepRevision: 'android-sweep-v2',
+  sweepRevision: 'android-sweep-v3',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
+  markerChannel: 'left',
   sampleRate: 48_000,
   startHz: 20,
   endHz: 20_000,
@@ -91,9 +93,9 @@ describe('sweep reference', () => {
     const startMidpoint = Math.floor(start.length / 2)
     const endMidpoint = Math.floor(end.length / 2)
     expect(reference[(parts.leadingMarkerStartSamples + startMidpoint) * 2]).toBe(start[startMidpoint])
-    expect(reference[(parts.leadingMarkerStartSamples + startMidpoint) * 2 + 1]).toBe(start[startMidpoint])
+    expect(reference[(parts.leadingMarkerStartSamples + startMidpoint) * 2 + 1]).toBe(0)
     expect(reference[(parts.trailingMarkerStartSamples + endMidpoint) * 2]).toBe(end[endMidpoint])
-    expect(reference[(parts.trailingMarkerStartSamples + endMidpoint) * 2 + 1]).toBe(end[endMidpoint])
+    expect(reference[(parts.trailingMarkerStartSamples + endMidpoint) * 2 + 1]).toBe(0)
     let leftOnlyFrame = false
     for (let frame = parts.sweepStartSamples; frame < parts.rightSweepStartSamples; frame++) {
       if (reference[frame * 2] !== 0 && reference[frame * 2 + 1] === 0) {
@@ -138,8 +140,22 @@ describe('sweep reference', () => {
       expect(mono.slice(parts.trailingMarkerStartSamples + parts.endMarkerSamples).every((sample) => sample === 0)).toBe(true)
       expect(stereo.slice(0, parts.leadingMarkerStartSamples * 2).every((sample) => sample === 0)).toBe(true)
       expect(stereo.slice((parts.leadingMarkerStartSamples + parts.syncMarkerSamples) * 2, parts.trailingMarkerStartSamples * 2).every((sample) => sample === 0)).toBe(true)
-      expect(stereo.slice((parts.trailingMarkerStartSamples + parts.endMarkerSamples) * 2).every((sample) => sample === 0)).toBe(true)
+      expect(stereo.slice(parts.trailingMarkerStartSamples * 2, (parts.trailingMarkerStartSamples + parts.endMarkerSamples) * 2).some((sample) => sample !== 0)).toBe(true)
+      expect(stereo.filter((_, index) => index % 2 === 1).every((sample) => sample === 0)).toBe(true)
     }
+  })
+
+  test('routes both markers to the configured right speaker', () => {
+    const rightMarkerSweep = { ...androidDefaultSweep, markerChannel: 'right' as const }
+    const parts = sweepSampleParts(rightMarkerSweep)
+    const reference = generateCompositeSweepStereoReference(rightMarkerSweep)
+    const start = generateSyncMarker(rightMarkerSweep, rightMarkerSweep.sampleRate, 'start')
+    const end = generateSyncMarker(rightMarkerSweep, rightMarkerSweep.sampleRate, 'end')
+
+    expect(reference[(parts.leadingMarkerStartSamples + Math.floor(start.length / 2)) * 2]).toBe(0)
+    expect(reference[(parts.leadingMarkerStartSamples + Math.floor(start.length / 2)) * 2 + 1]).toBe(start[Math.floor(start.length / 2)])
+    expect(reference[(parts.trailingMarkerStartSamples + Math.floor(end.length / 2)) * 2]).toBe(0)
+    expect(reference[(parts.trailingMarkerStartSamples + Math.floor(end.length / 2)) * 2 + 1]).toBe(end[Math.floor(end.length / 2)])
   })
 
   test('keeps both ESS sweeps in the position-composite reference', () => {

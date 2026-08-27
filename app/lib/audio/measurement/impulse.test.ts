@@ -10,9 +10,10 @@ import {
 } from './impulse'
 
 const sweep = {
-  sweepRevision: 'android-sweep-v2' as const,
+  sweepRevision: 'android-sweep-v3' as const,
   algorithm: 'exponential-sine-v1' as const,
   captureKind: 'position-composite' as const,
+  markerChannel: 'left' as const,
   sampleRate: 8_000,
   startHz: 20,
   endHz: 3_500,

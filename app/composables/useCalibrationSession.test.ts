@@ -22,9 +22,10 @@ import {
 import { isCalibrationOperationCurrent, isSameMeasurementContext } from '../lib/audio/measurement/session-guard'
 
 const sweep: MeasurementSweep = {
-  sweepRevision: 'android-sweep-v2' as const,
+  sweepRevision: 'android-sweep-v3' as const,
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
+  markerChannel: 'left',
   sampleRate: 48_000,
   startHz: 20,
   endHz: 20_000,
@@ -549,7 +550,8 @@ describe('useCalibrationSession integration state machine', () => {
       await harness.completeTake()
       harness.session.exportDebugBundle()
       expect(harness.downloaded).toHaveLength(1)
-      expect((harness.downloaded[0] as { sessionIds?: string[] }).sessionIds).toEqual([expect.stringMatching(/^cal_/)])
+      expect((harness.downloaded[0] as { sessionIds?: string[]; markerChannel?: string }).sessionIds).toEqual([expect.stringMatching(/^cal_/)])
+      expect((harness.downloaded[0] as { markerChannel?: string }).markerChannel).toBe('left')
     } finally {
       harness.dispose()
     }

@@ -74,6 +74,13 @@ describe('calibration checkpoint persistence contract', () => {
     expect(parseSerializedCalibrationCheckpoint(previousRevision)).toBeNull()
   })
 
+  test('rejects checkpoints created by the previous sweep revision', () => {
+    const previousRevision = serializeCalibrationCheckpoint(checkpoint)
+      .replace(CALIBRATION_SWEEP_REVISION, 'android-sweep-v2')
+
+    expect(parseSerializedCalibrationCheckpoint(previousRevision)).toBeNull()
+  })
+
   test('does not reject resume when both stored and current track rates are initially unknown', () => {
     const unknownRateCheckpoint = { ...checkpoint, microphone: { ...checkpoint.microphone, sampleRate: null } }
     expect(checkCalibrationCheckpointCompatibility(unknownRateCheckpoint, { ...identity, sampleRate: null })).toEqual({ compatible: true })

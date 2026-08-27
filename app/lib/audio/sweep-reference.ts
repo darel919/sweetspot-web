@@ -125,12 +125,11 @@ export function generateCompositeSweepStereoReference(
   const rightSweep = isMarkerDiagnosticCaptureKind(sweep.captureKind) ? new Float32Array(0) : generateSweepSignal(sweep, sampleRate)
   const left = new Float32Array(parts.totalSamples)
   const right = new Float32Array(parts.totalSamples)
-  left.set(start, parts.leadingMarkerStartSamples)
-  right.set(start, parts.leadingMarkerStartSamples)
+  const marker = sweep.markerChannel === 'left' ? left : right
+  marker.set(start, parts.leadingMarkerStartSamples)
   if (leftSweep.length > 0) left.set(leftSweep, parts.sweepStartSamples)
   if (rightSweep.length > 0) right.set(rightSweep, parts.rightSweepStartSamples)
-  left.set(end, parts.trailingMarkerStartSamples)
-  right.set(end, parts.trailingMarkerStartSamples)
+  marker.set(end, parts.trailingMarkerStartSamples)
 
   const interleaved = new Float32Array(parts.totalSamples * 2)
   for (let index = 0; index < parts.totalSamples; index++) {

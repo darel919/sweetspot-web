@@ -573,6 +573,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       relayAuthVersion: 'pairing-v1',
       analysisRevision: CALIBRATION_ANALYSIS_REVISION,
       sweepRevision: CALIBRATION_SWEEP_REVISION,
+      markerChannel: debugCaptures[0]!.sweep.markerChannel,
     }))
   }
 

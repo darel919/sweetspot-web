@@ -67,5 +67,6 @@ process.stdout.write(`${JSON.stringify({
   webBuildSha: bundle.webBuildSha,
   analysisRevision: bundle.analysisRevision,
   sweepRevision: bundle.sweepRevision,
+  markerChannel: bundle.markerChannel,
   results,
 }, null, 2)}\n`)

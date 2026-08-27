@@ -1,9 +1,10 @@
 import { generateCompositeSweepStereoReference } from '../app/lib/audio/sweep-reference.ts'
 
 const sweep = {
-  sweepRevision: 'android-sweep-v2',
+  sweepRevision: 'android-sweep-v3',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
+  markerChannel: 'left',
   sampleRate: 8_000,
   startHz: 20,
   endHz: 3_500,

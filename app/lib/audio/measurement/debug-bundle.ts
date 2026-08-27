@@ -1,5 +1,5 @@
 import { PROTOCOL_VERSION } from '#shared/types/protocol'
-import type { MeasurementContext, MeasurementCaptureMetadata, MeasurementSweep } from '#shared/types/protocol'
+import type { MeasurementContext, MeasurementCaptureMetadata, MeasurementMarkerChannel, MeasurementSweep } from '#shared/types/protocol'
 import type { CaptureSignalDiagnostics } from '../capture/pcm-recorder'
 import type { MicCalibrationProfile } from '../mics/types'
 
@@ -38,6 +38,7 @@ export interface CalibrationDebugBundle {
   relayAuthVersion: 'pairing-v1'
   analysisRevision: string
   sweepRevision: string
+  markerChannel: MeasurementMarkerChannel
   exportedAt: string
   captures: readonly CalibrationDebugCapture[]
 }
@@ -63,6 +64,7 @@ export function createCalibrationDebugBundle(
     relayAuthVersion: 'pairing-v1'
     analysisRevision: string
     sweepRevision: string
+    markerChannel: MeasurementMarkerChannel
   },
 ): CalibrationDebugBundle {
   return {

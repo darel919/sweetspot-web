@@ -15,9 +15,10 @@ import {
 } from './protocol'
 
 const sweep = {
-  sweepRevision: 'android-sweep-v2',
+  sweepRevision: 'android-sweep-v3',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
+  markerChannel: 'left',
   sampleRate: 48_000,
   startHz: 20,
   endHz: 20_000,
@@ -82,6 +83,12 @@ describe('measurement protocol boundary', () => {
     expect(isMeasurementSweep(sweep)).toBe(true)
     expect(isMeasurementSweep({ ...sweep, captureKind: 'marker-only' })).toBe(true)
     expect(validatePayload('measurement.ready', { sessionId: 'cal_test', sweep })).toBeNull()
+  })
+
+  test('rejects invalid marker channels and the previous sweep revision', () => {
+    expect(isMeasurementSweep({ ...sweep, markerChannel: 'both' })).toBe(false)
+    expect(isMeasurementSweep({ ...sweep, markerChannel: '' })).toBe(false)
+    expect(isMeasurementSweep({ ...sweep, sweepRevision: 'android-sweep-v2' })).toBe(false)
   })
 
   test('rejects missing session and malformed sweep payloads', () => {

@@ -10,9 +10,10 @@ import { mapCorrectionToBandsConservative } from '../correction/bandMapper'
 import type { ResponsePoint } from './response'
 
 const sweep: MeasurementSweep = {
-  sweepRevision: 'android-sweep-v2',
+  sweepRevision: 'android-sweep-v3',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
+  markerChannel: 'left',
   sampleRate: 8_000,
   startHz: 20,
   endHz: 3_500,
@@ -34,9 +35,10 @@ const sweep: MeasurementSweep = {
 }
 
 const androidCalibrationSweep: MeasurementSweep = {
-  sweepRevision: 'android-sweep-v2',
+  sweepRevision: 'android-sweep-v3',
   algorithm: 'exponential-sine-v1',
   captureKind: 'position-composite',
+  markerChannel: 'left',
   sampleRate: 48_000,
   startHz: 20,
   endHz: 20_000,

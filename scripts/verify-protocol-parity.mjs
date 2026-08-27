@@ -37,6 +37,9 @@ const checks = [
   ['measurement capture kinds',
     literals(webProtocol, /export type MeasurementCaptureKind = ([\s\S]*?)\n\n/, 'web capture kinds'),
     literals(androidContext, /CAPTURE_KINDS = setOf\(([\s\S]*?)\)/, 'Android capture kinds')],
+  ['measurement marker channels',
+    literals(webProtocol, /export type MeasurementMarkerChannel = ([\s\S]*?)\n\n/, 'web marker channels'),
+    literals(await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/MeasurementSweep.kt'), 'utf8'), /MARKER_CHANNELS = setOf\(([\s\S]*?)\)/, 'Android marker channels')],
 ]
 
 for (const [label, webValues, androidValues] of checks) {
@@ -54,4 +57,11 @@ if (JSON.stringify(webGeometry.sort()) !== JSON.stringify(actualGeometry.sort())
   throw new Error(`position geometry differs. web=${JSON.stringify(webGeometry)} android=${JSON.stringify(actualGeometry)}`)
 }
 
-console.log('Protocol parity verified for errors, positions, geometry, phases, repair channels, and capture kinds.')
+const androidSweep = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/MeasurementSweep.kt'), 'utf8')
+const webSweepRevision = webProtocol.match(/CALIBRATION_SWEEP_REVISION = '([^']+)'/)?.[1]
+const androidSweepRevision = androidSweep.match(/sweepRevision: String = "([^"]+)"/)?.[1]
+if (!webSweepRevision || webSweepRevision !== androidSweepRevision) {
+  throw new Error(`sweep revision differs. web=${webSweepRevision} android=${androidSweepRevision}`)
+}
+
+console.log('Protocol parity verified for errors, positions, geometry, phases, repair channels, capture kinds, marker channels, and sweep revision.')

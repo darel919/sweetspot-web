@@ -65,7 +65,7 @@ export const CALIBRATION_PACKAGE_FORMAT = 'sweetspot.calibration' as const
 export const CALIBRATION_PACKAGE_VERSION = 1 as const
 export const CALIBRATION_PACKAGE_MAX_GAIN_DB = 12
 export const CALIBRATION_ANALYSIS_REVISION = 'response-marker-pair-v4' as const
-export const CALIBRATION_SWEEP_REVISION = 'android-sweep-v2' as const
+export const CALIBRATION_SWEEP_REVISION = 'android-sweep-v3' as const
 
 export interface CalibrationPackage {
   format: typeof CALIBRATION_PACKAGE_FORMAT
@@ -210,6 +210,8 @@ export type MeasurementRepairChannel = 'both' | 'left' | 'right'
 
 export type MeasurementCaptureKind = 'position-composite' | 'marker-only' | 'marker-production-spacing'
 
+export type MeasurementMarkerChannel = 'left' | 'right'
+
 export function isMeasurementCaptureKind(value: unknown): value is MeasurementCaptureKind {
   return value === 'position-composite'
     || value === 'marker-only'
@@ -316,6 +318,7 @@ export interface MeasurementSweep {
   sweepRevision: typeof CALIBRATION_SWEEP_REVISION
   algorithm: 'exponential-sine-v1'
   captureKind: MeasurementCaptureKind
+  markerChannel: MeasurementMarkerChannel
   sampleRate: number
   startHz: number
   endHz: number
@@ -1373,6 +1376,7 @@ export function isMeasurementSweep(value: unknown): value is MeasurementSweep {
   if (value.sweepRevision !== CALIBRATION_SWEEP_REVISION) return false
   if (value.algorithm !== 'exponential-sine-v1') return false
   if (!isMeasurementCaptureKind(value.captureKind)) return false
+  if (value.markerChannel !== 'left' && value.markerChannel !== 'right') return false
   if (!isFiniteNumber(value.sampleRate) || !Number.isInteger(value.sampleRate)) return false
   if (value.sampleRate < 8_000 || value.sampleRate > 192_000) return false
   if (!isFiniteNumber(value.startHz) || value.startHz <= 0) return false
