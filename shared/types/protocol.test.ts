@@ -383,7 +383,7 @@ describe('measurement protocol boundary', () => {
     })).toBe(true)
   })
 
-  test('accepts compact measurement diagnostics without accepting a response curve', () => {
+  test('rejects full candidate diagnostics at the relay boundary', () => {
     expect(validatePayload('measurement.diagnostics', {
       sessionId: 'cal_test',
       context,
@@ -436,7 +436,7 @@ describe('measurement protocol boundary', () => {
           micProfileSourceDate: '2026-08-24',
         },
       },
-    })).toBeNull()
+    })).not.toBeNull()
     expect(validatePayload('measurement.diagnostics', {
       sessionId: 'cal_test',
       context,
@@ -477,6 +477,24 @@ describe('measurement protocol boundary', () => {
       current: 1,
       total: 30,
       diagnostics: { signalRms: 0.05 },
+    })).not.toBeNull()
+  })
+
+  test('requires explicit outcomes and matching completed session ids', () => {
+    expect(validatePayload('calibrationSession.end', {
+      sessionId: 'cal_test',
+      outcome: 'sufficient',
+    })).toBeNull()
+    expect(validatePayload('calibrationSession.end', { sessionId: 'cal_test' })).not.toBeNull()
+    expect(validatePayload('calibrationSession.ended', {
+      sessionId: 'cal_test',
+      outcome: 'bounded',
+      completedSessionId: 'cal_test',
+    })).toBeNull()
+    expect(validatePayload('calibrationSession.ended', {
+      sessionId: 'cal_test',
+      outcome: 'cancelled',
+      completedSessionId: 'old_session',
     })).not.toBeNull()
   })
 

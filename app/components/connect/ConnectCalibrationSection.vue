@@ -229,6 +229,9 @@ function captureFailureLabel(failure: { context: MeasurementContext; diagnostics
         {{ captureFailureMessage(failure.diagnostics) }}
       </li>
     </ul>
+    <p v-if="measurementFailedDiagnostics.length && measurementCompletePositionCount >= 3 && measurementConvergenceOutcome === 'sufficient'" class="note">
+      Rejected captures remain in diagnostics, but incomplete physical positions are excluded from correction. {{ measurementCompletePositionCount }} complete positions remain, so calibration is still usable.
+    </p>
     <div v-if="debugCaptureExportEnabled" class="actions">
       <button :disabled="measurementBusy" @click="emit('export-debug-bundle')">Export raw calibration debug bundle</button>
     </div>

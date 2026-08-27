@@ -225,4 +225,26 @@ describe('append-only physical-position ledger', () => {
       outcome: 'bounded',
     })
   })
+
+  test('excludes an incomplete optional position from aggregates after convergence', () => {
+    let ledger = createPositionLedger('session-6')
+    ledger = append(ledger, context('center', 0), composite())
+    ledger = append(ledger, context('left', 1), composite())
+    ledger = append(ledger, context('right', 2), composite())
+    ledger = append(ledger, context('forward', 3), composite())
+    ledger = append(ledger, context('backward', 4), composite(analysis('direct_arrival_low_confidence'), analysis('ok')))
+
+    const projected = projectPhysicalPositionLedger(ledger)
+    expect(acceptedPositionCount(ledger)).toBe(4)
+    expect(projected.positions.find((position) => position.positionId === 'backward')).toMatchObject({
+      left: { kind: 'rejected' },
+      right: { kind: 'accepted' },
+    })
+    expect(projectAcceptedRecords(ledger)).toHaveLength(8)
+    expect(decideNextCapture(projected, converged)).toEqual({
+      kind: 'finish',
+      outcome: 'sufficient',
+      reason: 'convergence-sufficient',
+    })
+  })
 })

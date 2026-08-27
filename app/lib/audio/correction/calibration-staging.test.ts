@@ -77,4 +77,12 @@ describe('automatic calibration staging guards', () => {
     const historical = { ...eligible, failedAttemptCount: 2 } as AutomaticCorrectionStageInput & { failedAttemptCount: number }
     expect(shouldStageAutomaticCorrection(historical)).toBe(true)
   })
+
+  test('allows an excluded optional position failure when complete evidence converged', () => {
+    expect(shouldStageAutomaticCorrection({
+      ...eligible,
+      acceptedPositionCount: 4,
+      unresolvedFailureCount: 1,
+    })).toBe(true)
+  })
 })

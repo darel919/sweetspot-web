@@ -104,7 +104,15 @@ describe('browser-local impulse analysis', () => {
   test('rejects a direct peak below the measured noise gate', () => {
     const impulse = new Float32Array(8_000)
     impulse[100] = 0.05
-    expect(findDirectArrival(impulse, 8_000, 0.01).rejectionReason).toBe('peak_below_noise')
+    const result = findDirectArrival(impulse, 8_000, 0.01)
+    expect(result.rejectionReason).toBe('peak_below_noise')
+    expect(result.candidateAbsoluteTimeMs).toBeCloseTo(12.5, 6)
+    expect(result.earlySearchWindowStartSample).toBe(0)
+    expect(result.earlySearchWindowEndSample).toBe(640)
+    expect(result.topEarlyImpulsePeaks[0]?.sample).toBe(100)
+    expect(result.topEarlyImpulsePeaks[0]?.amplitude).toBeCloseTo(0.05, 6)
+    expect(result.localSupportWindowMax).toBe(0)
+    expect(result.localSupportSampleCount).toBe(2)
   })
 
   test('rejects an isolated candidate without local support', () => {

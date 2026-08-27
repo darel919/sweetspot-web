@@ -146,6 +146,15 @@ export interface MeasurementAnalysisDiagnostics {
   directSupportSampleCount?: number | null
   bestLaterReflectionSample?: number | null
   bestLaterReflectionPeak?: number | null
+  candidateAbsoluteTimeMs?: number | null
+  earlySearchWindowStartSample?: number | null
+  earlySearchWindowEndSample?: number | null
+  topEarlyImpulsePeaks?: Array<{ sample: number; amplitude: number; peakToNoiseDb: number | null }>
+  strongestLaterReflectionDelayMs?: number | null
+  localSupportWindowStartSample?: number | null
+  localSupportWindowEndSample?: number | null
+  localSupportWindowMax?: number | null
+  localSupportSampleCount?: number | null
   failureReason: MeasurementAnalysisFailure | null
 }
 
@@ -988,6 +997,15 @@ function analyzeMeasurementWindow(
     directSupportSampleCount: directArrival.supportSampleCount,
     bestLaterReflectionSample: directArrival.laterReflectionIndex,
     bestLaterReflectionPeak: directArrival.laterReflectionPeak,
+    candidateAbsoluteTimeMs: directArrival.candidateAbsoluteTimeMs,
+    earlySearchWindowStartSample: directArrival.earlySearchWindowStartSample,
+    earlySearchWindowEndSample: directArrival.earlySearchWindowEndSample,
+    topEarlyImpulsePeaks: directArrival.topEarlyImpulsePeaks,
+    strongestLaterReflectionDelayMs: directArrival.strongestLaterReflectionDelayMs,
+    localSupportWindowStartSample: directArrival.localSupportWindowStartSample,
+    localSupportWindowEndSample: directArrival.localSupportWindowEndSample,
+    localSupportWindowMax: directArrival.localSupportWindowMax,
+    localSupportSampleCount: directArrival.localSupportSampleCount,
   }
   if (directArrival.acceptedArrivalIndex === null) {
     return emptyAnalysis(

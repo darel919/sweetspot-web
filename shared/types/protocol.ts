@@ -125,6 +125,7 @@ export const CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB = 0.5
 
 export type CalibrationTransaction =
   | { state: 'none' }
+  | { state: 'restoring'; sessionId: string }
   | {
       state: 'candidate_pending'
       candidateId: string
@@ -287,7 +288,16 @@ export interface CalibrationSessionBeginPayload extends CalibrationSessionPayloa
   candidateId?: string
 }
 
-export interface CalibrationSessionEndPayload extends CalibrationSessionPayload {}
+export type CalibrationSessionOutcome = 'sufficient' | 'bounded' | 'insufficient' | 'cancelled' | 'error'
+
+export interface CalibrationSessionEndPayload extends CalibrationSessionPayload {
+  outcome: CalibrationSessionOutcome
+}
+
+export interface CalibrationSessionEndedPayload extends CalibrationSessionPayload {
+  outcome: CalibrationSessionOutcome
+  completedSessionId: string
+}
 
 export interface CalibrationSessionAbortPayload extends CalibrationSessionPayload {
   code: CalibrationErrorCode
@@ -450,6 +460,15 @@ export interface MeasurementDiagnosticsValues {
   directSupportSampleCount?: number | null
   bestLaterReflectionSample?: number | null
   bestLaterReflectionPeak?: number | null
+  candidateAbsoluteTimeMs?: number | null
+  earlySearchWindowStartSample?: number | null
+  earlySearchWindowEndSample?: number | null
+  topEarlyImpulsePeaks?: Array<{ sample: number; amplitude: number; peakToNoiseDb: number | null }>
+  strongestLaterReflectionDelayMs?: number | null
+  localSupportWindowStartSample?: number | null
+  localSupportWindowEndSample?: number | null
+  localSupportWindowMax?: number | null
+  localSupportSampleCount?: number | null
   directToLateDb: number | null
   c50Db: number | null
   c80Db: number | null
@@ -459,6 +478,26 @@ export interface MeasurementDiagnosticsValues {
   earlyReflections: number
   decayConfidence: 'high' | 'medium' | 'low'
   captureMetadata?: MeasurementCaptureMetadata
+}
+
+export interface CompactMeasurementCaptureMetadata {
+  sampleRate: number | null
+  channelCount: number | null
+  echoCancellation: boolean | null
+  noiseSuppression: boolean | null
+  autoGainControl: boolean | null
+  trackSampleRate?: number | null
+  trackChannelCount?: number | null
+}
+
+export type CompactMeasurementDiagnosticsValues = Omit<MeasurementDiagnosticsValues,
+  | 'leadingMarkerCandidates'
+  | 'trailingMarkerCandidates'
+  | 'markerPairCandidates'
+  | 'topEarlyImpulsePeaks'
+  | 'captureMetadata'
+> & {
+  captureMetadata?: CompactMeasurementCaptureMetadata
 }
 
 export interface MeasurementCaptureMetadata {
@@ -484,7 +523,7 @@ export interface MeasurementDiagnosticsPayload extends CalibrationSessionPayload
   context: MeasurementContext
   current: number
   total: number
-  diagnostics: MeasurementDiagnosticsValues
+  diagnostics: CompactMeasurementDiagnosticsValues
 }
 
 export interface MeasurementResponseChannel {
@@ -573,6 +612,7 @@ export interface StateGetPayload {}
 function isCalibrationTransaction(value: unknown): value is CalibrationTransaction {
   if (!isRecord(value)) return false
   if (value.state === 'none') return true
+  if (value.state === 'restoring') return isSessionId(value.sessionId)
   return value.state === 'candidate_pending'
     && isCandidateId(value.candidateId)
     && (value.validationStatus === 'pending'
@@ -993,43 +1033,6 @@ function isProgressPayload(value: unknown): value is Record<string, unknown> & C
     && hasOptionalMessage(value)
 }
 
-function isFiniteRange(value: unknown): value is { min: number; max: number } {
-  return isRecord(value)
-    && isFiniteNumber(value.min)
-    && isFiniteNumber(value.max)
-    && value.min >= 0
-    && value.max >= value.min
-}
-
-function isBooleanArray(value: unknown): value is boolean[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === 'boolean')
-}
-
-function isMeasurementCaptureMetadata(value: unknown): value is MeasurementCaptureMetadata {
-  if (!isRecord(value)) return false
-  return isNullableFiniteNumber(value.sampleRate)
-    && (value.sampleRate === null || value.sampleRate > 0)
-    && isNullableFiniteNumber(value.channelCount)
-    && (value.channelCount === null || value.channelCount >= 1)
-    && (value.sampleRateRange === null || isFiniteRange(value.sampleRateRange))
-    && (value.channelCountRange === null || isFiniteRange(value.channelCountRange))
-    && (value.echoCancellation === null || typeof value.echoCancellation === 'boolean')
-    && (value.noiseSuppression === null || typeof value.noiseSuppression === 'boolean')
-    && (value.autoGainControl === null || typeof value.autoGainControl === 'boolean')
-    && isBooleanArray(value.echoCancellationCapabilities)
-    && isBooleanArray(value.noiseSuppressionCapabilities)
-    && isBooleanArray(value.autoGainControlCapabilities)
-    && (value.browserUserAgent === undefined || (typeof value.browserUserAgent === 'string' && value.browserUserAgent.length <= 1_024))
-    && (value.micProfileId === undefined || (typeof value.micProfileId === 'string' && value.micProfileId.length <= 128))
-    && (value.micProfileSourceDate === undefined || (typeof value.micProfileSourceDate === 'string' && value.micProfileSourceDate.length <= 64))
-    && (value.micProfileCapturePathStatus === undefined
-      || value.micProfileCapturePathStatus === 'validated'
-      || value.micProfileCapturePathStatus === 'provisional'
-      || value.micProfileCapturePathStatus === 'unvalidated')
-    && (value.trackSampleRate === undefined || isNullableFiniteNumber(value.trackSampleRate))
-    && (value.trackChannelCount === undefined || isNullableFiniteNumber(value.trackChannelCount))
-}
-
 function isMeasurementMarkerCandidate(value: unknown): value is MeasurementMarkerCandidate {
   return isRecord(value)
     && isFiniteNumber(value.sample)
@@ -1037,6 +1040,19 @@ function isMeasurementMarkerCandidate(value: unknown): value is MeasurementMarke
     && isFiniteNumber(value.correlation)
     && value.correlation >= 0
     && value.correlation <= 1
+}
+
+function isCompactMeasurementCaptureMetadata(value: unknown): value is CompactMeasurementCaptureMetadata {
+  return isRecord(value)
+    && !['sampleRateRange', 'channelCountRange', 'echoCancellationCapabilities', 'noiseSuppressionCapabilities', 'autoGainControlCapabilities', 'browserUserAgent', 'micProfileId', 'micProfileSourceDate', 'micProfileCapturePathStatus']
+      .some((field) => field in value)
+    && isNullableFiniteNumber(value.sampleRate)
+    && isNullableFiniteNumber(value.channelCount)
+    && (value.echoCancellation === null || typeof value.echoCancellation === 'boolean')
+    && (value.noiseSuppression === null || typeof value.noiseSuppression === 'boolean')
+    && (value.autoGainControl === null || typeof value.autoGainControl === 'boolean')
+    && (value.trackSampleRate === undefined || isNullableFiniteNumber(value.trackSampleRate))
+    && (value.trackChannelCount === undefined || isNullableFiniteNumber(value.trackChannelCount))
 }
 
 function isMeasurementMarkerPairCandidate(value: unknown): value is MeasurementMarkerPairCandidate {
@@ -1081,6 +1097,10 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
   if (!isInteger(total) || total < 1 || total > 256 || current > total) return false
   if (!isRecord(value.diagnostics)) return false
   const diagnostics = value.diagnostics
+  if ('leadingMarkerCandidates' in diagnostics
+    || 'trailingMarkerCandidates' in diagnostics
+    || 'markerPairCandidates' in diagnostics
+    || 'topEarlyImpulsePeaks' in diagnostics) return false
   return (diagnostics.analysisStatus === undefined
       || diagnostics.analysisStatus === 'ok'
       || diagnostics.analysisStatus === 'not_measured'
@@ -1173,7 +1193,6 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
       || diagnostics.syncMarkerFailureReason === 'end_marker_missing'
       || diagnostics.syncMarkerFailureReason === 'clock_drift_unreliable')
     && (!('markerSeparationPpm' in diagnostics) || isNullableFiniteNumber(diagnostics.markerSeparationPpm))
-    && (diagnostics.captureMetadata === undefined || isMeasurementCaptureMetadata(diagnostics.captureMetadata))
     && isFiniteNumber(diagnostics.syncMarkerConfidence)
     && diagnostics.syncMarkerConfidence >= 0
     && diagnostics.syncMarkerConfidence <= 1
@@ -1199,6 +1218,16 @@ function isMeasurementDiagnosticsPayload(value: unknown): value is Record<string
     && (!('directSupportSampleCount' in diagnostics) || (isInteger(diagnostics.directSupportSampleCount) && diagnostics.directSupportSampleCount >= 0))
     && (!('bestLaterReflectionSample' in diagnostics) || isNullableFiniteNumber(diagnostics.bestLaterReflectionSample))
     && (!('bestLaterReflectionPeak' in diagnostics) || isNullableFiniteNumber(diagnostics.bestLaterReflectionPeak))
+    && (!('candidateAbsoluteTimeMs' in diagnostics) || isNullableFiniteNumber(diagnostics.candidateAbsoluteTimeMs))
+    && (!('earlySearchWindowStartSample' in diagnostics) || isNullableFiniteNumber(diagnostics.earlySearchWindowStartSample))
+    && (!('earlySearchWindowEndSample' in diagnostics) || isNullableFiniteNumber(diagnostics.earlySearchWindowEndSample))
+    && (!('strongestLaterReflectionDelayMs' in diagnostics) || isNullableFiniteNumber(diagnostics.strongestLaterReflectionDelayMs))
+    && (!('localSupportWindowStartSample' in diagnostics) || isNullableFiniteNumber(diagnostics.localSupportWindowStartSample))
+    && (!('localSupportWindowEndSample' in diagnostics) || isNullableFiniteNumber(diagnostics.localSupportWindowEndSample))
+    && (!('localSupportWindowMax' in diagnostics) || isNullableFiniteNumber(diagnostics.localSupportWindowMax))
+    && (!('localSupportSampleCount' in diagnostics) || (isNullableFiniteNumber(diagnostics.localSupportSampleCount)
+      && (diagnostics.localSupportSampleCount === null || Number.isInteger(diagnostics.localSupportSampleCount))))
+    && (!('captureMetadata' in diagnostics) || isCompactMeasurementCaptureMetadata(diagnostics.captureMetadata))
     && isNullableFiniteNumber(diagnostics.directToLateDb)
     && isNullableFiniteNumber(diagnostics.c50Db)
     && isNullableFiniteNumber(diagnostics.c80Db)
@@ -1501,6 +1530,25 @@ function isSessionWithOptionalContext(value: unknown): value is Record<string, u
     && (value.context === undefined || isMeasurementContext(value.context))
 }
 
+function isCalibrationSessionOutcome(value: unknown): value is CalibrationSessionOutcome {
+  return value === 'sufficient'
+    || value === 'bounded'
+    || value === 'insufficient'
+    || value === 'cancelled'
+    || value === 'error'
+}
+
+function isCalibrationSessionEndPayload(value: unknown): value is Record<string, unknown> & CalibrationSessionEndPayload {
+  return isSessionPayload(value) && isCalibrationSessionOutcome(value.outcome)
+}
+
+export function isCalibrationSessionEndedPayload(value: unknown): value is Record<string, unknown> & CalibrationSessionEndedPayload {
+  return isSessionPayload(value)
+    && isCalibrationSessionOutcome(value.outcome)
+    && isSessionId(value.completedSessionId)
+    && value.completedSessionId === value.sessionId
+}
+
 function isMeasurementPreparePayload(value: unknown): boolean {
   return isSessionWithChannel(value)
     && (value.context === undefined || isMeasurementContext(value.context))
@@ -1578,10 +1626,12 @@ export function validatePayload(type: string, payload: unknown): string | null {
     case 'calibrationSession.progress':
       return isProgressPayload(payload) ? null : `${type} requires a valid calibration progress payload`
     case 'calibrationSession.end':
+      return isCalibrationSessionEndPayload(payload) ? null : `${type} requires sessionId and a final outcome`
     case 'measurement.abort':
     case 'calibrationSession.started':
-    case 'calibrationSession.ended':
       return isSessionPayload(payload) ? null : `${type} requires sessionId`
+    case 'calibrationSession.ended':
+      return isCalibrationSessionEndedPayload(payload) ? null : `${type} requires sessionId and a final outcome`
     case 'calibrationSession.position.continued':
       return isCalibrationSessionPositionContinuedPayload(payload)
         ? null

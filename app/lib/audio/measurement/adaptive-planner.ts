@@ -165,6 +165,12 @@ export function decideNextCapture(
 
   for (const position of ledger.positions) {
     if (position.positionId === 'center' || isPositionAccepted(position)) continue
+    const isRequiredPosition = policy.positions
+      .slice(0, policy.minimumPositions)
+      .some((spec) => spec.id === position.positionId)
+    if (!isRequiredPosition
+      && acceptedPositionCount(ledger.positions) >= policy.minimumPositions
+      && convergence?.sufficient === true) continue
     const repair = retryablePosition(position, policy)
     if (repair) return repair
   }

@@ -2,6 +2,7 @@ import { computed, onScopeDispose, readonly, ref, shallowRef } from 'vue'
 import type {
   CalibrationProgressStage,
   CalibrationErrorCode,
+  CalibrationSessionOutcome,
   CalibrationPositionId,
   Envelope,
   MeasurementContext,
@@ -15,6 +16,7 @@ import {
   CALIBRATION_ERROR_CODES,
   PROTOCOL_VERSION,
   isCalibrationSessionPositionContinuedPayload,
+  isCalibrationSessionEndedPayload,
   isMarkerDiagnosticCaptureKind,
   isMeasurementContext,
   isMeasurementReadyPayload,
@@ -83,6 +85,7 @@ import {
   downloadCalibrationDebugBundle,
   type CalibrationDebugCapture,
 } from '../lib/audio/measurement/debug-bundle'
+import { compactMeasurementDiagnostics } from '../lib/audio/measurement/compact-diagnostics'
 import {
   createCalibrationAbortCommand,
   evaluateCalibrationAbortRecovery,
@@ -292,11 +295,15 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }).length ?? 0
 
   const completeAcceptedMeasurementPositionCount = computed(() => positionLedger ? acceptedPositionCount(positionLedger) : 0)
-  const measurementQualityPassed = computed(() =>
-    allCaptureQualityPassed(aggregateLeft.value)
-    && allCaptureQualityPassed(aggregateRight.value)
-    && completeAcceptedMeasurementPositionCount.value >= 3
-    && failedTakeDiagnostics.value.length === 0)
+  const measurementQualityPassed = computed(() => {
+    const physical = positionLedger ? projectPhysicalPositionLedger(positionLedger) : null
+    const center = physical?.positions.find((position) => position.positionId === 'center')
+    return allCaptureQualityPassed(aggregateLeft.value)
+      && allCaptureQualityPassed(aggregateRight.value)
+      && center?.left.kind === 'accepted'
+      && center.right.kind === 'accepted'
+      && completeAcceptedMeasurementPositionCount.value >= 3
+  })
   const spatialConsistencySummaries = computed<RepeatabilitySummary[]>(() => [
     ...(aggregateLeft.value?.spatialConsistency ?? []),
     ...(aggregateRight.value?.spatialConsistency ?? []),
@@ -778,6 +785,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         code,
         message: boundedAbortMessage(text),
       })
+      connection.send('state.get')
     }
     if (code === 'calibration_aborted' && !ownsValidationAbort) connection.send('state.get')
     await closeCapture()
@@ -983,7 +991,10 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         ? `Some measurements need attention: ${spatialConsistencyFailureMessage(failures)}`
         : 'Follow the instructions on the TV.'
     sendProgress('ending', message.value)
-    connection.send('calibrationSession.end', { sessionId: currentSessionId })
+    connection.send('calibrationSession.end', {
+      sessionId: currentSessionId,
+      outcome: sessionMode === 'measurement' ? convergenceOutcome.value ?? 'insufficient' : 'sufficient',
+    })
   }
 
   async function loadAndOpenCapture() {
@@ -1380,6 +1391,15 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         directSupportSampleCount: child.diagnostics.directSupportSampleCount ?? child.impulse?.directArrival.supportSampleCount ?? null,
         bestLaterReflectionSample: child.diagnostics.bestLaterReflectionSample ?? child.impulse?.directArrival.laterReflectionIndex ?? null,
         bestLaterReflectionPeak: child.diagnostics.bestLaterReflectionPeak ?? child.impulse?.directArrival.laterReflectionPeak ?? null,
+        candidateAbsoluteTimeMs: child.diagnostics.candidateAbsoluteTimeMs ?? child.impulse?.directArrival.candidateAbsoluteTimeMs ?? null,
+        earlySearchWindowStartSample: child.diagnostics.earlySearchWindowStartSample ?? child.impulse?.directArrival.earlySearchWindowStartSample ?? null,
+        earlySearchWindowEndSample: child.diagnostics.earlySearchWindowEndSample ?? child.impulse?.directArrival.earlySearchWindowEndSample ?? null,
+        topEarlyImpulsePeaks: child.diagnostics.topEarlyImpulsePeaks ?? child.impulse?.directArrival.topEarlyImpulsePeaks,
+        strongestLaterReflectionDelayMs: child.diagnostics.strongestLaterReflectionDelayMs ?? child.impulse?.directArrival.strongestLaterReflectionDelayMs ?? null,
+        localSupportWindowStartSample: child.diagnostics.localSupportWindowStartSample ?? child.impulse?.directArrival.localSupportWindowStartSample ?? null,
+        localSupportWindowEndSample: child.diagnostics.localSupportWindowEndSample ?? child.impulse?.directArrival.localSupportWindowEndSample ?? null,
+        localSupportWindowMax: child.diagnostics.localSupportWindowMax ?? child.impulse?.directArrival.localSupportWindowMax ?? null,
+        localSupportSampleCount: child.diagnostics.localSupportSampleCount ?? child.impulse?.directArrival.localSupportSampleCount ?? null,
         directToLateDb: child.room?.directToLateDb ?? null,
         c50Db: child.room?.c50Db ?? null,
         c80Db: child.room?.c80Db ?? null,
@@ -1405,6 +1425,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       }
       const leftDiagnostics = suppressRepairChannelDiagnostics(diagnosticsFor(result.left, 'left'), 'left')
       const rightDiagnostics = suppressRepairChannelDiagnostics(diagnosticsFor(result.right, 'right'), 'right')
+      const compactLeftDiagnostics = compactMeasurementDiagnostics(leftDiagnostics)
+      const compactRightDiagnostics = compactMeasurementDiagnostics(rightDiagnostics)
       takeDiagnostics.value = [...takeDiagnostics.value, {
         context: currentContext,
         capture: recording.diagnostics,
@@ -1420,14 +1442,14 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         context: currentContext,
         current: progress.value.current,
         total: currentPositionCount,
-        diagnostics: leftDiagnostics,
+        diagnostics: compactLeftDiagnostics,
       })
       connection.send('measurement.diagnostics', {
         sessionId: operationSessionId,
         context: currentContext,
         current: progress.value.current,
         total: currentPositionCount,
-        diagnostics: rightDiagnostics,
+        diagnostics: compactRightDiagnostics,
       })
 
       const acceptedRecords = (child: MeasurementAnalysis, channel: 'left' | 'right'): MeasurementRecord[] =>
@@ -1648,6 +1670,42 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     void startTake(preparedContext)
   }
 
+  function finalOutcomeMessage(
+    outcome: CalibrationSessionOutcome,
+    mode: 'measurement' | 'validation' | 'probe',
+    hadAnalysis: boolean,
+    endedProbePlanKind: ProbePlanKind | null,
+    failedMarkerProbePositions: readonly CalibrationPositionId[],
+  ): string {
+    if (outcome === 'cancelled') return 'Calibration cancelled.'
+    if (outcome === 'error') return 'Calibration ended with an error. Review the diagnostics before retrying.'
+    if (mode === 'measurement' && outcome === 'sufficient'
+      && measurementQualityPassed.value && convergenceOutcome.value === 'sufficient') {
+      return 'Advanced measurement complete. Review the response and room metrics below.'
+    }
+    if (outcome === 'bounded') {
+      return 'Measurement finished, but convergence was not reached. The result is inconclusive and no correction was staged.'
+    }
+    if (outcome === 'insufficient') {
+      return 'Measurement finished without enough usable evidence. No correction was generated.'
+    }
+    if (mode === 'validation') return 'Validation complete. Compare the measured result with the original response.'
+    if (mode === 'probe' && isMarkerProbePlan(endedProbePlanKind)) {
+      return failedMarkerProbePositions.length > 0
+        ? `Diagnostic marker probe complete with ${failedMarkerProbePositions.length} failed physical position${failedMarkerProbePositions.length === 1 ? '' : 's'}: ${failedMarkerProbePositions.map((position) => `${position} position`).join(', ')}.`
+        : 'Diagnostic marker probe complete. Review the marker timing diagnostics before changing the curve.'
+    }
+    if (mode === 'probe') {
+      return probeCaptureQualityPassed.value
+        ? 'Diagnostic probe complete. Export the captured response before changing the curve.'
+        : `Diagnostic probe capture quality is inconclusive at ${spatialConsistencyFailureMessage(probeFailedRepeatabilityGroups.value)}.`
+    }
+    if (hadAnalysis && failedMeasurementAttemptCount.value > 0) {
+      return `Calibration needs review. ${failedMeasurementAttemptCount.value} capture attempt${failedMeasurementAttemptCount.value === 1 ? '' : 's'} failed before a retry.`
+    }
+    return 'Calibration failed. Accepted position evidence was incomplete.'
+  }
+
   function finishCancelled(text = 'Calibration cancelled.', sendAbort = false) {
     const currentSessionId = sessionId
     if (!currentSessionId) {
@@ -1733,10 +1791,10 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       void fail(code, text)
       return
     }
-    if (env.type === 'calibrationSession.ended' && sessionId && typeof env.payload === 'object' && env.payload !== null &&
-      'sessionId' in env.payload && env.payload.sessionId === sessionId) {
+    if (env.type === 'calibrationSession.ended' && sessionId && isCalibrationSessionEndedPayload(env.payload) && env.payload.sessionId === sessionId) {
       const endedSessionId = sessionId
       const endedMode = sessionMode
+      const endedOutcome = env.payload.outcome
       const endedProbePlanKind = probePlanKind
       const endedAbort = abortRecovery.value
       const hadMarkerProbeAnalysis = endedMode === 'probe'
@@ -1776,29 +1834,19 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
           && measurementQualityPassed.value
           && convergenceOutcome.value === 'sufficient') clearPersistedCheckpoint()
       }
-      stage.value = hadAnalysis ? 'complete' : 'idle'
-      message.value = hadAnalysis
-        ? endedMode === 'validation'
-          ? 'Validation complete. Compare the measured result with the original response.'
-          : endedMode === 'probe'
-            ? isMarkerProbePlan(endedProbePlanKind)
-              ? failedMarkerProbePositions.length > 0
-                ? `Diagnostic marker probe complete with ${failedMarkerProbePositions.length} failed physical position${failedMarkerProbePositions.length === 1 ? '' : 's'}: ${failedMarkerProbePositions.map((position) => `${position} position`).join(', ')}.`
-                : 'Diagnostic marker probe complete. Review the marker timing diagnostics before changing the curve.'
-              : probeCaptureQualityPassed.value
-                ? 'Diagnostic probe complete. Export the captured response before changing the curve.'
-                : `Diagnostic probe capture quality is inconclusive at ${spatialConsistencyFailureMessage(probeFailedRepeatabilityGroups.value)}.`
-            : measurementQualityPassed.value
-              && convergenceOutcome.value === 'sufficient'
-              ? 'Advanced measurement complete. Review the response and room metrics below.'
-              : convergenceOutcome.value === 'bounded'
-                ? 'Measurement finished, but convergence was not reached. The result is inconclusive and no correction was staged.'
-                : convergenceOutcome.value === 'insufficient'
-                  ? 'Measurement finished without enough usable evidence. No correction was generated.'
-              : failedMeasurementAttemptCount.value > 0
-                ? `Calibration needs review. ${failedMeasurementAttemptCount.value} capture attempt${failedMeasurementAttemptCount.value === 1 ? '' : 's'} failed before a retry.`
-                : `Calibration failed. Accepted position evidence was incomplete at ${spatialConsistencyFailureMessage(failedRepeatabilityGroups.value)}.`
-        : 'Calibration cancelled.'
+      stage.value = (() => {
+        if (endedOutcome === 'cancelled') return 'idle'
+        if (endedOutcome === 'error') return 'error'
+        if (hadAnalysis || endedOutcome === 'sufficient' || endedOutcome === 'bounded') return 'complete'
+        return 'error'
+      })()
+      message.value = finalOutcomeMessage(
+        endedOutcome,
+        endedMode,
+        hadAnalysis,
+        endedProbePlanKind,
+        failedMarkerProbePositions,
+      )
     }
   }
 

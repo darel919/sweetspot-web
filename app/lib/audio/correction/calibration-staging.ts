@@ -43,7 +43,6 @@ export function shouldStageAutomaticCorrection(input: AutomaticCorrectionStageIn
     && isValidCorrection(input.correction)
     && input.supportsCalibratedCorrection
     && input.capturePathEligible
-    && input.unresolvedFailureCount === 0
     && input.acceptedPositionCount >= 3
     && input.deviceOnline
     && !input.candidatePending

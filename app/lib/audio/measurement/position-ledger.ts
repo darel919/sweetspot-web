@@ -255,8 +255,11 @@ export function projectAcceptedRecords(
   ledger: PositionLedger,
   phase: MeasurementContext['phase'] = 'measurement',
 ): MeasurementRecord[] {
+  const completePositionIds = new Set(projectPhysicalPositionLedger(ledger).positions
+    .filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted')
+    .map((position) => position.positionId))
   return ledger.captures
-    .filter((capture) => capture.context.phase === phase)
+    .filter((capture) => capture.context.phase === phase && completePositionIds.has(capture.context.positionId))
     .flatMap((capture) => (['left', 'right'] as const).flatMap((channel) => {
       const outcome = capture[channel]
       return outcome.kind === 'accepted'

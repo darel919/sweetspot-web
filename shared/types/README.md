@@ -61,6 +61,10 @@ TV applies and verifies the curve, then stores it as a candidate with
 `validationStatus: "imported"`. The client must accept or roll back that
 candidate. Imported data is not presented as an acoustic validation result.
 
+The `calibrationSession.end` and `.ended` payloads carry an explicit final
+outcome. The ended payload also includes `completedSessionId`, which must match
+`sessionId` so the result remains tied to its originating session.
+
 Diagnostics (dev builds only): `diagnostics.deviceInfo`, `diagnostics.probe`,
 `diagnostics.effects`, `probe.run`, `probe.status`,
 `probe.persistent.start`, `probe.persistent.release`, and
@@ -72,6 +76,9 @@ diagnostic curve or `bandsDb` with optional paired `leftBandsDb` and
 repeated left/right physical positions; exported captures remain diagnostic
 evidence until the real-device transfer and routing gates are explicitly
 reviewed.
+
+`measurement.diagnostics` carries compact scalar diagnostics only. Candidate,
+pair, and early-impulse arrays remain in the browser-local debug bundle.
 
 ## State snapshot
 

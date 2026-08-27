@@ -321,7 +321,7 @@ describe('useCalibrationSession integration state machine', () => {
       await harness.waitFor(() => harness.connection.last('measurement.prepare') !== undefined)
       for (let index = 0; index < 5; index++) await harness.completeTake()
       await harness.waitFor(() => harness.connection.last('calibrationSession.end') !== undefined)
-      harness.connection.emit('calibrationSession.ended', { sessionId })
+      harness.connection.emit('calibrationSession.ended', { sessionId, outcome: 'sufficient', completedSessionId: sessionId })
       await harness.waitFor(() => harness.session.stage.value === 'complete')
 
       expect(harness.session.records.value).toHaveLength(0)
@@ -352,7 +352,7 @@ describe('useCalibrationSession integration state machine', () => {
       }
       await harness.completeTake()
       await harness.waitFor(() => harness.connection.last('calibrationSession.end') !== undefined)
-      harness.connection.emit('calibrationSession.ended', { sessionId })
+      harness.connection.emit('calibrationSession.ended', { sessionId, outcome: 'sufficient', completedSessionId: sessionId })
       await harness.waitFor(() => harness.session.stage.value === 'complete')
 
       expect(harness.session.records.value).toHaveLength(0)
@@ -383,7 +383,7 @@ describe('useCalibrationSession integration state machine', () => {
         await harness.completeTake()
       }
       await harness.waitFor(() => harness.connection.last('calibrationSession.end') !== undefined)
-      harness.connection.emit('calibrationSession.ended', { sessionId })
+      harness.connection.emit('calibrationSession.ended', { sessionId, outcome: 'sufficient', completedSessionId: sessionId })
       await harness.waitFor(() => harness.session.stage.value === 'complete')
 
       expect(harness.session.takeDiagnostics.value).toHaveLength(6)
@@ -425,6 +425,7 @@ describe('useCalibrationSession integration state machine', () => {
       harness.connection.emit('measurement.error', { sessionId, code: 'sweep_playback_failed', message: 'transport failed' })
       await harness.waitFor(() => harness.session.stage.value === 'error')
       expect(harness.session.message.value).toBe('transport failed')
+      expect(harness.connection.last('state.get')).toBeDefined()
     } finally {
       harness.dispose()
     }
@@ -474,6 +475,30 @@ describe('useCalibrationSession integration state machine', () => {
       await harness.completeTake()
       expect(harness.session.failedTakeDiagnostics.value.length).toBeGreaterThan(0)
       await harness.completeTake()
+      expect(harness.session.failedTakeDiagnostics.value).toHaveLength(0)
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  test('clears prior-session diagnostics before a fresh session can be aborted', async () => {
+    const harness = new CalibrationHarness(48_000, ['ok', 'direct_arrival_low_confidence'])
+    try {
+      await harness.start()
+      await harness.completeLoudness()
+      await harness.completeTake()
+      expect(harness.session.failedTakeDiagnostics.value).toHaveLength(1)
+
+      harness.session.cancel()
+      await harness.waitFor(() => harness.session.stage.value === 'idle')
+
+      await harness.start()
+      expect(harness.session.progress.value).toEqual({ current: 0, total: 3 })
+      expect(harness.session.failedTakeDiagnostics.value).toHaveLength(0)
+      expect(harness.session.takeDiagnostics.value).toHaveLength(0)
+
+      harness.session.cancel()
+      await harness.waitFor(() => harness.session.stage.value === 'idle')
       expect(harness.session.failedTakeDiagnostics.value).toHaveLength(0)
     } finally {
       harness.dispose()

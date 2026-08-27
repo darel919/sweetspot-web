@@ -47,6 +47,15 @@ export interface DirectArrivalDiagnostics {
   supportSampleCount: number | null
   laterReflectionIndex: number | null
   laterReflectionPeak: number | null
+  candidateAbsoluteTimeMs: number | null
+  earlySearchWindowStartSample: number
+  earlySearchWindowEndSample: number
+  topEarlyImpulsePeaks: Array<{ sample: number; amplitude: number; peakToNoiseDb: number | null }>
+  strongestLaterReflectionDelayMs: number | null
+  localSupportWindowStartSample: number | null
+  localSupportWindowEndSample: number | null
+  localSupportWindowMax: number | null
+  localSupportSampleCount: number | null
 }
 
 export interface ImpulseResponsePoint {
@@ -225,6 +234,29 @@ function strongestLaterReflection(samples: Float32Array, start: number): {
     }
   }
   return { index, peak }
+}
+
+function topEarlyImpulsePeaks(
+  samples: Float32Array,
+  start: number,
+  end: number,
+  noiseRms: number,
+): Array<{ sample: number; amplitude: number; peakToNoiseDb: number | null }> {
+  const peaks: Array<{ sample: number; amplitude: number; peakToNoiseDb: number | null }> = []
+  for (let index = Math.max(0, start); index < Math.min(samples.length, end); index++) {
+    const amplitude = Math.abs(samples[index] ?? 0)
+    const left = index > start ? Math.abs(samples[index - 1] ?? 0) : amplitude
+    const right = index + 1 < end ? Math.abs(samples[index + 1] ?? 0) : amplitude
+    if (amplitude === 0 || amplitude < left || amplitude < right) continue
+    peaks.push({
+      sample: index,
+      amplitude,
+      peakToNoiseDb: dbRatio(amplitude ** 2, noiseRms ** 2),
+    })
+  }
+  return peaks
+    .sort((left, right) => right.amplitude - left.amplitude || left.sample - right.sample)
+    .slice(0, 16)
 }
 
 function referenceCacheKey(
@@ -422,7 +454,7 @@ function getReferenceFft(
   return cachedReferenceFft
 }
 
-export function findDirectArrival(samples: Float32Array, sampleRate: number, externalNoiseRms: number | null = null): {
+interface DirectArrivalSearchResult {
   index: number | null
   peakIndex: number | null
   noiseRms: number
@@ -435,7 +467,18 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
   supportSampleCount?: number
   laterReflectionIndex?: number | null
   laterReflectionPeak?: number | null
-} {
+  candidateAbsoluteTimeMs: number | null
+  earlySearchWindowStartSample: number
+  earlySearchWindowEndSample: number
+  topEarlyImpulsePeaks: Array<{ sample: number; amplitude: number; peakToNoiseDb: number | null }>
+  strongestLaterReflectionDelayMs: number | null
+  localSupportWindowStartSample: number | null
+  localSupportWindowEndSample: number | null
+  localSupportWindowMax: number | null
+  localSupportSampleCount: number | null
+}
+
+export function findDirectArrival(samples: Float32Array, sampleRate: number, externalNoiseRms: number | null = null): DirectArrivalSearchResult {
   // The causal impulse starts at the trimmed active-sweep boundary. A short
   // tail must not become the noise estimate for the direct path at index zero.
   const noiseStart = samples.length > 8
@@ -458,6 +501,9 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
     }
   }
   const searchEnd = Math.min(samples.length, Math.max(1, Math.round(sampleRate * DIRECT_SEARCH_WINDOW_MS / 1000)))
+  const earlySearchWindowStartSample = 0
+  const earlySearchWindowEndSample = searchEnd
+  const earlyPeaks = topEarlyImpulsePeaks(samples, earlySearchWindowStartSample, earlySearchWindowEndSample, noiseFloorRms)
   let directPeak = 0
   let directPeakIndex = -1
   for (let index = 0; index < searchEnd; index++) {
@@ -477,9 +523,32 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
       directPeak,
       acceptanceThreshold: peakGate,
       rejectionReason: 'no_candidate',
+      candidateAbsoluteTimeMs: null,
+      earlySearchWindowStartSample,
+      earlySearchWindowEndSample,
+      topEarlyImpulsePeaks: earlyPeaks,
+      strongestLaterReflectionDelayMs: null,
+      localSupportWindowStartSample: null,
+      localSupportWindowEndSample: null,
+      localSupportWindowMax: null,
+      localSupportSampleCount: null,
     }
   }
   if (directPeak <= peakGate) {
+    const supportRadius = Math.max(1, Math.round(sampleRate * 0.0001))
+    const supportStart = Math.max(0, directPeakIndex - supportRadius)
+    const supportEnd = Math.min(searchEnd, directPeakIndex + supportRadius + 1)
+    let supportEnergy = 0
+    let supportMax = 0
+    let supportSamples = 0
+    for (let cursor = supportStart; cursor < supportEnd; cursor++) {
+      if (cursor === directPeakIndex) continue
+      const sample = Math.abs(samples[cursor] ?? 0)
+      supportEnergy += sample * sample
+      supportMax = Math.max(supportMax, sample)
+      supportSamples++
+    }
+    const laterReflection = strongestLaterReflection(samples, directPeakIndex + supportRadius + 1)
     return {
       index: null,
       peakIndex: directPeakIndex,
@@ -488,6 +557,15 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
       directPeak,
       acceptanceThreshold: peakGate,
       rejectionReason: 'peak_below_noise',
+      candidateAbsoluteTimeMs: directPeakIndex * 1000 / sampleRate,
+      earlySearchWindowStartSample,
+      earlySearchWindowEndSample,
+      topEarlyImpulsePeaks: earlyPeaks,
+      strongestLaterReflectionDelayMs: laterReflection.index === null ? null : (laterReflection.index - directPeakIndex) * 1000 / sampleRate,
+      localSupportWindowStartSample: supportStart,
+      localSupportWindowEndSample: supportEnd,
+      localSupportWindowMax: supportMax,
+      localSupportSampleCount: supportSamples,
     }
   }
 
@@ -499,6 +577,7 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
     supportWindowRms: number
     supportWindowThreshold: number
     supportSampleCount: number
+    supportWindowMax: number
   } | null = null
   for (let index = 0; index <= directPeakIndex; index++) {
     const value = Math.abs(samples[index])
@@ -510,10 +589,12 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
     const supportEnd = Math.min(searchEnd, index + supportRadius + 1)
     let supportEnergy = 0
     let supportSamples = 0
+    let supportMax = 0
     for (let cursor = supportStart; cursor < supportEnd; cursor++) {
       if (cursor === index) continue
       const sample = samples[cursor] ?? 0
       supportEnergy += sample * sample
+      supportMax = Math.max(supportMax, Math.abs(sample))
       supportSamples++
     }
     const supportRms = Math.sqrt(supportEnergy / Math.max(1, supportSamples))
@@ -534,6 +615,15 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
         supportSampleCount: supportSamples,
         laterReflectionIndex: laterReflection.index,
         laterReflectionPeak: laterReflection.peak,
+        candidateAbsoluteTimeMs: index * 1000 / sampleRate,
+        earlySearchWindowStartSample,
+        earlySearchWindowEndSample,
+        topEarlyImpulsePeaks: earlyPeaks,
+        strongestLaterReflectionDelayMs: laterReflection.index === null ? null : (laterReflection.index - index) * 1000 / sampleRate,
+        localSupportWindowStartSample: supportStart,
+        localSupportWindowEndSample: supportEnd,
+        localSupportWindowMax: supportMax,
+        localSupportSampleCount: supportSamples,
       }
     }
     if (rejectedCandidate === null
@@ -545,6 +635,7 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
         supportWindowRms: supportRms,
         supportWindowThreshold: supportThreshold,
         supportSampleCount: supportSamples,
+        supportWindowMax: supportMax,
       }
     }
   }
@@ -564,6 +655,17 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
     laterReflectionIndex: rejectedLaterReflection.index,
     laterReflectionPeak: rejectedLaterReflection.peak,
     rejectionReason: 'candidate_not_sustained',
+    candidateAbsoluteTimeMs: rejectedCandidate ? rejectedCandidate.index * 1000 / sampleRate : null,
+    earlySearchWindowStartSample,
+    earlySearchWindowEndSample,
+    topEarlyImpulsePeaks: earlyPeaks,
+    strongestLaterReflectionDelayMs: rejectedCandidate && rejectedLaterReflection.index !== null
+      ? (rejectedLaterReflection.index - rejectedCandidate.index) * 1000 / sampleRate
+      : null,
+    localSupportWindowStartSample: rejectedCandidate ? Math.max(0, rejectedCandidate.index - supportRadius) : null,
+    localSupportWindowEndSample: rejectedCandidate ? Math.min(searchEnd, rejectedCandidate.index + supportRadius + 1) : null,
+    localSupportWindowMax: rejectedCandidate?.supportWindowMax ?? null,
+    localSupportSampleCount: rejectedCandidate?.supportSampleCount ?? null,
   }
 }
 
@@ -581,6 +683,15 @@ function directArrivalDiagnostics(arrival: ReturnType<typeof findDirectArrival>)
     supportSampleCount: arrival.supportSampleCount ?? null,
     laterReflectionIndex: arrival.laterReflectionIndex ?? null,
     laterReflectionPeak: arrival.laterReflectionPeak ?? null,
+    candidateAbsoluteTimeMs: arrival.candidateAbsoluteTimeMs,
+    earlySearchWindowStartSample: arrival.earlySearchWindowStartSample,
+    earlySearchWindowEndSample: arrival.earlySearchWindowEndSample,
+    topEarlyImpulsePeaks: arrival.topEarlyImpulsePeaks,
+    strongestLaterReflectionDelayMs: arrival.strongestLaterReflectionDelayMs,
+    localSupportWindowStartSample: arrival.localSupportWindowStartSample,
+    localSupportWindowEndSample: arrival.localSupportWindowEndSample,
+    localSupportWindowMax: arrival.localSupportWindowMax,
+    localSupportSampleCount: arrival.localSupportSampleCount,
   }
 }
 
