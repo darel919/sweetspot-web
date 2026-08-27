@@ -6,6 +6,7 @@ import {
   type MeasurementContext,
 } from '../../../../shared/types/protocol'
 import type { PositionLedger } from './position-ledger'
+import type { ResponsePoint } from './response'
 
 export const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 3 as const
 export const CALIBRATION_CHECKPOINT_ORIENTATION = 'iphone-upright-bottom-edge-to-tv' as const
@@ -39,6 +40,7 @@ export interface CalibrationCheckpoint {
   analysisRevision: typeof CALIBRATION_ANALYSIS_REVISION
   sweepRevision: typeof CALIBRATION_SWEEP_REVISION
   convergenceOutcome: CalibrationConvergenceOutcome | null
+  convergenceReferencePoints: ResponsePoint[] | null
   orientation: typeof CALIBRATION_CHECKPOINT_ORIENTATION
   captureMetadata: MeasurementCaptureMetadata | null
   ledger: PositionLedger
@@ -140,6 +142,15 @@ function isCalibrationConvergenceOutcome(value: unknown): value is CalibrationCo
   return value === null || value === 'sufficient' || value === 'bounded' || value === 'insufficient'
 }
 
+function isResponsePoints(value: unknown): value is ResponsePoint[] | null {
+  return value === undefined || value === null || (Array.isArray(value) && value.every((point) => isRecord(point)
+    && typeof point.frequencyHz === 'number'
+    && Number.isFinite(point.frequencyHz)
+    && point.frequencyHz > 0
+    && typeof point.magnitudeDb === 'number'
+    && Number.isFinite(point.magnitudeDb)))
+}
+
 function isCheckpointLedger(value: unknown): value is PositionLedger {
   return isRecord(value)
     && value.schemaVersion === 2
@@ -180,6 +191,7 @@ export function parseCalibrationCheckpoint(value: unknown): CalibrationCheckpoin
     || value.analysisRevision !== CALIBRATION_ANALYSIS_REVISION
     || value.sweepRevision !== CALIBRATION_SWEEP_REVISION
     || !isCalibrationConvergenceOutcome(value.convergenceOutcome)
+    || !isResponsePoints(value.convergenceReferencePoints)
     || value.orientation !== CALIBRATION_CHECKPOINT_ORIENTATION
     || (value.captureMetadata !== null && !isMeasurementCaptureMetadata(value.captureMetadata))
     || !isCheckpointLedger(value.ledger)
@@ -190,7 +202,11 @@ export function parseCalibrationCheckpoint(value: unknown): CalibrationCheckpoin
     || typeof value.savedAt !== 'number'
     || !Number.isFinite(value.savedAt)) return null
 
-  return value as unknown as CalibrationCheckpoint
+  const checkpoint = value as unknown as CalibrationCheckpoint & { convergenceReferencePoints?: ResponsePoint[] | null }
+  return {
+    ...checkpoint,
+    convergenceReferencePoints: checkpoint.convergenceReferencePoints ?? null,
+  }
 }
 
 export function serializeCalibrationCheckpoint(checkpoint: CalibrationCheckpoint): string {
@@ -217,6 +233,7 @@ export function createCalibrationCheckpoint(input: {
   analysisRevision?: typeof CALIBRATION_ANALYSIS_REVISION
   sweepRevision?: typeof CALIBRATION_SWEEP_REVISION
   convergenceOutcome?: CalibrationConvergenceOutcome | null
+  convergenceReferencePoints?: readonly ResponsePoint[] | null
   captureMetadata: MeasurementCaptureMetadata | null
   ledger: PositionLedger
   correctionState?: CalibrationCheckpoint['correctionState']
@@ -232,6 +249,7 @@ export function createCalibrationCheckpoint(input: {
     analysisRevision: input.analysisRevision ?? CALIBRATION_ANALYSIS_REVISION,
     sweepRevision: input.sweepRevision ?? CALIBRATION_SWEEP_REVISION,
     convergenceOutcome: input.convergenceOutcome ?? null,
+    convergenceReferencePoints: input.convergenceReferencePoints ? [...input.convergenceReferencePoints] : null,
     orientation: CALIBRATION_CHECKPOINT_ORIENTATION,
     captureMetadata: input.captureMetadata ? { ...input.captureMetadata } : null,
     ledger: input.ledger,

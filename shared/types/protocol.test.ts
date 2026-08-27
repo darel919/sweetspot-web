@@ -186,6 +186,7 @@ describe('measurement protocol boundary', () => {
 
   test('rejects malformed state snapshots and expired envelopes', () => {
     const snapshot = {
+      stateRevision: 1,
       device: { id: 'tv-1', name: 'TV', appVersion: '0.1.0' },
       engine: { enabled: true, hasControl: true, activePreset: 1, presetName: 'Flat' },
       userEq: {
@@ -213,6 +214,9 @@ describe('measurement protocol boundary', () => {
       },
     }
     expect(isStateSnapshot(snapshot)).toBe(true)
+    const missingRevision = { ...snapshot }
+    delete (missingRevision as { stateRevision?: number }).stateRevision
+    expect(isStateSnapshot(missingRevision)).toBe(false)
     expect(isStateSnapshot({
       ...snapshot,
       calibration: {

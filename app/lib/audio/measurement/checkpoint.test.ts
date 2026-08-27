@@ -86,4 +86,15 @@ describe('calibration checkpoint persistence contract', () => {
     expect(checkCalibrationCheckpointCompatibility(unknownRateCheckpoint, { ...identity, sampleRate: null })).toEqual({ compatible: true })
     expect(checkCalibrationCheckpointCompatibility(unknownRateCheckpoint, { ...identity, sampleRate: null }, { requireSampleRate: true })).toEqual({ compatible: true })
   })
+
+  test('preserves the accepted aggregate used as the convergence reference', () => {
+    const reference = [{ frequencyHz: 100, magnitudeDb: 2 }]
+    const withReference = createCalibrationCheckpoint({
+      ...checkpoint,
+      convergenceReferencePoints: reference,
+    })
+
+    expect(withReference.convergenceReferencePoints).toEqual(reference)
+    expect(parseSerializedCalibrationCheckpoint(serializeCalibrationCheckpoint(withReference))?.convergenceReferencePoints).toEqual(reference)
+  })
 })

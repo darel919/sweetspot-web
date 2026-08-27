@@ -3,6 +3,7 @@ import {
   connectionStateForDevice,
   shouldNotifyOffline,
 } from './connectionState'
+import { SweetSpotRequestError } from '../lib/transport/errors'
 
 describe('TV connection state', () => {
   test('does not call a healthy mailbox an online TV', () => {
@@ -23,5 +24,17 @@ describe('TV connection state', () => {
       { status: 'connected', deviceOnline: true },
       { status: 'connecting', deviceOnline: true },
     )).toBe(true)
+  })
+})
+
+describe('SweetSpot request failures', () => {
+  test('keeps timeout failures distinguishable from transport interruptions', () => {
+    const timeout = new SweetSpotRequestError('timeout', 'state.get')
+    const interrupted = new SweetSpotRequestError('connection', 'state.get')
+
+    expect(timeout.kind).toBe('timeout')
+    expect(timeout.commandType).toBe('state.get')
+    expect(interrupted.kind).toBe('connection')
+    expect(interrupted).not.toEqual(timeout)
   })
 })

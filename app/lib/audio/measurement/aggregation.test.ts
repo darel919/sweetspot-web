@@ -219,4 +219,15 @@ describe('physical-position spatial aggregation', () => {
     expect(aggregate).not.toBeNull()
     expect(aggregate ? allCaptureQualityPassed(aggregate) : false).toBe(true)
   })
+
+  test('does not use a failed future position as the quality denominator', () => {
+    const aggregate = aggregateResponse([
+      record([8, 8, 8], { positionId: 'center', positionIndex: 0, positionCount: 5, channel: 'left' }),
+      record([8, 8, 8], { positionId: 'left', positionIndex: 1, positionCount: 5, channel: 'left' }),
+      record([8, 8, 8], { positionId: 'right', positionIndex: 2, positionCount: 5, channel: 'left' }),
+      record([8, 8, 8], { positionId: 'forward', positionIndex: 3, positionCount: 5, channel: 'left' }),
+      record([], { positionId: 'backward', positionIndex: 4, positionCount: 5, channel: 'left' }, 'capture_too_short'),
+    ], 'left')
+    expect(aggregate ? allCaptureQualityPassed(aggregate) : false).toBe(true)
+  })
 })

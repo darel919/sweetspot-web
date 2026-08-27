@@ -198,6 +198,7 @@ import {
   shouldRunValidationConfirmation,
   shouldStartAutomaticValidation,
   matchedSpatialValidationMetrics,
+  candidateRequiresPositiveHeadroom,
   type CalibrationValidationOutcome,
 } from '~/lib/audio/correction/calibration-validation'
 import {
@@ -225,6 +226,7 @@ import type {
 import { allCaptureQualityPassed } from '~/lib/audio/measurement/aggregation'
 import { CALIBRATION_WEB_BUILD_SHA } from '~/lib/audio/measurement/checkpoint'
 import { EqCommandRevisionGate } from '~/lib/eq-command-revision'
+import { SweetSpotRequestError } from '~/lib/transport/errors'
 import type {
   CalibrationResultStatus,
   CalibrationValidationMetrics,
@@ -257,6 +259,7 @@ const {
   validationAggregateLeft: measurementValidationAggregateLeft,
   validationAggregateRight: measurementValidationAggregateRight,
   measurementQualityPassed,
+  baselineEligibility: measurementBaselineEligibility,
   completeAcceptedPositionCount: measurementCompletePositionCount,
   failedMeasurementAttemptCount: measurementFailedAttemptCount,
   convergenceOutcome: measurementConvergenceOutcome,
@@ -305,6 +308,8 @@ const candidateTransaction = computed<Extract<CalibrationTransaction, { state: '
   const transaction = snapshot.value?.calibration.transaction
   return transaction?.state === 'candidate_pending' ? transaction : null
 })
+const activeValidationPositionIds = ref<CalibrationPositionId[] | null>(null)
+const calibrationRestorationPending = computed(() => snapshot.value?.calibration.transaction.state === 'restoring')
 const automaticValidationCandidateId = ref<string | null>(null)
 const automaticStagingMeasurementId = ref<string | null>(null)
 const automaticStagingFailedMeasurementId = ref<string | null>(null)
@@ -313,6 +318,12 @@ const measurementBusy = computed(() => isCalibrationActiveStage(measurementStage
 let stateSnapshotRevision = 0
 let recoverySnapshotBaselineRevision = 0
 let recoveryIdentity = ''
+
+watch(deviceOnline, (online) => {
+  if (online) return
+  stateSnapshotRevision = 0
+  recoverySnapshotBaselineRevision = 0
+})
 
 watch(measurementAbortRecovery, (recovery) => {
   const nextIdentity = isAbortRecoveryActive(recovery.state)
@@ -361,6 +372,7 @@ const calibrationLocked = computed(() =>
   measurementBusy.value
     || calibrationFinalizationPending.value
     || validationAbortRecoveryPending.value
+    || calibrationRestorationPending.value
     || automaticCalibrationPending.value,
 )
 const canCancelCalibration = computed(() => {
@@ -373,11 +385,14 @@ const canCancelCalibration = computed(() => {
   return sameCandidate && (finalization?.errorMessage !== null || finalization?.phase === 'reporting')
 })
 const calibrationOverlayStage = computed(() =>
-  calibrationFinalizationPending.value || validationAbortRecoveryPending.value || automaticCalibrationPending.value
+  calibrationFinalizationPending.value || validationAbortRecoveryPending.value || calibrationRestorationPending.value || automaticCalibrationPending.value
     ? 'ending'
     : measurementStage.value,
 )
 const calibrationOverlayMessage = computed(() => {
+  if (calibrationRestorationPending.value) {
+    return 'The TV is restoring the saved audio state. Calibration controls are paused until verification completes.'
+  }
   if (validationAbortRecoveryPending.value) {
     return measurementAbortRecovery.value.state === 'pending'
       ? 'The TV is removing the candidate and verifying the original audio state.'
@@ -515,7 +530,7 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
   if (measurementConvergenceOutcome.value !== 'sufficient') return null
   if (currentSnapshot.capabilities.supportsCalibratedCorrection !== true) return null
   if (!isMicCalibrationProfileEligibleForCorrection(profile)) return null
-  const headroomVerified = currentSnapshot.capabilities.supportsHeadroomCompensation === true
+  const headroomVerified = currentSnapshot.calibration.headroomVerified === true
   const independent = currentSnapshot.capabilities.supportsIndependentCalibration === true
     && measurementAggregateLeft.value !== null
     && measurementAggregateRight.value !== null
@@ -560,20 +575,14 @@ const recommendedCorrection = computed<RecommendedCorrection | null>(() => {
 
 const validationAggregate = computed<AggregateResponse | null>(() => {
   if (!measurementValidationAggregateLeft.value || !measurementValidationAggregateRight.value) return null
-  if (!allCaptureQualityPassed(measurementValidationAggregateLeft.value)
-    || !allCaptureQualityPassed(measurementValidationAggregateRight.value)) return null
+  const positionIds = activeValidationPositionIds.value ?? validationPositionIds.value
+  if (!allCaptureQualityPassed(measurementValidationAggregateLeft.value, positionIds)
+    || !allCaptureQualityPassed(measurementValidationAggregateRight.value, positionIds)) return null
   return combineChannelAggregates(measurementValidationAggregateLeft.value, measurementValidationAggregateRight.value)
 })
 
 const validationBaselineReady = computed(() => {
-  const left = measurementAggregateLeft.value
-  const right = measurementAggregateRight.value
-  return left !== null
-    && right !== null
-    && allCaptureQualityPassed(left)
-    && allCaptureQualityPassed(right)
-    && validationPositionIds.value.length >= 2
-    && spatialBaselineAggregate.value?.points.length >= 2
+  return measurementBaselineEligibility.value.passed
 })
 
 const selectedMeasurementProfile = computed(() =>
@@ -586,7 +595,11 @@ const validationCapturePathEligible = computed(() =>
 
 const validationMetrics = computed<CalibrationValidationMetrics | null>(() => {
   if (!validationBaselineReady.value) return null
-  return matchedSpatialValidationMetrics(spatialBaselineAggregate.value, validationAggregate.value)
+  return matchedSpatialValidationMetrics(
+    spatialBaselineAggregate.value,
+    validationAggregate.value,
+    activeValidationPositionIds.value ?? validationPositionIds.value,
+  )
 })
 
 const validationWorse = computed(() => {
@@ -597,13 +610,21 @@ const validationWorse = computed(() => {
 
 const deviceValidationReady = computed(() => {
   const current = snapshot.value
+  const transaction = current?.calibration.transaction
+  const candidateCurves = current ? {
+    bandsDb: current.calibration.requestedBandsDb ?? current.calibration.bandsDb,
+    ...(current.calibration.requestedLeftBandsDb ? { leftBandsDb: current.calibration.requestedLeftBandsDb } : {}),
+    ...(current.calibration.requestedRightBandsDb ? { rightBandsDb: current.calibration.requestedRightBandsDb } : {}),
+  } : null
   return current !== null
     && current.calibration.active
-    && current.calibration.transaction.state === 'candidate_pending'
-    && current.calibration.transaction.validationStatus === 'pending'
+    && transaction?.state === 'candidate_pending'
+    && transaction.validationStatus === 'pending'
     && current.calibration.applicationVerified === true
     && current.calibration.liveDspStatus === 'verified'
-    && current.calibration.headroomVerified === true
+    && (candidateCurves === null
+      || !candidateRequiresPositiveHeadroom(candidateCurves)
+      || current.calibration.headroomVerified === true)
 })
 
 const validationReady = computed(() =>
@@ -618,8 +639,8 @@ const validationOutcome = computed(() => {
   if (measurementValidationCandidateId.value !== transaction.candidateId) return null
   const validationQualityValid = measurementValidationAggregateLeft.value !== null
     && measurementValidationAggregateRight.value !== null
-    && allCaptureQualityPassed(measurementValidationAggregateLeft.value)
-    && allCaptureQualityPassed(measurementValidationAggregateRight.value)
+    && allCaptureQualityPassed(measurementValidationAggregateLeft.value, activeValidationPositionIds.value ?? validationPositionIds.value)
+    && allCaptureQualityPassed(measurementValidationAggregateRight.value, activeValidationPositionIds.value ?? validationPositionIds.value)
   return classifyCalibrationValidation({
     beforeDb: validationMetrics.value?.before ?? null,
     afterDb: validationMetrics.value?.after ?? null,
@@ -672,13 +693,8 @@ onScopeDispose(() => {
 })
 
 onMessage((env) => {
-  if (env.type !== 'state.snapshot') return
+  if (env.type !== 'state.snapshot' && env.type !== 'state.changed') return
   if (!eqCommandRevision.shouldApply(env.replyTo)) return
-  if (env.replyTo !== undefined) {
-    eqCommandRevision.settle(env.replyTo)
-    if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)
-    eqRevisionTimer = null
-  }
   if (typeof env.payload === 'object' && env.payload !== null && 'ok' in env.payload && env.payload.ok === false) {
     const error = 'error' in env.payload && typeof env.payload.error === 'string' ? env.payload.error : 'live DSP rejected the change'
     showToast(`TV rejected the change: ${error}`)
@@ -688,7 +704,13 @@ onMessage((env) => {
     return
   }
   const next: StateSnapshot = env.payload
-  stateSnapshotRevision += 1
+  if (next.stateRevision <= stateSnapshotRevision) return
+  stateSnapshotRevision = next.stateRevision
+  if (env.replyTo !== undefined) {
+    eqCommandRevision.settle(env.replyTo)
+    if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)
+    eqRevisionTimer = null
+  }
   if (next.calibration.transaction.state === 'candidate_pending') {
     // This is the TV's rollback target. The candidate's current `active` flag
     // describes the staged DSP, not the pre-candidate live state.
@@ -868,6 +890,8 @@ async function performCandidateFinalization(candidateId: string) {
     : 'calibration.rollbackCandidate'
   const response = await withTimeout(request(type, { candidateId }), 15_000)
   if (!response) {
+    completeFinalizationIfReady()
+    if (!calibrationFinalization.value) return
     setFinalizationError(candidateId, `The TV did not answer while ${current.phase === 'accepting' ? 'accepting' : 'rolling back'} the candidate. The transaction remains recoverable.`)
     return
   }
@@ -890,7 +914,7 @@ async function waitForFinalization(candidateId: string) {
     if (!current || current.candidateId !== candidateId || current.errorMessage !== null) return
     completeFinalizationIfReady()
     if (!calibrationFinalization.value) return
-    const stateReply = await withTimeout(request('state.get'), 2_000)
+    const stateReply = await withTimeout(request('state.get'), 2_000, false)
     if (stateReply && isStateSnapshot(stateReply.payload)) snapshot.value = stateReply.payload
     completeFinalizationIfReady()
     if (!calibrationFinalization.value) return
@@ -952,8 +976,9 @@ async function sendValidationResultOnce(candidateId: string, outcome: Validation
     const result = await withTimeout(request('calibration.validation.result', validationPayload(candidateId, outcome)), 15_000)
     const action = result ? stateActionResult(result.payload) : null
     if (action?.snapshot) snapshot.value = action.snapshot
-    const recordedStatus = action?.snapshot?.calibration.transaction.state === 'candidate_pending'
-      ? action.snapshot.calibration.transaction.validationStatus
+    const reconciledSnapshot = action?.snapshot ?? snapshot.value
+    const recordedStatus = reconciledSnapshot?.calibration.transaction.state === 'candidate_pending'
+      ? reconciledSnapshot.calibration.transaction.validationStatus
       : null
     const alreadyRecorded = recordedStatus !== null && validationStatusMatchesOutcome(recordedStatus, outcome)
     if ((!result || !action?.ok) && !alreadyRecorded) {
@@ -1013,6 +1038,7 @@ watch(
     })) return
     if (!candidateId || !transaction) return
     automaticValidationCandidateId.value = candidateId
+    activeValidationPositionIds.value = [...validationPositionIds.value]
     calibrationResult.value = null
     calibrationResultMessage.value = ''
     calibrationRollbackTargetActive.value = transaction.previousActive
@@ -1032,9 +1058,10 @@ watch([measurementStage, validationOutcomeKey, deviceOnline], ([stage, outcomeKe
     confirmedCandidateId: validationConfirmationCandidateId.value,
   })) {
     validationConfirmationCandidateId.value = transaction.candidateId
+    activeValidationPositionIds.value = selectValidationConfirmationPositions(validationPositionIds.value)
     startValidationSession(
       transaction.candidateId,
-      selectValidationConfirmationPositions(validationPositionIds.value),
+      activeValidationPositionIds.value,
     )
     return
   }
@@ -1201,10 +1228,16 @@ async function importCalibration(file: File) {
       calibrationFileStatus.value = 'The TV has not verified its calibration transfer path. Import is blocked.'
       return
     }
+    if (candidateRequiresPositiveHeadroom(pkg) && snapshot.value.calibration.headroomVerified !== true) {
+      calibrationFileStatus.value = 'This calibration contains positive gains. Verified TV input headroom is required before import.'
+      return
+    }
     calibrationFileStatus.value = 'Staging the imported calibration on the TV…'
     const response = await withTimeout(request('calibration.import', pkg), 15_000)
     if (!response) {
-      calibrationFileStatus.value = 'The TV did not answer within 15 seconds.'
+      calibrationFileStatus.value = snapshot.value?.calibration.transaction.state === 'candidate_pending'
+        ? 'The import response timed out, but the TV reports a recoverable candidate.'
+        : 'The import response timed out. The TV state was reconciled and the import can be retried.'
       return
     }
     const action = stateActionResult(response.payload)
@@ -1228,8 +1261,23 @@ async function importCalibration(file: File) {
   }
 }
 
-async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
-  return Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))])
+async function withTimeout<T>(p: Promise<T>, ms: number, reconcile = true): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const result = await Promise.race([
+    p.then((value) => ({ kind: 'value' as const, value })).catch((error: unknown) => ({ kind: 'error' as const, error })),
+    new Promise<{ kind: 'timeout' }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: 'timeout' }), ms)
+    }),
+  ])
+  if (timer !== null) clearTimeout(timer)
+  const timedOut = result.kind === 'timeout'
+    || result.kind === 'error' && result.error instanceof SweetSpotRequestError
+      && (result.error.kind === 'timeout' || result.error.kind === 'connection')
+  if (timedOut && reconcile && deviceOnline.value) {
+    const stateReply = await withTimeout(request('state.get', {}, { timeoutMs: 2_000 }), 2_500, false)
+    if (stateReply && isStateSnapshot(stateReply.payload)) snapshot.value = stateReply.payload
+  }
+  return result.kind === 'value' ? result.value : null
 }
 
 function responseWasAccepted(payload: unknown): boolean {
@@ -1284,7 +1332,15 @@ async function stageRecommendedCorrectionAutomatically(
   try {
     const response = await withTimeout(request('calibration.applyCandidate', correctionPayload(correction)), 15_000)
     if (!response) {
-      automaticStagingFailure(measurementId, 'The TV did not answer within 15s.')
+      const reconciledCandidate = snapshot.value?.calibration.transaction.state === 'candidate_pending'
+        && snapshot.value.calibration.liveDspStatus === 'verified'
+      automaticStagingMeasurementId.value = reconciledCandidate ? measurementId : null
+      if (reconciledCandidate) {
+        calStatus.value = 'The apply response timed out, but the TV reports a verified candidate. Validation will continue automatically.'
+        return
+      }
+      calIsError.value = true
+      calStatus.value = 'The apply response timed out. SweetSpot will retry after the TV state is reconciled.'
       return
     }
     const action = stateActionResult(response.payload)
@@ -1325,17 +1381,30 @@ async function applyCalibration() {
     calStatus.value = 'Need a JSON array of exactly 64 numbers.'
     return
   }
+  if (candidateRequiresPositiveHeadroom({ bandsDb }) && snapshot.value.calibration.headroomVerified !== true) {
+    calIsError.value = true
+    calStatus.value = 'Positive calibration gains require verified TV input headroom.'
+    return
+  }
   calibrationResult.value = null
   calibrationResultMessage.value = ''
   calibrationRollbackTargetActive.value = null
   calStatus.value = 'Staging candidate…'
   const res = await withTimeout(request('calibration.applyCandidate', { bandsDb }), 15_000)
   if (!res) {
+    const reconciledCandidate = snapshot.value?.calibration.transaction.state === 'candidate_pending'
+      && snapshot.value.calibration.liveDspStatus === 'verified'
+    if (reconciledCandidate) {
+      calIsError.value = false
+      calStatus.value = 'The apply response timed out, but the TV reports a verified candidate.'
+      return
+    }
     calIsError.value = true
-    calStatus.value = 'TV did not answer within 15s.'
+    calStatus.value = 'The apply response timed out. The TV state was reconciled and remains recoverable.'
     return
   }
   const action = stateActionResult(res.payload)
+  if (action.snapshot) snapshot.value = action.snapshot
   const candidateStaged = action.snapshot?.calibration.transaction.state === 'candidate_pending'
     && action.snapshot.calibration.liveDspStatus === 'verified'
   calIsError.value = !action.ok || !candidateStaged
@@ -1367,11 +1436,19 @@ async function applyRecommendedCorrection() {
   try {
     const res = await withTimeout(request('calibration.applyCandidate', correctionPayload(correction)), 15_000)
     if (!res) {
+      const reconciledCandidate = snapshot.value?.calibration.transaction.state === 'candidate_pending'
+        && snapshot.value.calibration.liveDspStatus === 'verified'
+      if (reconciledCandidate) {
+        calIsError.value = false
+        calStatus.value = 'The apply response timed out, but the TV reports a verified candidate. Validation will start automatically.'
+        return
+      }
       calIsError.value = true
-      calStatus.value = 'TV did not answer within 15s.'
+      calStatus.value = 'The apply response timed out. The TV state was reconciled and remains recoverable.'
       return
     }
     const action = stateActionResult(res.payload)
+    if (action.snapshot) snapshot.value = action.snapshot
     const candidateStaged = action.snapshot?.calibration.transaction.state === 'candidate_pending'
       && action.snapshot.calibration.liveDspStatus === 'verified'
     calIsError.value = !action.ok || !candidateStaged
@@ -1380,7 +1457,7 @@ async function applyRecommendedCorrection() {
       : correction.independent
         ? 'Candidate staged for validation: independent left/right curves.'
         : 'Candidate staged for validation: common curve.'
-    if (action.ok && action.snapshot) {
+    if (action.snapshot) {
       snapshot.value = action.snapshot
       calibrationApplied.value = action.snapshot.calibration.active
       calJson.value = JSON.stringify((action.snapshot.calibration.requestedBandsDb ?? action.snapshot.calibration.bandsDb).map((value) => Math.round(value * 10) / 10))
@@ -1404,8 +1481,19 @@ async function rollbackCalibration() {
       candidateId: transaction.candidateId,
     }), 15_000)
     if (!res) {
+      const reconciled = snapshot.value?.calibration.transaction.state === 'none'
+        && snapshot.value.calibration.liveDspStatus === 'verified'
+        && snapshot.value.calibration.active === rollbackTargetActive
+      if (reconciled) {
+        calibrationApplied.value = rollbackTargetActive
+        calIsError.value = false
+        calStatus.value = rollbackTargetActive
+          ? 'The rollback response timed out, but the previously active calibration was restored.'
+          : 'The rollback response timed out, but calibration remains off.'
+        return
+      }
       calIsError.value = true
-      calStatus.value = 'TV did not answer within 15s.'
+      calStatus.value = 'The rollback response timed out. The transaction remains recoverable.'
       return
     }
     const action = stateActionResult(res.payload)
@@ -1442,11 +1530,21 @@ async function acceptCandidate() {
       candidateId: transaction.candidateId,
     }), 15_000)
     if (!res) {
+      const reconciled = snapshot.value?.calibration.transaction.state === 'none'
+        && snapshot.value.calibration.liveDspStatus === 'verified'
+        && snapshot.value.calibration.active
+      if (reconciled) {
+        calibrationApplied.value = true
+        calIsError.value = false
+        calStatus.value = 'The acceptance response timed out, but the candidate is active and verified.'
+        return
+      }
       calIsError.value = true
-      calStatus.value = 'TV did not answer within 15s.'
+      calStatus.value = 'The acceptance response timed out. The transaction remains recoverable.'
       return
     }
     const action = stateActionResult(res.payload)
+    if (action.snapshot) snapshot.value = action.snapshot
     const accepted = action.ok
       && action.snapshot?.calibration.transaction.state === 'none'
       && action.snapshot.calibration.active
@@ -1468,7 +1566,11 @@ async function resetCalibration() {
     const rollback = await withTimeout(request('calibration.rollbackCandidate', {
       candidateId: transaction.candidateId,
     }), 15_000)
-    if (!rollback || !stateActionResult(rollback.payload).ok) {
+    const rollbackAction = rollback ? stateActionResult(rollback.payload) : null
+    if (rollbackAction?.snapshot) snapshot.value = rollbackAction.snapshot
+    const rollbackReconciled = snapshot.value?.calibration.transaction.state === 'none'
+      && snapshot.value.calibration.liveDspStatus === 'verified'
+    if ((!rollback || !rollbackAction?.ok) && !rollbackReconciled) {
       calIsError.value = true
       calStatus.value = 'TV could not roll back the pending candidate.'
       return
@@ -1476,7 +1578,13 @@ async function resetCalibration() {
   }
   const reset = await withTimeout(request('calibration.reset'), 15_000)
   const resetAction = reset ? stateActionResult(reset.payload) : null
-  if (!resetAction?.ok || !resetAction.snapshot || resetAction.snapshot.calibration.active) {
+  if (resetAction?.snapshot) snapshot.value = resetAction.snapshot
+  const resetSnapshot = resetAction?.snapshot ?? snapshot.value
+  if ((!resetAction?.ok && !(resetSnapshot?.calibration.transaction.state === 'none'
+    && resetSnapshot.calibration.liveDspStatus === 'verified'
+    && !resetSnapshot.calibration.active))
+    || !resetSnapshot
+    || resetSnapshot.calibration.active) {
     calIsError.value = true
     calStatus.value = 'TV could not verify the calibration reset.'
     return
@@ -1542,6 +1650,7 @@ function startValidation() {
   calibrationResult.value = null
   calibrationResultMessage.value = ''
   calibrationRollbackTargetActive.value = transaction.previousActive
+  activeValidationPositionIds.value = [...validationPositionIds.value]
   startValidationSession(candidateId, validationPositionIds.value)
 }
 

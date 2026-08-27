@@ -31,6 +31,7 @@ import {
   type MeasurementRecord,
   type RepeatabilitySummary,
 } from '../lib/audio/measurement/aggregation'
+import { evaluateCalibrationBaselineEligibility } from '../lib/audio/measurement/quality'
 import type { MeasurementAnalysis, ResponsePoint } from '../lib/audio/measurement/response'
 import {
   createMeasurementPlan,
@@ -264,7 +265,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   let sessionGeneration = 0
   let plan: MeasurementContext[] = []
   let planIndex = 0
-  let positionLedger: PositionLedger | null = null
+  const positionLedger = shallowRef<PositionLedger | null>(null)
   let sessionMode: 'measurement' | 'validation' | 'probe' = 'measurement'
   let probePlanKind: ProbePlanKind | null = null
   const activeContext = shallowRef<MeasurementContext | null>(null)
@@ -282,6 +283,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   let checkpointWriteChain: Promise<void> = Promise.resolve()
   let loadedResumeCheckpoint: CalibrationCheckpoint | null = null
   let previousConvergencePoints: readonly ResponsePoint[] | null = null
+  let forceRepairOnResume = false
   const debugCaptures: CalibrationDebugCapture[] = []
   let calibrationId: string | null = null
   const failedMeasurementAttemptCount = ref(0)
@@ -294,16 +296,21 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     return channels.some((channel) => capture[channel].kind === 'rejected')
   }).length ?? 0
 
-  const completeAcceptedMeasurementPositionCount = computed(() => positionLedger ? acceptedPositionCount(positionLedger) : 0)
-  const measurementQualityPassed = computed(() => {
-    const physical = positionLedger ? projectPhysicalPositionLedger(positionLedger) : null
-    const center = physical?.positions.find((position) => position.positionId === 'center')
-    return allCaptureQualityPassed(aggregateLeft.value)
-      && allCaptureQualityPassed(aggregateRight.value)
-      && center?.left.kind === 'accepted'
-      && center.right.kind === 'accepted'
-      && completeAcceptedMeasurementPositionCount.value >= 3
-  })
+  const acceptedEvidenceKey = (ledger: PositionLedger): string => ledger.captures
+    .flatMap((capture) => [capture.left, capture.right])
+    .filter((submeasurement) => submeasurement.kind === 'accepted')
+    .map((submeasurement) => `${submeasurement.captureKey}:${submeasurement.channel}`)
+    .sort()
+    .join('|')
+
+  const completeAcceptedMeasurementPositionCount = computed(() => positionLedger.value ? acceptedPositionCount(positionLedger.value) : 0)
+  const measurementBaselineEligibility = computed(() => evaluateCalibrationBaselineEligibility({
+    ledger: positionLedger.value ?? createPositionLedger('missing'),
+    aggregateLeft: aggregateLeft.value,
+    aggregateRight: aggregateRight.value,
+    minimumAcceptedPositions: 3,
+  }))
+  const measurementQualityPassed = computed(() => measurementBaselineEligibility.value.passed)
   const spatialConsistencySummaries = computed<RepeatabilitySummary[]>(() => [
     ...(aggregateLeft.value?.spatialConsistency ?? []),
     ...(aggregateRight.value?.spatialConsistency ?? []),
@@ -532,7 +539,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }
 
   function persistPositionCheckpoint(): void {
-    const ledger = positionLedger
+    const ledger = positionLedger.value
     const identity = currentCheckpointIdentity()
     if (!ledger || !identity || !sessionId || !profile) return
     const checkpoint = createCalibrationCheckpoint({
@@ -546,6 +553,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       },
       captureMetadata: captureMetadata.value,
       convergenceOutcome: convergenceOutcome.value,
+      convergenceReferencePoints: previousConvergencePoints,
       ledger,
       validationStarted: false,
     })
@@ -601,8 +609,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }
 
   function assessConvergence(): ConvergenceAssessment | null {
-    if (!positionLedger || sessionMode !== 'measurement') return null
-    const physical = projectPhysicalPositionLedger(positionLedger)
+    if (!positionLedger.value || sessionMode !== 'measurement') return null
+    const physical = projectPhysicalPositionLedger(positionLedger.value)
     if (physical.positions.filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted').length < 3) {
       return null
     }
@@ -642,7 +650,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     const medianCorrectionChangeDb = correctionPercentile(0.5)
     const p95CorrectionChangeDb = correctionPercentile(0.95)
     const highConfidenceBandFraction = spread.filter((point) => point.magnitudeDb <= 3).length / spread.length
-    const correctionStable = medianCorrectionChangeDb === null || (
+    const correctionStable = medianCorrectionChangeDb !== null && (
       medianCorrectionChangeDb <= MAX_MEDIAN_CORRECTION_CHANGE_DB
       && (p95CorrectionChangeDb ?? Number.POSITIVE_INFINITY) <= MAX_P95_CORRECTION_CHANGE_DB
     )
@@ -674,9 +682,9 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }
 
   function scheduleAdaptiveNext(): void {
-    if (!positionLedger) return
+    if (!positionLedger.value) return
     const convergence = assessConvergence()
-    const decision = decideNextCapture(projectPhysicalPositionLedger(positionLedger), convergence)
+    const decision = decideNextCapture(projectPhysicalPositionLedger(positionLedger.value), convergence)
     if (decision.kind === 'finish') {
       convergenceOutcome.value = decision.outcome
       persistPositionCheckpoint()
@@ -848,7 +856,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
 
   function setPreparingText(context: MeasurementContext) {
     message.value = sessionMode === 'measurement'
-      && positionLedger?.captures.length === 0
+      && positionLedger.value?.captures.length === 0
       && context.positionId === 'center'
       && context.attemptIndex === 0
       ? 'Running the center acoustic pilot. The room walkaround starts only after this signal is synchronized and analyzed.'
@@ -1063,7 +1071,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       aggregateLeft.value = null
       aggregateRight.value = null
       aggregateBoth.value = null
-      positionLedger = null
+      positionLedger.value = null
       previousConvergencePoints = null
       if (!resumingMeasurement) loadedResumeCheckpoint = null
     } else {
@@ -1131,22 +1139,51 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       sessionId = newSessionId()
       if (mode === 'measurement') {
         calibrationId = sessionId
-        positionLedger = resumingMeasurement && resumeCheckpoint
+        positionLedger.value = resumingMeasurement && resumeCheckpoint
           ? { ...resumeCheckpoint.ledger, sessionId }
           : createPositionLedger(sessionId)
         convergenceOutcome.value = resumingMeasurement && resumeCheckpoint ? resumeCheckpoint.convergenceOutcome : null
-        failedMeasurementAttemptCount.value = countFailedMeasurementAttempts(positionLedger)
-        records.value = projectAcceptedRecords(positionLedger)
+        previousConvergencePoints = resumingMeasurement && resumeCheckpoint
+          ? resumeCheckpoint.convergenceReferencePoints
+          : null
+        failedMeasurementAttemptCount.value = countFailedMeasurementAttempts(positionLedger.value)
+        records.value = projectAcceptedRecords(positionLedger.value)
         rebuildAggregates()
-        if (resumingMeasurement && positionLedger) {
-          const decision = decideNextCapture(projectPhysicalPositionLedger(positionLedger), null)
-          if (decision.kind === 'capture') {
-            const next = contextForAdaptiveDecision(decision)
-            plan = [next]
-            progress.value = {
-              current: acceptedPositionCount(positionLedger),
-              total: next.positionCount,
+        if (resumingMeasurement && positionLedger.value) {
+          const decision = decideNextCapture(
+            projectPhysicalPositionLedger(positionLedger.value),
+            assessConvergence(),
+            undefined,
+            { forceRepair: forceRepairOnResume },
+          )
+          forceRepairOnResume = false
+          switch (decision.kind) {
+            case 'capture': {
+              const next = contextForAdaptiveDecision(decision)
+              plan = [next]
+              progress.value = {
+                current: acceptedPositionCount(positionLedger.value),
+                total: next.positionCount,
+              }
+              break
             }
+            case 'finish':
+              convergenceOutcome.value = decision.outcome
+              completedMeasurementId.value = sessionId
+              stage.value = decision.outcome === 'insufficient' ? 'error' : 'complete'
+              message.value = decision.reason
+              await closeCapture()
+              sessionId = null
+              profile = null
+              if (decision.outcome === 'sufficient') clearPersistedCheckpoint()
+              return
+            case 'abort':
+              stage.value = 'error'
+              message.value = decision.message
+              await closeCapture()
+              sessionId = null
+              profile = null
+              return
           }
         }
       }
@@ -1199,6 +1236,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     if (failedRepeatabilityGroups.value.length === 0 && failedTakeDiagnostics.value.length === 0) return
     await refreshResumeCheckpoint()
     if (loadedResumeCheckpoint) {
+      forceRepairOnResume = true
       void startMode('measurement', null, null, null, loadedResumeCheckpoint)
       return
     }
@@ -1314,7 +1352,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
           sweep: currentSweep,
           microphoneProfile: currentProfile,
           plannerState: { convergenceOutcome: convergenceOutcome.value },
-          positionLedger: positionLedger ? projectPhysicalPositionLedger(positionLedger) : null,
+          positionLedger: positionLedger.value ? projectPhysicalPositionLedger(positionLedger.value) : null,
         })) - 1
         : -1
       const analysisController = new AbortController()
@@ -1336,7 +1374,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
             right: result.right.displayPoints,
           },
           plannerState: { convergenceOutcome: convergenceOutcome.value },
-          positionLedger: positionLedger ? projectPhysicalPositionLedger(positionLedger) : null,
+          positionLedger: positionLedger.value ? projectPhysicalPositionLedger(positionLedger.value) : null,
         }
       }
       const diagnosticsFor = (child: MeasurementAnalysis, channel: 'left' | 'right'): MeasurementDiagnosticsValues => ({
@@ -1519,23 +1557,24 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         advanceAfterCapture(currentContext)
         return
       }
-      if (!positionLedger) throw new Error('Calibration position ledger is unavailable.')
-      const acceptedChannelsBefore = projectAcceptedRecords(positionLedger).length
+      if (!positionLedger.value) throw new Error('Calibration position ledger is unavailable.')
+      const acceptedEvidenceBefore = acceptedEvidenceKey(positionLedger.value)
       const previousAggregatePoints = aggregateBoth.value?.points ?? null
-      positionLedger = appendCompositeCapture(positionLedger, {
+      positionLedger.value = appendCompositeCapture(positionLedger.value, {
         context: currentContext,
         analysis: result,
         captureMetadata: captureMetadata.value,
         acceptedAt: Date.now(),
       })
-      failedMeasurementAttemptCount.value = countFailedMeasurementAttempts(positionLedger)
-      const acceptedRecordsInLedger = projectAcceptedRecords(positionLedger)
-      const acceptedEvidenceChanged = hasNewAcceptedEvidence(acceptedChannelsBefore, acceptedRecordsInLedger.length)
+      failedMeasurementAttemptCount.value = countFailedMeasurementAttempts(positionLedger.value)
+      const acceptedRecordsInLedger = projectAcceptedRecords(positionLedger.value)
+      const acceptedEvidenceAfter = acceptedEvidenceKey(positionLedger.value)
+      const acceptedEvidenceChanged = hasNewAcceptedEvidence(acceptedEvidenceBefore, acceptedEvidenceAfter)
       records.value = acceptedRecordsInLedger
-      const projected = projectPhysicalPositionLedger(positionLedger)
+      const projected = projectPhysicalPositionLedger(positionLedger.value)
       const acceptedPositionTotal = projected.positions.filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted').length
+      if (acceptedEvidenceChanged) previousConvergencePoints = previousAggregatePoints
       persistPositionCheckpoint()
-      previousConvergencePoints = previousAggregatePoints
       analysis.value = result.left.status === 'ok' ? result.left : result.right
       progress.value = { current: acceptedPositionTotal, total: Math.max(progress.value.total, currentPositionCount) }
       if (result.status !== 'ok') {
@@ -1829,8 +1868,8 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       }
       if (endedMode === 'measurement') {
         completedMeasurementId.value = endedSessionId
-        if (hadAnalysis && positionLedger
-          && acceptedPositionCount(positionLedger) >= 3
+        if (hadAnalysis && positionLedger.value
+          && acceptedPositionCount(positionLedger.value) >= 3
           && measurementQualityPassed.value
           && convergenceOutcome.value === 'sufficient') clearPersistedCheckpoint()
       }
@@ -1924,6 +1963,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     validationAggregateLeft: readonly(validationAggregateLeft),
     validationAggregateRight: readonly(validationAggregateRight),
     measurementQualityPassed,
+    baselineEligibility: readonly(measurementBaselineEligibility),
     completeAcceptedPositionCount: completeAcceptedMeasurementPositionCount,
     failedMeasurementAttemptCount: readonly(failedMeasurementAttemptCount),
     spatialConsistencySummaries: readonly(spatialConsistencySummaries),

@@ -248,17 +248,20 @@ export function aggregateResponse(
   }
 }
 
-export function allCaptureQualityPassed(aggregate: AggregateResponse | null): boolean {
-  const expectedPositionCount = Math.max(
-    0,
-    ...aggregate?.spatialConsistency.map((summary) => summary.positionCount) ?? [],
-  )
-  return Boolean(
-    aggregate
-      && aggregate.points.length > 1
-      && expectedPositionCount > 0
-      && aggregate.positionResponses.length === expectedPositionCount
-      && aggregate.spatialConsistency.length > 0
-      && aggregate.spatialConsistency.every((summary) => summary.passed),
-  )
+export function allCaptureQualityPassed(
+  aggregate: AggregateResponse | null,
+  acceptedPositionIds?: readonly CalibrationPositionId[],
+): boolean {
+  if (acceptedPositionIds !== undefined) {
+    if (!aggregate || aggregate.points.length <= 1 || acceptedPositionIds.length === 0) return false
+    const accepted = new Set(acceptedPositionIds)
+    const responses = aggregate.positionResponses.filter((response) => accepted.has(response.positionId))
+    const summaries = aggregate.spatialConsistency.filter((summary) => accepted.has(summary.positionId))
+    return responses.length === accepted.size
+      && summaries.length === accepted.size
+      && summaries.every((summary) => summary.passed)
+  }
+  if (!aggregate) return false
+  const acceptedIds = [...new Set(aggregate.positionResponses.map((response) => response.positionId))]
+  return allCaptureQualityPassed(aggregate, acceptedIds)
 }

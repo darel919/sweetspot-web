@@ -26,6 +26,21 @@ export interface SpatialValidationMetrics {
   positionIds: CalibrationPositionId[]
 }
 
+const POSITIVE_GAIN_TOLERANCE_DB = 0.0001
+
+export function candidateRequiresPositiveHeadroom(candidate: {
+  bandsDb: readonly number[]
+  leftBandsDb?: readonly number[]
+  rightBandsDb?: readonly number[]
+}): boolean {
+  const curves = candidate.leftBandsDb !== undefined && candidate.rightBandsDb !== undefined
+    ? [candidate.leftBandsDb, candidate.rightBandsDb]
+    : [candidate.bandsDb]
+  return curves
+    .flatMap((curve) => curve ?? [])
+    .some((gainDb) => gainDb > POSITIVE_GAIN_TOLERANCE_DB)
+}
+
 function comparablePositionIds(
   baseline: AggregateResponse,
   candidate: AggregateResponse,
@@ -46,6 +61,21 @@ function comparablePositionIds(
   return positionIds.sort((left, right) => left.localeCompare(right))
 }
 
+function aggregateForPositions(
+  aggregate: AggregateResponse,
+  positionIds: readonly CalibrationPositionId[],
+): AggregateResponse | null {
+  const selected = positionIds.flatMap((positionId) => aggregate.positionResponses.filter((response) => response.positionId === positionId))
+  if (selected.length !== positionIds.length || selected.length === 0) return null
+  const first = selected[0]
+  if (!first || selected.some((response) => response.points.length !== first.points.length)) return null
+  const points = first.points.map((point, index) => ({
+    frequencyHz: point.frequencyHz,
+    magnitudeDb: selected.reduce((sum, response) => sum + (response.points[index]?.magnitudeDb ?? 0), 0) / selected.length,
+  }))
+  return { ...aggregate, points, positionResponses: selected }
+}
+
 /**
  * Scores the same robust spatial objective used to generate a correction.
  * The baseline supplies the target and both aggregates must cover the same
@@ -54,16 +84,24 @@ function comparablePositionIds(
 export function matchedSpatialValidationMetrics(
   baseline: AggregateResponse | null,
   candidate: AggregateResponse | null,
+  requestedPositionIds?: readonly CalibrationPositionId[],
 ): SpatialValidationMetrics | null {
   if (!baseline || !candidate || baseline.points.length < 2 || candidate.points.length < 2) return null
-  if (baseline.points.length !== candidate.points.length
-    || baseline.points.some((point, index) => point.frequencyHz !== candidate.points[index]?.frequencyHz)) return null
-  const positionIds = comparablePositionIds(baseline, candidate)
-  if (!positionIds) return null
-  const target = targetPointsFor(baseline.points)
+  const positionIds = requestedPositionIds === undefined
+    ? comparablePositionIds(baseline, candidate)
+    : [...new Set(requestedPositionIds)]
+  if (!positionIds || positionIds.length === 0) return null
+  const selectedBaseline = requestedPositionIds === undefined ? baseline : aggregateForPositions(baseline, positionIds)
+  const selectedCandidate = requestedPositionIds === undefined ? candidate : aggregateForPositions(candidate, positionIds)
+  if (!selectedBaseline || !selectedCandidate) return null
+  if (requestedPositionIds !== undefined
+    && selectedCandidate.positionResponses.length !== candidate.positionResponses.length) return null
+  if (selectedBaseline.points.length !== selectedCandidate.points.length
+    || selectedBaseline.points.some((point, index) => point.frequencyHz !== selectedCandidate.points[index]?.frequencyHz)) return null
+  const target = targetPointsFor(selectedBaseline.points)
   return {
-    before: targetErrorRms(baseline.points, target),
-    after: targetErrorRms(candidate.points, target),
+    before: targetErrorRms(selectedBaseline.points, target),
+    after: targetErrorRms(selectedCandidate.points, target),
     objective: 'spatial',
     positionIds,
   }

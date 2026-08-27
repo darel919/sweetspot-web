@@ -209,4 +209,16 @@ describe('adaptive physical-position planner', () => {
     )
     expect(decision).toEqual({ kind: 'finish', outcome: 'sufficient', reason: 'convergence-sufficient' })
   })
+
+  test('repairs an exhausted optional position only when explicitly requested', () => {
+    const failedForward = position('forward', 3, { left: rejected(), right: rejected(), attemptIndex: 1 })
+    const decision = decideNextCapture(
+      ledger([position('center', 0), position('left', 1), position('right', 2), failedForward]),
+      converged,
+      undefined,
+      { forceRepair: true },
+    )
+    expect(decision).toMatchObject({ kind: 'capture', position: { id: 'forward' }, reason: 'explicit-repair' })
+    expect(decision).toMatchObject({ attemptIndex: 2 })
+  })
 })

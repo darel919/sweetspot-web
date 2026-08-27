@@ -599,6 +599,7 @@ export interface EffectsDiagnostics {
 }
 
 export interface StateSnapshot {
+  stateRevision: number
   device: DeviceInfo
   engine: EngineState
   userEq: UserEqState
@@ -663,7 +664,8 @@ export function isStateSnapshot(value: unknown): value is StateSnapshot {
     && (calibration.requestedRightBandsDb === undefined || isDbArray(calibration.requestedRightBandsDb))
     && (calibration.effectiveLeftBandsDb === undefined || isDbArray(calibration.effectiveLeftBandsDb))
     && (calibration.effectiveRightBandsDb === undefined || isDbArray(calibration.effectiveRightBandsDb))
-  return typeof device.id === 'string'
+  return isInteger(value.stateRevision) && value.stateRevision >= 0
+    && typeof device.id === 'string'
     && typeof device.name === 'string'
     && typeof device.appVersion === 'string'
     && typeof engine.enabled === 'boolean'

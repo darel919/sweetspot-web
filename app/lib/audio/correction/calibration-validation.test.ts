@@ -3,6 +3,7 @@ import { CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB } from '../../../../shared/ty
 import type { CalibrationPositionId } from '../../../../shared/types/protocol'
 import {
   classifyCalibrationValidation,
+  candidateRequiresPositiveHeadroom,
   matchedSpatialValidationMetrics,
   selectValidationConfirmationPositions,
   shouldRunValidationConfirmation,
@@ -139,5 +140,30 @@ describe('calibration validation classification', () => {
       aggregate(['center', 'left', 'right'], 1),
       aggregate(['center', 'left'], 0),
     )).toBeNull()
+  })
+
+  test('requires headroom only when the staged candidate contains a positive gain', () => {
+    expect(candidateRequiresPositiveHeadroom({ bandsDb: Array.from({ length: 64 }, () => 0) })).toBe(false)
+    expect(candidateRequiresPositiveHeadroom({ bandsDb: Array.from({ length: 64 }, (_, index) => index === 4 ? 0.001 : -2) })).toBe(true)
+    expect(candidateRequiresPositiveHeadroom({
+      bandsDb: Array.from({ length: 64 }, () => -2),
+      leftBandsDb: Array.from({ length: 64 }, () => -2),
+      rightBandsDb: Array.from({ length: 64 }, (_, index) => index === 9 ? 1 : -2),
+    })).toBe(true)
+    expect(candidateRequiresPositiveHeadroom({
+      bandsDb: Array.from({ length: 64 }, () => 1),
+      leftBandsDb: Array.from({ length: 64 }, () => -2),
+      rightBandsDb: Array.from({ length: 64 }, () => -2),
+    })).toBe(false)
+  })
+
+  test('compares a confirmation against the matching baseline positions only', () => {
+    const baseline = aggregate(['center', 'left', 'right'], 1)
+    const confirmation = aggregate(['center'], 0)
+    expect(matchedSpatialValidationMetrics(baseline, confirmation, ['center'])).toMatchObject({
+      objective: 'spatial',
+      positionIds: ['center'],
+    })
+    expect(matchedSpatialValidationMetrics(baseline, confirmation, ['left'])).toBeNull()
   })
 })

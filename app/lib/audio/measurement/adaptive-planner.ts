@@ -37,6 +37,11 @@ export type CaptureReason =
   | 'retry-position'
   | 'spatial-uncertainty'
   | 'replace-failed-position'
+  | 'explicit-repair'
+
+export interface AdaptivePlannerOptions {
+  forceRepair?: boolean
+}
 
 export type AdaptivePlanDecision =
   | {
@@ -139,6 +144,7 @@ export function decideNextCapture(
   ledger: PhysicalPositionLedger,
   convergence: ConvergenceAssessment | null,
   policy: AdaptivePlannerPolicy = DEFAULT_ADAPTIVE_POLICY,
+  options: AdaptivePlannerOptions = {},
 ): AdaptivePlanDecision {
   const center = ledger.positions.find((position) => position.positionId === 'center') ?? null
   if (!center) {
@@ -160,6 +166,28 @@ export function decideNextCapture(
       kind: 'finish',
       outcome: 'insufficient',
       reason: 'center-position-incomplete',
+    }
+  }
+
+  if (options.forceRepair) {
+    const failedPosition = ledger.positions.find((position) =>
+      position.positionId !== 'center' && !isPositionAccepted(position),
+    )
+    if (failedPosition) {
+      const spec = positionSpec(policy, failedPosition.positionId)
+      if (!spec) {
+        return {
+          kind: 'abort',
+          message: `Cannot repair unknown position ${failedPosition.positionId}`,
+        }
+      }
+      return captureDecision(
+        spec,
+        { ...failedPosition, attemptIndex: failedPosition.attemptIndex + 1 },
+        failedPosition.requestedPositionCount,
+        missingChannel(failedPosition) ?? 'both',
+        'explicit-repair',
+      )
     }
   }
 
