@@ -14,6 +14,7 @@
     "lint": "oxlint .",
     "verify:protocol": "bun scripts/verify-protocol-parity.mjs",
     "verify:transport": "bun scripts/verify-direct-transport.mjs",
+    "verify:source-layout": "bun scripts/verify-source-layout.mjs",
     "typecheck": "vue-tsc --noEmit",
     "deploy": "bun run generate && bunx wrangler deploy",
     "test": "bun test"

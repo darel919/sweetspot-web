@@ -7,22 +7,22 @@ import type {
   CalibrationNextAction,
   CalibrationPositionId,
   Envelope,
-} from '../../shared/types/protocol'
-import { isCalibrationJobView } from '../../shared/types/protocol'
+} from '../../../shared/types/protocol'
+import { isCalibrationJobView } from '../../../shared/types/protocol'
 import {
   encodeCaptureBegin,
   encodeCaptureChunk,
   encodeCaptureEnd,
   type CalibrationCaptureStreamMetadata,
-} from '../../shared/transport/captureStream'
-import { discoverMicCalibrationProfiles } from '../lib/audio/mics/registry'
-import { isMicCalibrationProfileEligibleForCorrection } from '../lib/audio/mics/profile'
-import type { MicCalibrationProfile } from '../lib/audio/mics/types'
-import { closeMicrophone, openMicrophone, type MicrophoneCapture } from '../lib/audio/capture/microphone'
-import { createPcmRecorder, type PcmRecorder } from '../lib/audio/capture/pcm-recorder'
-import { Sha256 } from '../lib/transport/sha256'
-import type { DirectConnectionState } from '../lib/transport/types'
-import { useScreenWakeLock } from './useScreenWakeLock'
+} from '../../../shared/transport/captureStream'
+import { discoverMicCalibrationProfiles } from '../../lib/audio/mics/registry'
+import { isMicCalibrationProfileEligibleForCorrection } from '../../lib/audio/mics/profile'
+import type { MicCalibrationProfile } from '../../lib/audio/mics/types'
+import { closeMicrophone, openMicrophone, type MicrophoneCapture } from '../../lib/audio/capture/microphone'
+import { createPcmRecorder, type PcmRecorder } from '../../lib/audio/capture/pcm-recorder'
+import { Sha256 } from '../../lib/transport/sha256'
+import type { DirectConnectionState } from '../../lib/transport/types'
+import { useScreenWakeLock } from '../ui/useScreenWakeLock'
 
 export type RemoteMicCaptureState = 'idle' | 'opening' | 'recording' | 'uploading' | 'waiting' | 'error'
 

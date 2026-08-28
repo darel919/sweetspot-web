@@ -8,7 +8,7 @@ import type {
   StateSnapshot,
 } from '#shared/types/protocol'
 import type { MicCalibrationProfile } from '~/lib/audio/mics/types'
-import type { RemoteMicCaptureState } from '~/composables/useCalibrationRemoteMic'
+import type { RemoteMicCaptureState } from '~/composables/calibration/useCalibrationRemoteMic'
 
 const props = defineProps<{
   snapshot: StateSnapshot

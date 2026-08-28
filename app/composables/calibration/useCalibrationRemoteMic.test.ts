@@ -4,12 +4,12 @@ import type {
   CalibrationJobView,
   CalibrationNextAction,
   Envelope,
-} from '../../shared/types/protocol'
-import type { MicCalibrationProfile } from '../lib/audio/mics/types'
-import type { MicrophoneCapture } from '../lib/audio/capture/microphone'
-import type { PcmRecorder } from '../lib/audio/capture/pcm-recorder'
-import { decodeCaptureStreamFrame } from '../../shared/transport/captureStream'
-import { validatePayload } from '../../shared/types/protocol'
+} from '../../../shared/types/protocol'
+import type { MicCalibrationProfile } from '../../lib/audio/mics/types'
+import type { MicrophoneCapture } from '../../lib/audio/capture/microphone'
+import type { PcmRecorder } from '../../lib/audio/capture/pcm-recorder'
+import { decodeCaptureStreamFrame } from '../../../shared/transport/captureStream'
+import { validatePayload } from '../../../shared/types/protocol'
 import {
   acceptCalibrationJobState,
   buildCalibrationCapture,

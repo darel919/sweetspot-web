@@ -1,5 +1,4 @@
 import {
-  isTransportCapabilityMessage,
   localTransportCapabilities,
   MAX_CAPTURE_FRAME_BYTES,
   type TransportCapabilityMessage,
@@ -12,9 +11,6 @@ import {
 } from '#shared/transport/signaling'
 import {
   PROTOCOL_VERSION,
-  isDeviceToClient,
-  isEnvelope,
-  validatePayload,
   type Envelope,
   type Role,
 } from '#shared/types/protocol'
@@ -22,6 +18,9 @@ import { SweetSpotRequestError } from '../errors'
 import { sessionIdForPairing } from '../../pairing/session'
 import { createSignalingClient, type SignalingClient } from '../signaling/client'
 import { BoundedCaptureQueue } from './backpressure'
+import { bindCaptureChannel } from './capture-channel'
+import { bindControlChannel, parseControlMessage } from './control-channel'
+import { readPeerStats } from './stats'
 import type {
   DirectConnectionState,
   SweetSpotTransport,
@@ -224,26 +223,16 @@ export function createWebRtcTransport(role: Role = 'client'): SweetSpotTransport
   async function refreshPeerStats(currentPeer: RTCPeerConnection): Promise<void> {
     if (peer !== currentPeer || disposed) return
     try {
-      const reports = await currentPeer.getStats()
+      const snapshot = await readPeerStats(currentPeer)
       if (peer !== currentPeer) return
-      let selectedPair: RTCIceCandidatePairStats | null = null
-      reports.forEach((report) => {
-        if (report.type !== 'candidate-pair') return
-        const pair = report as RTCIceCandidatePairStats & { selected?: boolean }
-        if (pair.selected === true || (pair.nominated === true && pair.state === 'succeeded')) selectedPair = pair
-      })
-      if (!selectedPair) return
-      const localCandidate = reports.get(selectedPair.localCandidateId) as RTCIceCandidateStats | undefined
-      const remoteCandidate = reports.get(selectedPair.remoteCandidateId) as RTCIceCandidateStats | undefined
+      if (!snapshot) return
       diagnostics = {
         ...diagnostics,
-        selectedCandidateType: localCandidate?.candidateType ?? remoteCandidate?.candidateType ?? null,
-        selectedCandidateProtocol: localCandidate?.protocol ?? remoteCandidate?.protocol ?? null,
-        rttMs: typeof selectedPair.currentRoundTripTime === 'number'
-          ? selectedPair.currentRoundTripTime * 1_000
-          : null,
-        bytesSent: typeof selectedPair.bytesSent === 'number' ? selectedPair.bytesSent : diagnostics.bytesSent,
-        bytesReceived: typeof selectedPair.bytesReceived === 'number' ? selectedPair.bytesReceived : diagnostics.bytesReceived,
+        selectedCandidateType: snapshot.selectedCandidateType,
+        selectedCandidateProtocol: snapshot.selectedCandidateProtocol,
+        rttMs: snapshot.rttMs,
+        bytesSent: snapshot.bytesSent ?? diagnostics.bytesSent,
+        bytesReceived: snapshot.bytesReceived ?? diagnostics.bytesReceived,
       }
       emitDiagnostics()
     } catch {
@@ -314,31 +303,17 @@ export function createWebRtcTransport(role: Role = 'client'): SweetSpotTransport
   function onControlMessage(event: MessageEvent<unknown>): void {
     if (typeof event.data !== 'string') return
     diagnostics = { ...diagnostics, bytesReceived: diagnostics.bytesReceived + event.data.length }
-    let value: unknown
-    try {
-      value = JSON.parse(event.data)
-    } catch {
-      setError(makeTransportError('protocol', 'invalid_control', 'The TV sent invalid control data.', false))
+    const message = parseControlMessage(event.data)
+    if (message.kind === 'ignored') return
+    if (message.kind === 'capability') {
+      handleCapability(message.value)
       return
     }
-    if (isTransportCapabilityMessage(value)) {
-      handleCapability(value)
+    if (message.kind === 'envelope') {
+      deliver(message.value)
       return
     }
-    if (isEnvelope(value)) {
-      if (!isDeviceToClient(value.type)) {
-        setError(makeTransportError('protocol', 'unexpected_message', 'The TV sent an unexpected control message.', false))
-        return
-      }
-      const payloadError = validatePayload(value.type, value.payload)
-      if (payloadError) {
-        setError(makeTransportError('protocol', 'invalid_payload', 'The TV sent invalid control payload.', false))
-        return
-      }
-      deliver(value)
-    } else {
-      setError(makeTransportError('protocol', 'invalid_envelope', 'The TV sent an invalid control envelope.', false))
-    }
+    setError(makeTransportError('protocol', message.code, message.message, false))
   }
 
   function onCaptureMessage(event: MessageEvent<unknown>): void {
@@ -388,27 +363,26 @@ export function createWebRtcTransport(role: Role = 'client'): SweetSpotTransport
     if (capture) captureQueue.updateBufferedAmount(capture.bufferedAmount)
   }
 
-  function configureControl(channel: RTCDataChannel, owner: RTCPeerConnection): void {
+  function attachControl(channel: RTCDataChannel, owner: RTCPeerConnection): void {
     control = channel
-    channel.binaryType = 'arraybuffer'
-    channel.onmessage = (event) => { if (control === channel) onControlMessage(event) }
-    channel.onopen = () => { if (control === channel) onControlOpen() }
-    channel.onclose = () => { if (control === channel) onControlClose() }
-    channel.onerror = () => { if (control === channel) onControlError() }
-    if (peer !== owner) channel.close()
+    bindControlChannel(channel, () => peer === owner && control === channel, {
+      onMessage: onControlMessage,
+      onOpen: onControlOpen,
+      onClose: onControlClose,
+      onError: onControlError,
+    })
   }
 
-  function configureCapture(channel: RTCDataChannel, owner: RTCPeerConnection): void {
+  function attachCapture(channel: RTCDataChannel, owner: RTCPeerConnection): void {
     capture = channel
-    channel.binaryType = 'arraybuffer'
-    channel.bufferedAmountLowThreshold = CAPTURE_LOW_WATER_BYTES
     captureQueue.updateBufferedAmount(channel.bufferedAmount)
-    channel.onmessage = (event) => { if (capture === channel) onCaptureMessage(event) }
-    channel.onopen = () => { if (capture === channel) onCaptureOpen() }
-    channel.onclose = () => { if (capture === channel) onCaptureClose() }
-    channel.onerror = () => { if (capture === channel) onCaptureError() }
-    channel.onbufferedamountlow = () => { if (capture === channel) onCaptureLow() }
-    if (peer !== owner) channel.close()
+    bindCaptureChannel(channel, CAPTURE_LOW_WATER_BYTES, () => peer === owner && capture === channel, {
+      onMessage: onCaptureMessage,
+      onOpen: onCaptureOpen,
+      onClose: onCaptureClose,
+      onError: onCaptureError,
+      onBufferedAmountLow: onCaptureLow,
+    })
   }
 
   function onDataChannel(channel: RTCDataChannel, owner: RTCPeerConnection): void {
@@ -416,8 +390,8 @@ export function createWebRtcTransport(role: Role = 'client'): SweetSpotTransport
       channel.close()
       return
     }
-    if (channel.label === CONTROL_CHANNEL) configureControl(channel, owner)
-    else if (channel.label === CAPTURE_CHANNEL) configureCapture(channel, owner)
+    if (channel.label === CONTROL_CHANNEL) attachControl(channel, owner)
+    else if (channel.label === CAPTURE_CHANNEL) attachCapture(channel, owner)
     else channel.close()
   }
 
@@ -538,8 +512,8 @@ export function createWebRtcTransport(role: Role = 'client'): SweetSpotTransport
     next.oniceconnectionstatechange = () => handlePeerState(next)
     next.onconnectionstatechange = () => handlePeerState(next)
     next.onicegatheringstatechange = () => updatePeerDiagnostics(next)
-    configureControl(next.createDataChannel(CONTROL_CHANNEL, { ordered: true }), next)
-    configureCapture(next.createDataChannel(CAPTURE_CHANNEL, { ordered: true }), next)
+    attachControl(next.createDataChannel(CONTROL_CHANNEL, { ordered: true }), next)
+    attachCapture(next.createDataChannel(CAPTURE_CHANNEL, { ordered: true }), next)
     startPeerStats(next)
   }
 

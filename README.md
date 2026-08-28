@@ -56,6 +56,7 @@ The Worker serves the generated `dist/` site and the `/api/signaling/{rendezvous
 | `bun run lint` | Run Oxlint with the repository rules. |
 | `bun run verify:protocol` | Check shared protocol parity. |
 | `bun run verify:transport` | Check that production source uses direct transport and signaling-only Worker behavior. |
+| `bun run verify:source-layout` | Check that source files remain under their owning domains. |
 | `bun run generate` | Generate the static dashboard. |
 | `bun run deploy` | Generate and deploy the dashboard Worker. |
 
@@ -66,11 +67,15 @@ Use `bun run test`, `bun run typecheck`, `bun run lint`, `bun run verify:protoco
 ```text
 app/
 ├── components/             dashboard UI by domain
-├── composables/            connection and calibration orchestration
+├── composables/             calibration, connection, and UI orchestration
+│   ├── calibration/        remote microphone session ownership
+│   ├── connection/         peer connection ownership
+│   └── ui/                  browser lifecycle helpers
 └── lib/
     ├── audio/              microphone capture and diagnostic analysis
+    │   └── measurement/    marker detection, response analysis, and session policy
     ├── pairing/            browser pairing helpers
-    └── transport/          protocol, signaling, WebRTC, and backpressure
+    └── transport/          control, signaling, WebRTC, and backpressure
 shared/
 ├── types/                  envelope and payload contract
 └── transport/              signaling, capabilities, and capture-stream wire format

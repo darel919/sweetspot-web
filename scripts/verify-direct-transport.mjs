@@ -5,7 +5,7 @@ const webRoot = resolve(import.meta.dirname, '..')
 const androidRoot = resolve(webRoot, '../sweetspot')
 
 const sources = new Map([
-  ['web connection', resolve(webRoot, 'app/composables/useSweetSpotConnection.ts')],
+  ['web connection', resolve(webRoot, 'app/composables/connection/useSweetSpotConnection.ts')],
   ['browser WebRTC transport', resolve(webRoot, 'app/lib/transport/webrtc/peer.ts')],
   ['signaling router', resolve(webRoot, 'worker/index.ts')],
   ['signaling Durable Object', resolve(webRoot, 'worker/signaling.ts')],
@@ -17,7 +17,7 @@ const sources = new Map([
 for (const [name, path] of sources) {
   const source = await readFile(path, 'utf8')
   if (source.includes('/api/room/') || source.includes('RoomDO') || source.includes('MailboxClient')) {
-    throw new Error(`${name} contains the removed relay runtime`)
+    throw new Error(`${name} contains a forbidden production relay path`)
   }
 }
 
@@ -44,7 +44,7 @@ for (const removed of [
 ]) {
   try {
     await access(removed)
-    throw new Error(`obsolete relay file still exists: ${removed}`)
+    throw new Error(`forbidden relay artifact still exists: ${removed}`)
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
   }

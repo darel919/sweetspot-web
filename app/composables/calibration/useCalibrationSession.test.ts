@@ -1,25 +1,27 @@
 import { describe, expect, test } from 'bun:test'
 import { effectScope } from 'vue'
-import type { Envelope, MeasurementContext, MeasurementSweep } from '../../shared/types/protocol'
-import { CALIBRATION_POSITION_TARGETS } from '../../shared/types/protocol'
-import type { CompositeMeasurementAnalysis, MeasurementAnalysis } from '../lib/audio/measurement/response'
-import type { MicCalibrationProfile } from '../lib/audio/mics/types'
-import type { MicrophoneCapture } from '../lib/audio/capture/microphone'
-import type { PcmRecorder, PcmRecording } from '../lib/audio/capture/pcm-recorder'
+import type { Envelope, MeasurementContext, MeasurementSweep } from '../../../shared/types/protocol'
+import { CALIBRATION_POSITION_TARGETS } from '../../../shared/types/protocol'
+import type { CompositeMeasurementAnalysis, MeasurementAnalysis } from '../../lib/audio/measurement/response'
+import type { MicCalibrationProfile } from '../../lib/audio/mics/types'
+import type { MicrophoneCapture } from '../../lib/audio/capture/microphone'
+import type { PcmRecorder, PcmRecording } from '../../lib/audio/capture/pcm-recorder'
 import {
   CALIBRATION_ANALYSIS_REVISION,
   CALIBRATION_SWEEP_REVISION,
   CALIBRATION_WEB_BUILD_SHA,
   createCalibrationCheckpoint,
   type CalibrationCheckpoint,
-} from '../lib/audio/measurement/checkpoint'
-import { createPositionLedger } from '../lib/audio/measurement/position-ledger'
+} from '../../lib/audio/measurement/checkpoint'
+import { createPositionLedger } from '../../lib/audio/measurement/position-ledger'
+import { createMeasurementDiagnostics } from '../../lib/audio/measurement/session-diagnostics'
+import { applyMeasurementSessionResult } from '../../lib/audio/measurement/session-result'
 import {
   useCalibrationSession,
   type CalibrationSessionDependencies,
   type CalibrationSessionOptions,
 } from './useCalibrationSession'
-import { isCalibrationOperationCurrent, isSameMeasurementContext } from '../lib/audio/measurement/session-guard'
+import { isCalibrationOperationCurrent, isSameMeasurementContext } from '../../lib/audio/measurement/session-guard'
 
 const sweep: MeasurementSweep = {
   sweepRevision: 'android-sweep-v3' as const,
@@ -608,5 +610,54 @@ describe('calibration operation fencing', () => {
 
     expect(isSameMeasurementContext(guardContext, guardContext)).toBe(true)
     expect(isSameMeasurementContext(guardContext, retry)).toBe(false)
+  })
+})
+
+describe('measurement session result commits', () => {
+  test('keeps a partial capture in the ledger without treating it as a complete position', () => {
+    const result = composite(profile, 'ok', 'direct_arrival_low_confidence')
+    const commit = applyMeasurementSessionResult({
+      mode: 'measurement',
+      context: guardContext,
+      result,
+      diagnostics: {
+        left: createMeasurementDiagnostics(result.left, 'left', result.detection, null),
+        right: createMeasurementDiagnostics(result.right, 'right', result.detection, null),
+      },
+      failedTakeDiagnostics: [],
+      ledger: createPositionLedger('session-1'),
+      captureMetadata: null,
+      acceptedAt: 1,
+    })
+    if (commit.mode !== 'measurement') throw new Error('Expected a measurement commit.')
+
+    expect(commit.acceptedEvidenceChanged).toBe(true)
+    expect(commit.acceptedPositionCount).toBe(0)
+    expect(commit.failedMeasurementAttemptCount).toBe(1)
+    expect(commit.records).toHaveLength(0)
+  })
+
+  test('builds a targeted validation retry from the failed channel', () => {
+    const context: MeasurementContext = { ...guardContext, phase: 'validation', attemptCount: 2 }
+    const result = composite(profile, 'direct_arrival_low_confidence', 'ok')
+    const commit = applyMeasurementSessionResult({
+      mode: 'validation',
+      context,
+      result,
+      diagnostics: {
+        left: createMeasurementDiagnostics(result.left, 'left', result.detection, null),
+        right: createMeasurementDiagnostics(result.right, 'right', result.detection, null),
+      },
+      failedTakeDiagnostics: [],
+      validationRecords: [],
+    })
+    if (commit.mode !== 'validation') throw new Error('Expected a validation commit.')
+
+    expect(commit.failedChannels).toEqual(['left'])
+    expect(commit.validationRecords).toHaveLength(1)
+    expect(commit.next).toEqual({
+      kind: 'retry',
+      context: { ...context, repairChannel: 'left', attemptIndex: 1 },
+    })
   })
 })

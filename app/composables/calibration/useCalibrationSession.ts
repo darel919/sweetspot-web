@@ -2,37 +2,34 @@ import { computed, onScopeDispose, readonly, ref, shallowRef } from 'vue'
 import type {
   CalibrationProgressStage,
   CalibrationErrorCode,
-  CalibrationSessionOutcome,
   CalibrationPositionId,
   Envelope,
   MeasurementContext,
-  MeasurementDiagnosticsValues,
-  MeasurementCaptureKind,
   MeasurementCaptureMetadata,
   MeasurementResponsePayload,
   MeasurementSweep,
-} from '../../shared/types/protocol'
+} from '../../../shared/types/protocol'
 import {
-  CALIBRATION_ERROR_CODES,
   PROTOCOL_VERSION,
   isCalibrationSessionPositionContinuedPayload,
   isCalibrationSessionEndedPayload,
   isMarkerDiagnosticCaptureKind,
   isMeasurementContext,
   isMeasurementReadyPayload,
-} from '../../shared/types/protocol'
-import { openMicrophone, closeMicrophone, type MicrophoneCapture } from '../lib/audio/capture/microphone'
-import { createPcmRecorder, type CaptureSignalDiagnostics, type PcmRecorder } from '../lib/audio/capture/pcm-recorder'
-import { analyzeInWorker } from '../lib/audio/measurement/worker-client'
+} from '../../../shared/types/protocol'
+import { openMicrophone, closeMicrophone, type MicrophoneCapture } from '../../lib/audio/capture/microphone'
+import { createPcmRecorder, type CaptureSignalDiagnostics, type PcmRecorder } from '../../lib/audio/capture/pcm-recorder'
+import { analyzeInWorker } from '../../lib/audio/measurement/worker-client'
+import { analyzeCalibrationCapture } from './session-capture'
 import {
   aggregateResponse,
   allCaptureQualityPassed,
   type AggregateResponse,
   type MeasurementRecord,
   type RepeatabilitySummary,
-} from '../lib/audio/measurement/aggregation'
-import { evaluateCalibrationBaselineEligibility } from '../lib/audio/measurement/quality'
-import type { MeasurementAnalysis, ResponsePoint } from '../lib/audio/measurement/response'
+} from '../../lib/audio/measurement/aggregation'
+import { evaluateCalibrationBaselineEligibility } from '../../lib/audio/measurement/quality'
+import type { MeasurementAnalysis, ResponsePoint } from '../../lib/audio/measurement/response'
 import {
   createMeasurementPlan,
   createMeasurementPlanForGroups,
@@ -41,23 +38,26 @@ import {
   positionForContext,
   requiresRemoteContinue,
   type ProbePlanKind,
-} from '../lib/audio/measurement/plan'
+} from '../../lib/audio/measurement/plan'
 import {
-  reconcileFailedTakeDiagnostics,
   summarizeMarkerProbe,
   type FailedTakeDiagnostic,
   type MarkerProbeSummary,
-} from '../lib/audio/measurement/failure-diagnostics'
+} from '../../lib/audio/measurement/failure-diagnostics'
 import {
-  appendCompositeCapture,
   completeAcceptedPositionCount,
   createPositionLedger,
   projectAcceptedRecords,
   projectPhysicalPositionLedger,
   type PositionLedger,
-} from '../lib/audio/measurement/position-ledger'
-import { decideNextCapture, type ConvergenceAssessment } from '../lib/audio/measurement/adaptive-planner'
-import { validationRepairChannel } from '../lib/audio/measurement/validation-retry'
+} from '../../lib/audio/measurement/position-ledger'
+import { decideNextCapture } from '../../lib/audio/measurement/adaptive-planner'
+import { assessMeasurementConvergence } from '../../lib/audio/measurement/session-convergence'
+import {
+  applyMeasurementSessionResult,
+  countFailedMeasurementAttempts,
+  type CalibrationSessionMode,
+} from '../../lib/audio/measurement/session-result'
 import {
   CALIBRATION_ANALYSIS_REVISION,
   CALIBRATION_SWEEP_REVISION,
@@ -69,24 +69,22 @@ import {
   saveCalibrationCheckpoint,
   type CalibrationCheckpoint,
   type CalibrationCheckpointIdentity,
-} from '../lib/audio/measurement/checkpoint'
-import { sweepSampleParts } from '../lib/audio/sweep-reference'
-import { discoverMicCalibrationProfiles } from '../lib/audio/mics/registry'
-import type { MicCalibrationProfile } from '../lib/audio/mics/types'
+} from '../../lib/audio/measurement/checkpoint'
+import { sweepSampleParts } from '../../lib/audio/sweep-reference'
+import { discoverMicCalibrationProfiles } from '../../lib/audio/mics/registry'
+import type { MicCalibrationProfile } from '../../lib/audio/mics/types'
 import {
   isCalibrationOperationCurrent,
   isSameMeasurementContext,
-} from '../lib/audio/measurement/session-guard'
-import { hasNewAcceptedEvidence } from '../lib/audio/measurement/response-graph'
-import { assessCaptureLevelPreflight } from '../lib/audio/measurement/acoustic-preflight'
-import { combineChannelAggregates } from '../lib/audio/correction/optimizer'
+} from '../../lib/audio/measurement/session-guard'
+import { assessCaptureLevelPreflight } from '../../lib/audio/measurement/acoustic-preflight'
+import { combineChannelAggregates } from '../../lib/audio/correction/optimizer'
 import {
   createCalibrationDebugBundle,
   createCalibrationDebugCapture,
   downloadCalibrationDebugBundle,
   type CalibrationDebugCapture,
-} from '../lib/audio/measurement/debug-bundle'
-import { compactMeasurementDiagnostics } from '../lib/audio/measurement/compact-diagnostics'
+} from '../../lib/audio/measurement/debug-bundle'
 import {
   createCalibrationAbortCommand,
   evaluateCalibrationAbortRecovery,
@@ -99,109 +97,40 @@ import {
   type CalibrationAbortRecoveryFailure,
   type CalibrationAbortRecoveryObservation,
   type CalibrationAbortRecoverySnapshot,
-} from '../lib/audio/correction/calibration-recovery'
+} from '../../lib/audio/correction/calibration-recovery'
+import {
+  analysisErrorCode,
+  errorCode,
+  isCalibrationActiveStage,
+  isMarkerProbePlan,
+  isUserCancellationCode,
+  newSessionId,
+  type CalibrationSessionConnection,
+  type CalibrationSessionDependencies,
+  type CalibrationSessionOptions,
+  type CalibrationTakeDiagnostics,
+  type CalibrationStage,
+} from './session-types'
+import {
+  finalOutcomeMessage,
+  measurementFailureMessage,
+  spatialConsistencyFailureMessage,
+} from '../../lib/audio/measurement/session-copy'
 
-type Connection = {
-  send: (type: string, payload?: unknown) => string
-  onMessage: (handler: (env: Envelope) => void) => () => void
-  isDeviceOnline: () => boolean
-}
-
-export interface CalibrationSessionDependencies {
-  openMicrophone: typeof openMicrophone
-  closeMicrophone: typeof closeMicrophone
-  createPcmRecorder: typeof createPcmRecorder
-  analyzeInWorker: typeof analyzeInWorker
-  discoverMicCalibrationProfiles: typeof discoverMicCalibrationProfiles
-  loadCalibrationCheckpoint: typeof loadCalibrationCheckpoint
-  saveCalibrationCheckpoint: typeof saveCalibrationCheckpoint
-  clearCalibrationCheckpoint: typeof clearCalibrationCheckpoint
-  downloadCalibrationDebugBundle: typeof downloadCalibrationDebugBundle
-}
-
-export interface CalibrationSessionOptions {
-  getDeviceIdentity?: () => { id: string; appVersion: string; buildId: string } | null
-  debugCaptureExport?: boolean
-  dependencies?: Partial<CalibrationSessionDependencies>
-}
+export { isCalibrationActiveStage }
+export type {
+  CalibrationSessionConnection,
+  CalibrationSessionDependencies,
+  CalibrationSessionOptions,
+  CalibrationStage,
+  CalibrationTakeDiagnostics,
+} from './session-types'
 
 const ABORT_RECOVERY_POLL_INTERVAL_MS = 400
 // The Android sweep includes post-roll and measurement.finished is emitted only
 // after AudioTrack consumed it. Keep a small drain margin for the worklet.
 const CAPTURE_TAIL_AFTER_PLAYBACK_MS = 64
-const MAX_MEDIAN_CORRECTION_CHANGE_DB = 1.5
-const MAX_P95_CORRECTION_CHANGE_DB = 3
-
-export type CalibrationStage =
-  | 'idle'
-  | 'requesting-microphone'
-  | 'preparing'
-  | 'loudness'
-  | 'position-pause'
-  | 'recording'
-  | 'analyzing'
-  | 'ending'
-  | 'complete'
-  | 'error'
-
-export const CALIBRATION_ACTIVE_STAGES: readonly CalibrationStage[] = [
-  'requesting-microphone',
-  'preparing',
-  'loudness',
-  'position-pause',
-  'recording',
-  'analyzing',
-  'ending',
-]
-
-export interface CalibrationTakeDiagnostics {
-  context: MeasurementContext
-  capture: CaptureSignalDiagnostics
-  left: MeasurementDiagnosticsValues
-  right: MeasurementDiagnosticsValues
-}
-
-export function isCalibrationActiveStage(stage: CalibrationStage): boolean {
-  return CALIBRATION_ACTIVE_STAGES.includes(stage)
-}
-
-function newSessionId(): string {
-  const random = globalThis.crypto?.randomUUID?.()
-  return `cal_${random ?? `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`}`
-}
-
-function analysisErrorCode(status: MeasurementAnalysis['status']): CalibrationErrorCode {
-  if (status === 'capture_clipped') return 'capture_clipped'
-
-  if (status === 'direct_arrival_low_confidence') return 'direct_arrival_low_confidence'
-  if (status === 'impulse_not_found') return 'impulse_not_found'
-  if (status === 'response_not_generated') return 'response_not_generated'
-  if (status === 'sync_marker_not_found') return 'sync_marker_not_found'
-  if (status === 'clock_drift_unreliable') return 'clock_drift_unreliable'
-  if (status === 'capture_too_short') return 'capture_too_short'
-  return 'signal_too_low'
-}
-
-function errorCode(value: unknown): CalibrationErrorCode {
-  for (const code of CALIBRATION_ERROR_CODES) {
-    if (value === code) return code
-  }
-  return 'invalid_session'
-}
-
-function isUserCancellationCode(code: CalibrationErrorCode): boolean {
-  return code === 'calibration_aborted' || code === 'calibration_ui_closed'
-}
-
-function isMarkerProbePlan(kind: ProbePlanKind | null): boolean {
-  if (kind === null) return false
-  const captureKind: MeasurementCaptureKind = kind === 'transfer' || kind === 'routing'
-    ? 'position-composite'
-    : kind
-  return isMarkerDiagnosticCaptureKind(captureKind)
-}
-
-export function useCalibrationSession(connection: Connection, options: CalibrationSessionOptions = {}) {
+export function useCalibrationSession(connection: CalibrationSessionConnection, options: CalibrationSessionOptions = {}) {
   const dependencies: CalibrationSessionDependencies = {
     openMicrophone,
     closeMicrophone,
@@ -266,7 +195,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   let plan: MeasurementContext[] = []
   let planIndex = 0
   const positionLedger = shallowRef<PositionLedger | null>(null)
-  let sessionMode: 'measurement' | 'validation' | 'probe' = 'measurement'
+  let sessionMode: CalibrationSessionMode = 'measurement'
   let probePlanKind: ProbePlanKind | null = null
   const activeContext = shallowRef<MeasurementContext | null>(null)
   let preparedContext: MeasurementContext | null = null
@@ -287,21 +216,6 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   const debugCaptures: CalibrationDebugCapture[] = []
   let calibrationId: string | null = null
   const failedMeasurementAttemptCount = ref(0)
-
-  const countFailedMeasurementAttempts = (ledger: PositionLedger | null): number => ledger?.captures.filter((capture) => {
-    if (capture.context.phase !== 'measurement') return false
-    const channels: readonly ('left' | 'right')[] = capture.context.repairChannel === 'left' || capture.context.repairChannel === 'right'
-      ? [capture.context.repairChannel]
-      : ['left', 'right']
-    return channels.some((channel) => capture[channel].kind === 'rejected')
-  }).length ?? 0
-
-  const acceptedEvidenceKey = (ledger: PositionLedger): string => ledger.captures
-    .flatMap((capture) => [capture.left, capture.right])
-    .filter((submeasurement) => submeasurement.kind === 'accepted')
-    .map((submeasurement) => `${submeasurement.captureKey}:${submeasurement.channel}`)
-    .sort()
-    .join('|')
 
   const completeAcceptedMeasurementPositionCount = computed(() => positionLedger.value ? completeAcceptedPositionCount(positionLedger.value) : 0)
   const measurementBaselineEligibility = computed(() => evaluateCalibrationBaselineEligibility({
@@ -608,66 +522,13 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     validationAggregateRight.value = aggregateResponse(validationRecords.value, 'right')
   }
 
-  function assessConvergence(): ConvergenceAssessment | null {
+  function assessConvergence() {
     if (!positionLedger.value || sessionMode !== 'measurement') return null
-    const physical = projectPhysicalPositionLedger(positionLedger.value)
-    if (physical.positions.filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted').length < 3) {
-      return null
-    }
-    const spread = aggregateBoth.value?.spreadDb ?? []
-    const currentPoints = aggregateBoth.value?.points ?? []
-    if (spread.length === 0) {
-      return {
-        sufficient: false,
-        medianCorrectionChangeDb: null,
-        p95CorrectionChangeDb: null,
-        medianSpatialSpreadDb: null,
-        lowFrequencySpreadDb: null,
-        highConfidenceBandFraction: 0,
-      }
-    }
-    const sorted = spread.map((point) => point.magnitudeDb).sort((left, right) => left - right)
-    const percentile = (fraction: number): number | null => {
-      const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)))
-      return sorted[index] ?? null
-    }
-    const lowFrequency = spread.filter((point) => point.frequencyHz <= 200).map((point) => point.magnitudeDb)
-    const lowSorted = lowFrequency.sort((left, right) => left - right)
-    const lowMedian = lowSorted.length === 0 ? null : lowSorted[Math.floor(lowSorted.length / 2)] ?? null
-    const medianSpread = percentile(0.5)
-    const p95Spread = percentile(0.95)
-    const correctionChanges = previousConvergencePoints === null
-      ? []
-      : currentPoints.flatMap((point) => {
-        const previous = previousConvergencePoints?.find((candidate) => Math.abs(candidate.frequencyHz - point.frequencyHz) < 0.001)
-        return previous ? [Math.abs(point.magnitudeDb - previous.magnitudeDb)] : []
-      }).sort((left, right) => left - right)
-    const correctionPercentile = (fraction: number): number | null => {
-      if (correctionChanges.length === 0) return null
-      const index = Math.min(correctionChanges.length - 1, Math.max(0, Math.round((correctionChanges.length - 1) * fraction)))
-      return correctionChanges[index] ?? null
-    }
-    const medianCorrectionChangeDb = correctionPercentile(0.5)
-    const p95CorrectionChangeDb = correctionPercentile(0.95)
-    const highConfidenceBandFraction = spread.filter((point) => point.magnitudeDb <= 3).length / spread.length
-    const correctionStable = medianCorrectionChangeDb !== null && (
-      medianCorrectionChangeDb <= MAX_MEDIAN_CORRECTION_CHANGE_DB
-      && (p95CorrectionChangeDb ?? Number.POSITIVE_INFINITY) <= MAX_P95_CORRECTION_CHANGE_DB
-    )
-    return {
-      sufficient: medianSpread !== null
-        && p95Spread !== null
-        && (lowMedian === null || lowMedian <= 4)
-        && medianSpread <= 3
-        && p95Spread <= 6
-        && correctionStable
-        && highConfidenceBandFraction >= 0.5,
-      medianCorrectionChangeDb,
-      p95CorrectionChangeDb,
-      medianSpatialSpreadDb: medianSpread,
-      lowFrequencySpreadDb: lowMedian,
-      highConfidenceBandFraction,
-    }
+    return assessMeasurementConvergence({
+      ledger: positionLedger.value,
+      aggregate: aggregateBoth.value,
+      previousPoints: previousConvergencePoints,
+    })
   }
 
   function contextForAdaptiveDecision(decision: Extract<ReturnType<typeof decideNextCapture>, { kind: 'capture' }>): MeasurementContext {
@@ -731,17 +592,6 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     const right = responseChannel(aggregateRight.value)
     if (!left && !right) return
     connection.send('measurement.response', { sessionId, current, total, left, right })
-  }
-
-  function spatialConsistencyFailureMessage(groups: readonly RepeatabilitySummary[]): string {
-    if (groups.length === 0) return ''
-    return groups.map((group) => {
-      if (group.failureReason === 'capture_rejected') return `${group.positionId} ${group.channel} channel was not usable`
-      const medianSpread = group.medianSpreadDb === null ? 'unknown' : `${group.medianSpreadDb.toFixed(1)} dB`
-      const maxSpread = group.maxSpreadDb === null ? 'unknown' : `${group.maxSpreadDb.toFixed(1)} dB`
-      const withinTwoDb = group.withinTwoDbFraction === null ? 'unknown' : `${Math.round(group.withinTwoDbFraction * 100)}%`
-      return `${group.positionId} ${group.channel} channel (median ${medianSpread}, max ${maxSpread}, ${withinTwoDb} within 2 dB)`
-    }).join('; ')
   }
 
   function boundedAbortMessage(text: string): string {
@@ -1032,7 +882,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
   }
 
   async function startMode(
-    mode: 'measurement' | 'validation' | 'probe',
+    mode: CalibrationSessionMode,
     validationPositionIds: readonly CalibrationPositionId[] | null = null,
     candidateId: string | null = null,
     nextProbePlanKind: ProbePlanKind | null = null,
@@ -1357,7 +1207,24 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         : -1
       const analysisController = new AbortController()
       analysisAbortController = analysisController
-      const result = await dependencies.analyzeInWorker(recording.samples, sampleRate, currentSweep, currentProfile, analysisController.signal)
+      const captureAnalysis = await analyzeCalibrationCapture({
+        recording,
+        sampleRate,
+        sweep: currentSweep,
+        profile: currentProfile,
+        context: currentContext,
+        captureMetadata: captureMetadata.value,
+        repairChannel: currentContext.repairChannel,
+        analyzeInWorker: dependencies.analyzeInWorker,
+        signal: analysisController.signal,
+      })
+      const {
+        result,
+        leftDiagnostics,
+        rightDiagnostics,
+        compactLeftDiagnostics,
+        compactRightDiagnostics,
+      } = captureAnalysis
       if (analysisAbortController === analysisController) analysisAbortController = null
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       if (debugCaptureIndex >= 0) {
@@ -1377,94 +1244,6 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
           positionLedger: positionLedger.value ? projectPhysicalPositionLedger(positionLedger.value) : null,
         }
       }
-      const diagnosticsFor = (child: MeasurementAnalysis, channel: 'left' | 'right'): MeasurementDiagnosticsValues => ({
-        channel,
-        analysisStatus: child.status,
-        failureReason: child.diagnostics.failureReason,
-        signalRms: child.diagnostics.signalRms,
-        signalPeak: child.diagnostics.signalPeak,
-        snrEstimateDb: Number.isFinite(child.diagnostics.snrEstimateDb ?? Number.NaN) ? child.diagnostics.snrEstimateDb : null,
-        detectionOffsetMs: Number.isFinite(child.diagnostics.detectionOffsetMs ?? Number.NaN) ? child.diagnostics.detectionOffsetMs : null,
-        envelopeOnlyOffsetMs: Number.isFinite(child.diagnostics.envelopeOnlyOffsetMs ?? Number.NaN) ? child.diagnostics.envelopeOnlyOffsetMs : null,
-        startMarkerSample: result.detection.leadingMarkerSample,
-        endMarkerSample: result.detection.trailingMarkerSample,
-        expectedMarkerSeparationSamples: result.detection.expectedMarkerSeparationSamples,
-        observedMarkerSeparationSamples: result.detection.observedMarkerSeparationSamples,
-        syncMarkerConfidence: child.diagnostics.rawLeadingMarkerConfidence,
-        endingMarkerConfidence: child.diagnostics.endingMarkerConfidence,
-        rawLeadingMarkerConfidence: child.diagnostics.rawLeadingMarkerConfidence,
-        rawTrailingMarkerConfidence: child.diagnostics.rawTrailingMarkerConfidence,
-        bestLeadingMarkerSample: child.diagnostics.bestLeadingMarkerSample,
-        bestTrailingMarkerSample: child.diagnostics.bestTrailingMarkerSample,
-        leadingMarkerCandidates: child.diagnostics.leadingMarkerCandidates,
-        trailingMarkerCandidates: child.diagnostics.trailingMarkerCandidates,
-        markerPairCandidates: child.diagnostics.markerPairCandidates,
-        leadingBestCorrelation: child.diagnostics.leadingBestCorrelation,
-        leadingSecondCorrelation: child.diagnostics.leadingSecondCorrelation,
-        leadingCorrelationMargin: child.diagnostics.leadingCorrelationMargin,
-        trailingBestCorrelation: child.diagnostics.trailingBestCorrelation,
-        trailingSecondCorrelation: child.diagnostics.trailingSecondCorrelation,
-        trailingCorrelationMargin: child.diagnostics.trailingCorrelationMargin,
-        markerPairScore: child.diagnostics.markerPairScore,
-        secondMarkerPairScore: child.diagnostics.secondMarkerPairScore,
-        markerPairScoreMargin: child.diagnostics.markerPairScoreMargin,
-        markerPairScoreRatio: child.diagnostics.markerPairScoreRatio,
-        markerSeparationError: child.diagnostics.markerSeparationError,
-        markerTimingAgreement: child.diagnostics.markerTimingAgreement,
-        markerSeparationPpm: child.diagnostics.markerSeparationPpm,
-        syncMarkerFailureReason: child.diagnostics.syncMarkerFailureReason,
-        clockDriftPpm: Number.isFinite(child.diagnostics.clockDriftPpm ?? Number.NaN) ? child.diagnostics.clockDriftPpm : null,
-        clipped: child.diagnostics.clipped,
-        clippedSamples: child.diagnostics.clippedSamples,
-        directArrivalMs: child.room?.directArrivalMs ?? null,
-        directPeak: child.diagnostics.directPeak ?? child.impulse?.directArrival.directPeak ?? null,
-        deconvolvedNoiseFloorRms: child.diagnostics.deconvolvedNoiseFloorRms ?? child.impulse?.directArrival.noiseFloorRms ?? null,
-        directPeakToNoiseDb: child.diagnostics.directPeakToNoiseDb ?? child.impulse?.directArrival.peakToNoiseDb ?? null,
-        directArrivalAcceptanceThreshold: child.diagnostics.directArrivalAcceptanceThreshold ?? child.impulse?.directArrival.acceptanceThreshold ?? null,
-        directArrivalCandidateSample: child.diagnostics.directArrivalCandidateSample ?? child.impulse?.directArrival.candidateArrivalIndex ?? null,
-        directArrivalAcceptedSample: child.diagnostics.directArrivalAcceptedSample ?? child.impulse?.directArrival.acceptedArrivalIndex ?? null,
-        directArrivalRejectionReason: child.diagnostics.directArrivalRejectionReason ?? child.impulse?.directArrival.rejectionReason ?? null,
-        directSupportWindowRms: child.diagnostics.directSupportWindowRms ?? child.impulse?.directArrival.supportWindowRms ?? null,
-        directSupportWindowThreshold: child.diagnostics.directSupportWindowThreshold ?? child.impulse?.directArrival.supportWindowThreshold ?? null,
-        directSupportSampleCount: child.diagnostics.directSupportSampleCount ?? child.impulse?.directArrival.supportSampleCount ?? null,
-        bestLaterReflectionSample: child.diagnostics.bestLaterReflectionSample ?? child.impulse?.directArrival.laterReflectionIndex ?? null,
-        bestLaterReflectionPeak: child.diagnostics.bestLaterReflectionPeak ?? child.impulse?.directArrival.laterReflectionPeak ?? null,
-        candidateAbsoluteTimeMs: child.diagnostics.candidateAbsoluteTimeMs ?? child.impulse?.directArrival.candidateAbsoluteTimeMs ?? null,
-        earlySearchWindowStartSample: child.diagnostics.earlySearchWindowStartSample ?? child.impulse?.directArrival.earlySearchWindowStartSample ?? null,
-        earlySearchWindowEndSample: child.diagnostics.earlySearchWindowEndSample ?? child.impulse?.directArrival.earlySearchWindowEndSample ?? null,
-        topEarlyImpulsePeaks: child.diagnostics.topEarlyImpulsePeaks ?? child.impulse?.directArrival.topEarlyImpulsePeaks,
-        strongestLaterReflectionDelayMs: child.diagnostics.strongestLaterReflectionDelayMs ?? child.impulse?.directArrival.strongestLaterReflectionDelayMs ?? null,
-        localSupportWindowStartSample: child.diagnostics.localSupportWindowStartSample ?? child.impulse?.directArrival.localSupportWindowStartSample ?? null,
-        localSupportWindowEndSample: child.diagnostics.localSupportWindowEndSample ?? child.impulse?.directArrival.localSupportWindowEndSample ?? null,
-        localSupportWindowMax: child.diagnostics.localSupportWindowMax ?? child.impulse?.directArrival.localSupportWindowMax ?? null,
-        localSupportSampleCount: child.diagnostics.localSupportSampleCount ?? child.impulse?.directArrival.localSupportSampleCount ?? null,
-        directToLateDb: child.room?.directToLateDb ?? null,
-        c50Db: child.room?.c50Db ?? null,
-        c80Db: child.room?.c80Db ?? null,
-        edtMs: child.room?.edtMs ?? null,
-        t20Ms: child.room?.t20Ms ?? null,
-        t30Ms: child.room?.t30Ms ?? null,
-        earlyReflections: child.room?.earlyReflections.length ?? 0,
-        decayConfidence: child.room?.decayConfidence ?? 'low',
-        ...(captureMetadata.value ? { captureMetadata: captureMetadata.value } : {}),
-      })
-      const suppressRepairChannelDiagnostics = (diagnostics: MeasurementDiagnosticsValues, channel: 'left' | 'right'): MeasurementDiagnosticsValues => {
-        const repairChannel = currentContext.repairChannel
-        if ((repairChannel !== 'left' && repairChannel !== 'right') || repairChannel === channel) return diagnostics
-        return {
-          ...diagnostics,
-          analysisStatus: 'not_measured',
-          failureReason: null,
-          syncMarkerFailureReason: null,
-          snrEstimateDb: null,
-          directArrivalMs: null,
-          directArrivalRejectionReason: null,
-        }
-      }
-      const leftDiagnostics = suppressRepairChannelDiagnostics(diagnosticsFor(result.left, 'left'), 'left')
-      const rightDiagnostics = suppressRepairChannelDiagnostics(diagnosticsFor(result.right, 'right'), 'right')
-      const compactLeftDiagnostics = compactMeasurementDiagnostics(leftDiagnostics)
-      const compactRightDiagnostics = compactMeasurementDiagnostics(rightDiagnostics)
       takeDiagnostics.value = [...takeDiagnostics.value, {
         context: currentContext,
         capture: recording.diagnostics,
@@ -1472,9 +1251,6 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         right: rightDiagnostics,
       }]
       const currentPositionCount = currentContext.positionCount
-      const requiredChannels: readonly ('left' | 'right')[] = currentContext.repairChannel === 'left' || currentContext.repairChannel === 'right'
-        ? [currentContext.repairChannel]
-        : ['left', 'right']
       connection.send('measurement.diagnostics', {
         sessionId: operationSessionId,
         context: currentContext,
@@ -1490,51 +1266,34 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         diagnostics: compactRightDiagnostics,
       })
 
-      const acceptedRecords = (child: MeasurementAnalysis, channel: 'left' | 'right'): MeasurementRecord[] =>
-        currentContext.captureKind === 'position-composite' && child.status === 'ok' && child.correctedPoints.length > 1
-          ? [{ context: currentContext, channel, analysis: child }]
-          : []
-      failedTakeDiagnostics.value = reconcileFailedTakeDiagnostics(
-        failedTakeDiagnostics.value,
-        currentContext,
-        requiredChannels.map((channel) => ({
-          channel,
-          failed: result[channel].status !== 'ok',
-          diagnostics: channel === 'left' ? leftDiagnostics : rightDiagnostics,
-        })),
-      )
+      const sessionResultInput = {
+        context: currentContext,
+        result,
+        diagnostics: { left: leftDiagnostics, right: rightDiagnostics },
+        failedTakeDiagnostics: failedTakeDiagnostics.value,
+      }
 
       if (sessionMode === 'validation') {
-        const nextRecords = requiredChannels.flatMap((channel) => acceptedRecords(result[channel], channel))
-        const channelsToReplace = new Set(requiredChannels)
-        validationRecords.value = [
-          ...validationRecords.value.filter((record) =>
-            record.context.positionId !== currentContext.positionId || !channelsToReplace.has(record.channel)),
-          ...nextRecords,
-        ]
-        const analysisChannel = requiredChannels.find((channel) => result[channel].status === 'ok') ?? requiredChannels[0]
-        validationAnalysis.value = analysisChannel === 'left' ? result.left : result.right
+        const commit = applyMeasurementSessionResult({
+          ...sessionResultInput,
+          mode: 'validation',
+          validationRecords: validationRecords.value,
+        })
+        failedTakeDiagnostics.value = commit.failedTakeDiagnostics
+        validationRecords.value = commit.validationRecords
+        validationAnalysis.value = commit.analysis
         rebuildValidationAggregates()
-        const failedChannels = requiredChannels.filter((channel) => result[channel].status !== 'ok')
-        const hasRequiredChannels = failedChannels.length === 0
-        if (!hasRequiredChannels && currentContext.attemptIndex + 1 < currentContext.attemptCount) {
-          const failedChannel = validationRepairChannel(failedChannels)
-          if (!failedChannel) return
-          const confirmation = {
-            ...currentContext,
-            repairChannel: failedChannel,
-            attemptIndex: currentContext.attemptIndex + 1,
-          }
-          plan[planIndex] = confirmation
-          activeContext.value = confirmation
+        if (commit.next.kind === 'retry') {
+          plan[planIndex] = commit.next.context
+          activeContext.value = commit.next.context
           message.value = `Validation retry for the ${currentContext.positionId} position. Keep the phone still.`
-          sendPrepare(confirmation)
+          sendPrepare(commit.next.context)
           return
         }
-        if (!hasRequiredChannels) {
-          const failedChannel = failedChannels[0]
-          if (!failedChannel) return
-          await fail(analysisErrorCode(result[failedChannel].status), measurementFailureMessage(result[failedChannel]))
+        if (commit.next.kind === 'blocked') return
+        if (commit.next.kind === 'failed') {
+          const failedAnalysis = result[commit.next.channel]
+          await fail(analysisErrorCode(failedAnalysis.status), measurementFailureMessage(failedAnalysis))
           return
         }
         progress.value = { current: Math.min(planIndex + 1, plan.length), total: plan.length }
@@ -1543,14 +1302,19 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       }
 
       if (sessionMode === 'probe') {
-        records.value = [...records.value, ...acceptedRecords(result.left, 'left'), ...acceptedRecords(result.right, 'right')]
+        const commit = applyMeasurementSessionResult({
+          ...sessionResultInput,
+          mode: 'probe',
+          records: records.value,
+        })
+        failedTakeDiagnostics.value = commit.failedTakeDiagnostics
+        records.value = commit.records
         rebuildAggregates()
-        if (result.status !== 'ok' && currentContext.attemptIndex + 1 < currentContext.attemptCount) {
-          const retry = { ...currentContext, attemptIndex: currentContext.attemptIndex + 1 }
-          plan[planIndex] = retry
-          activeContext.value = retry
+        if (commit.next.kind === 'retry') {
+          plan[planIndex] = commit.next.context
+          activeContext.value = commit.next.context
           message.value = 'Repeating this position. The previous reading was not clear enough.'
-          sendPrepare(retry)
+          sendPrepare(commit.next.context)
           return
         }
         progress.value = { current: progress.value.current + 1, total: progress.value.total }
@@ -1558,25 +1322,22 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         return
       }
       if (!positionLedger.value) throw new Error('Calibration position ledger is unavailable.')
-      const acceptedEvidenceBefore = acceptedEvidenceKey(positionLedger.value)
       const previousAggregatePoints = aggregateBoth.value?.points ?? null
-      positionLedger.value = appendCompositeCapture(positionLedger.value, {
-        context: currentContext,
-        analysis: result,
+      const commit = applyMeasurementSessionResult({
+        ...sessionResultInput,
+        mode: 'measurement',
+        ledger: positionLedger.value,
         captureMetadata: captureMetadata.value,
         acceptedAt: Date.now(),
       })
-      failedMeasurementAttemptCount.value = countFailedMeasurementAttempts(positionLedger.value)
-      const acceptedRecordsInLedger = projectAcceptedRecords(positionLedger.value)
-      const acceptedEvidenceAfter = acceptedEvidenceKey(positionLedger.value)
-      const acceptedEvidenceChanged = hasNewAcceptedEvidence(acceptedEvidenceBefore, acceptedEvidenceAfter)
-      records.value = acceptedRecordsInLedger
-      const projected = projectPhysicalPositionLedger(positionLedger.value)
-      const acceptedPositionTotal = projected.positions.filter((position) => position.left.kind === 'accepted' && position.right.kind === 'accepted').length
-      if (acceptedEvidenceChanged) previousConvergencePoints = previousAggregatePoints
+      failedTakeDiagnostics.value = commit.failedTakeDiagnostics
+      positionLedger.value = commit.ledger
+      failedMeasurementAttemptCount.value = commit.failedMeasurementAttemptCount
+      records.value = commit.records
+      if (commit.acceptedEvidenceChanged) previousConvergencePoints = previousAggregatePoints
       persistPositionCheckpoint()
-      analysis.value = result.left.status === 'ok' ? result.left : result.right
-      progress.value = { current: acceptedPositionTotal, total: Math.max(progress.value.total, currentPositionCount) }
+      analysis.value = commit.analysis
+      progress.value = { current: commit.acceptedPositionCount, total: Math.max(progress.value.total, currentPositionCount) }
       if (result.status !== 'ok') {
         message.value = result.status === 'partial' && (currentContext.repairChannel === 'left' || currentContext.repairChannel === 'right')
           ? `The ${currentContext.repairChannel} channel was repaired. Continuing calibration.`
@@ -1585,7 +1346,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
             : measurementFailureMessage(currentContext.repairChannel === 'left' ? result.left : result.right)
         sendProgress('preparing', message.value)
       }
-      advanceAfterCapture(currentContext, acceptedEvidenceChanged)
+      advanceAfterCapture(currentContext, commit.acceptedEvidenceChanged)
     } catch (error: unknown) {
       if (!isCurrentOperation(operationGeneration, operationSessionId) || stage.value !== 'analyzing') return
       const debugCapture = debugCaptures.at(-1)
@@ -1598,49 +1359,6 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       }
       await fail('response_not_generated', error instanceof Error ? error.message : 'Measurement analysis failed.')
     }
-  }
-
-  function measurementFailureMessage(result: MeasurementAnalysis): string {
-    switch (result.diagnostics.syncMarkerFailureReason) {
-      case 'leading_marker_weak':
-        return 'The start marker was too weak to identify reliably. Retry this position without moving the phone.'
-      case 'trailing_marker_weak':
-        return 'The end marker was too weak to identify reliably. Retry this position without moving the phone.'
-      case 'marker_pair_low_confidence':
-        return 'The marker pair confidence was too low to trust. Retry this position without moving the phone.'
-      case 'marker_pair_ambiguous':
-        return 'Multiple marker pairs looked plausible, so the timing could not be trusted. Retry this position without moving the phone.'
-      case 'marker_pair_bad_timing':
-        return 'Marker peaks were found, but their separation did not match the known TV signal timing. Retry this position without moving the phone.'
-    }
-    if (result.status === 'capture_clipped') {
-      return 'Capture rejected because the microphone clipped. Keep the phone still and lower background noise; the TV volume does not need to be raised.'
-    }
-    if (result.status === 'signal_too_low') {
-      const snr = result.diagnostics.snrEstimateDb
-      return snr != null && Number.isFinite(snr)
-        ? `Capture rejected because it was too noisy (estimated SNR ${snr.toFixed(1)} dB). Keep the phone still and reduce background noise; do not raise the TV volume just to chase a higher peak.`
-        : 'Capture rejected because the sweep signal was too weak or too noisy. Keep the phone still and reduce background noise; do not raise the TV volume unless it is genuinely inaudible.'
-    }
-    if (result.status === 'capture_too_short') {
-      return 'Capture rejected because the recording ended before the full sweep. Keep the phone still until the sweep finishes.'
-    }
-    if (result.status === 'sync_marker_not_found') {
-      return 'Capture rejected because the known synchronization marker was not found with sufficient confidence. Keep the phone still and retry.'
-    }
-    if (result.status === 'clock_drift_unreliable') {
-      return 'Capture rejected because the TV/browser clock relationship was unreliable. Keep the phone still and retry.'
-    }
-    if (result.status === 'direct_arrival_low_confidence' || result.status === 'impulse_not_found') {
-      const ratio = result.diagnostics.directPeakToNoiseDb
-      return ratio == null
-        ? 'Capture synchronized, but the direct acoustic arrival was too weak to trust. Move the phone closer, reduce background noise, and retry.'
-        : `Capture synchronized, but the direct acoustic arrival was too weak to trust (peak/noise ${ratio.toFixed(1)} dB). Move the phone closer or reduce background noise, then retry.`
-    }
-    if (result.status === 'response_not_generated') {
-      return 'The synchronized capture did not produce a usable frequency response. Keep the phone still and retry.'
-    }
-    return 'Capture rejected because the sweep was not detected. Keep the phone still and try again.'
   }
 
   async function startLoudnessPreflightCapture(): Promise<void> {
@@ -1707,42 +1425,6 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     if (stage.value !== 'position-pause' || !preparedContext) return
     clearPositionKeepAlive()
     void startTake(preparedContext)
-  }
-
-  function finalOutcomeMessage(
-    outcome: CalibrationSessionOutcome,
-    mode: 'measurement' | 'validation' | 'probe',
-    hadAnalysis: boolean,
-    endedProbePlanKind: ProbePlanKind | null,
-    failedMarkerProbePositions: readonly CalibrationPositionId[],
-  ): string {
-    if (outcome === 'cancelled') return 'Calibration cancelled.'
-    if (outcome === 'error') return 'Calibration ended with an error. Review the diagnostics before retrying.'
-    if (mode === 'measurement' && outcome === 'sufficient'
-      && measurementQualityPassed.value && convergenceOutcome.value === 'sufficient') {
-      return 'Advanced measurement complete. Review the response and room metrics below.'
-    }
-    if (outcome === 'bounded') {
-      return 'Measurement finished, but convergence was not reached. The result is inconclusive and no correction was staged.'
-    }
-    if (outcome === 'insufficient') {
-      return 'Measurement finished without enough usable evidence. No correction was generated.'
-    }
-    if (mode === 'validation') return 'Validation complete. Compare the measured result with the original response.'
-    if (mode === 'probe' && isMarkerProbePlan(endedProbePlanKind)) {
-      return failedMarkerProbePositions.length > 0
-        ? `Diagnostic marker probe complete with ${failedMarkerProbePositions.length} failed physical position${failedMarkerProbePositions.length === 1 ? '' : 's'}: ${failedMarkerProbePositions.map((position) => `${position} position`).join(', ')}.`
-        : 'Diagnostic marker probe complete. Review the marker timing diagnostics before changing the curve.'
-    }
-    if (mode === 'probe') {
-      return probeCaptureQualityPassed.value
-        ? 'Diagnostic probe complete. Export the captured response before changing the curve.'
-        : `Diagnostic probe capture quality is inconclusive at ${spatialConsistencyFailureMessage(probeFailedRepeatabilityGroups.value)}.`
-    }
-    if (hadAnalysis && failedMeasurementAttemptCount.value > 0) {
-      return `Calibration needs review. ${failedMeasurementAttemptCount.value} capture attempt${failedMeasurementAttemptCount.value === 1 ? '' : 's'} failed before a retry.`
-    }
-    return 'Calibration failed. Accepted position evidence was incomplete.'
   }
 
   function finishCancelled(text = 'Calibration cancelled.', sendAbort = false) {
@@ -1879,13 +1561,18 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         if (hadAnalysis || endedOutcome === 'sufficient' || endedOutcome === 'bounded') return 'complete'
         return 'error'
       })()
-      message.value = finalOutcomeMessage(
-        endedOutcome,
-        endedMode,
+      message.value = finalOutcomeMessage({
+        outcome: endedOutcome,
+        mode: endedMode,
         hadAnalysis,
-        endedProbePlanKind,
+        measurementQualityPassed: measurementQualityPassed.value,
+        convergenceOutcome: convergenceOutcome.value,
+        probeCaptureQualityPassed: probeCaptureQualityPassed.value,
+        probeFailedRepeatabilityGroups: probeFailedRepeatabilityGroups.value,
+        isMarkerProbe: isMarkerProbePlan(endedProbePlanKind),
         failedMarkerProbePositions,
-      )
+        failedMeasurementAttemptCount: failedMeasurementAttemptCount.value,
+      })
     }
   }
 

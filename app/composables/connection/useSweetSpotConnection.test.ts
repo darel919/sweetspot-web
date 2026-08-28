@@ -5,7 +5,7 @@ import {
   shouldNotifyOffline,
   transportErrorMessage,
 } from './connectionState'
-import { SweetSpotRequestError } from '../lib/transport/errors'
+import { SweetSpotRequestError } from '../../lib/transport/errors'
 
 describe('TV connection state', () => {
   test('does not call an available signaling service an online TV', () => {
