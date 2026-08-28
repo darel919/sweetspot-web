@@ -62,6 +62,7 @@ function job(revision: number, jobId = 'job-1'): CalibrationJobView {
     revision,
     analyzerRevision: 'android-response-v1',
     sweepRevision: 'android-sweep-v3',
+    mode: 'auto',
     phase: 'measuring_required',
     acceptedPositions: [],
     excludedPositions: [],
@@ -133,6 +134,7 @@ describe('TV-owned calibration remote microphone', () => {
     const built = buildCalibrationCapture({
       jobId: 'job-1',
       action,
+      captureAttemptId: 'capture-attempt-1',
       captureSettings,
       sampleRate: 48_000,
       sampleCount: 12,
@@ -141,7 +143,11 @@ describe('TV-owned calibration remote microphone', () => {
       capturedAtMs: 1_757_000_000_000,
     })
     expect(built.readyType).toBe('calibration.capture.ready')
-    expect(built.readyPayload).toEqual({ jobId: 'job-1', captureId: 'center-left-0' })
+    expect(built.readyPayload).toEqual({
+      jobId: 'job-1',
+      captureId: 'center-left-0',
+      captureAttemptId: 'capture-attempt-1',
+    })
     expect(built.metadata).toMatchObject({
       jobId: 'job-1',
       captureId: 'center-left-0',
@@ -165,6 +171,7 @@ describe('TV-owned calibration remote microphone', () => {
     const built = buildCalibrationCapture({
       jobId: 'job-1',
       action,
+      captureAttemptId: 'capture-attempt-2',
       captureSettings,
       sampleRate: 48_000,
       sampleCount: 12,
@@ -177,11 +184,13 @@ describe('TV-owned calibration remote microphone', () => {
       jobId: 'job-1',
       captureId: 'validation-0',
       candidateId: 'candidate-4',
+      captureAttemptId: 'capture-attempt-2',
     })
     expect(built.metadata.channel).toBe('both')
     expect(validatePayload('calibration.capture.finished', {
       jobId: 'job-1',
       captureId: 'validation-0',
+      captureAttemptId: 'capture-attempt-2',
     })).toBeNull()
   })
 
@@ -189,6 +198,7 @@ describe('TV-owned calibration remote microphone', () => {
     const inbound = new Set<(message: Envelope) => void>()
     const commands: string[] = []
     const frames: ArrayBuffer[] = []
+    let readyAttemptId = ''
     let onChunk: ((samples: Float32Array) => Promise<void> | void) | undefined
     const track = {
       readyState: 'live',
@@ -207,8 +217,11 @@ describe('TV-owned calibration remote microphone', () => {
         autoGainControl: [],
       },
     } as unknown as MicrophoneCapture
+    let recorderStarted = false
     const recorder: PcmRecorder = {
-      start: async () => undefined,
+      start: async () => {
+        recorderStarted = true
+      },
       stop: async () => ({
         samples: new Float32Array(0),
         diagnostics: {
@@ -221,17 +234,21 @@ describe('TV-owned calibration remote microphone', () => {
           peak: 0.5,
           clipped: false,
           clippedSamples: 0,
-          sampleCount: 2,
+          sampleCount: 4,
         },
         startSample: 0,
-        endSample: 2,
+        endSample: 4,
       }),
       dispose: async () => undefined,
-      sampleRate: () => 48_000,
+      sampleRate: () => recorderStarted ? 48_000 : null,
     }
     const connection = {
-      send: (type: string) => {
+      send: (type: string, payload?: unknown) => {
         commands.push(type)
+        if (type === 'calibration.capture.ready' && typeof payload === 'object' && payload !== null
+          && 'captureAttemptId' in payload && typeof payload.captureAttemptId === 'string') {
+          readyAttemptId = payload.captureAttemptId
+        }
         return `${type}-1`
       },
       sendCaptureFrame: async (frame: ArrayBuffer) => {
@@ -253,6 +270,7 @@ describe('TV-owned calibration remote microphone', () => {
           onChunk = options.onChunk
           return recorder
         },
+        preloadPcmCaptureWorklet: async () => undefined,
         discoverMicCalibrationProfiles: async () => [microphoneProfile],
         now: () => 1_757_000_000_000,
       },
@@ -261,11 +279,27 @@ describe('TV-owned calibration remote microphone', () => {
 
     remote.resumeJob()
     inbound.forEach((handler) => handler(envelope('calibration.job.state', job(1))))
-    await waitFor(() => commands.includes('calibration.capture.ready') && frames.length >= 1)
+    await waitFor(() => commands.includes('calibration.capture.ready'))
+    const preStartChunk = onChunk?.(new Float32Array([0.1, -0.2]))
+    expect(frames).toHaveLength(0)
+    inbound.forEach((handler) => handler(envelope('calibration.capture.started', {
+      jobId: 'job-1',
+      captureId: 'center-left-0',
+      captureAttemptId: readyAttemptId,
+    })))
+    inbound.forEach((handler) => handler(envelope('calibration.capture.window', {
+      captureId: 'center-left-0',
+      captureAttemptId: readyAttemptId,
+      nextSequence: 0,
+      windowSize: 8,
+    })))
+    await waitFor(() => frames.length >= 1)
+    await preStartChunk
     await onChunk?.(new Float32Array([0.25, -0.5]))
     inbound.forEach((handler) => handler(envelope('calibration.capture.finished', {
       jobId: 'job-1',
       captureId: 'center-left-0',
+      captureAttemptId: readyAttemptId,
     })))
     await waitFor(() => remote.captureState.value === 'waiting')
 
@@ -273,19 +307,21 @@ describe('TV-owned calibration remote microphone', () => {
       const decoded = decodeCaptureStreamFrame(frame)
       return decoded.ok ? decoded.frame.kind : 'invalid'
     })
-    expect(decodedKinds).toEqual(['begin', 'chunk', 'end'])
+    expect(decodedKinds).toEqual(['begin', 'chunk', 'chunk', 'end'])
     expect(commands).toContain('calibration.capture.ready')
     const metadata = remote.captureMetadata.value
     if (!metadata) throw new Error('The capture metadata was not published')
     inbound.forEach((handler) => handler(envelope('calibration.capture.uploaded', {
       jobId: metadata.jobId,
       captureId: metadata.captureId,
+      captureAttemptId: readyAttemptId,
       contentSha256: metadata.contentSha256,
       sampleCount: metadata.sampleCount,
       byteCount: metadata.byteCount,
       status: 'accepted',
     })))
-    await waitFor(() => remote.captureState.value === 'waiting')
+    await waitFor(() => commands.filter((type) => type === 'calibration.job.get').length >= 2)
+    expect(remote.jobStateKnown.value).toBe(false)
     scope.stop()
   })
 })

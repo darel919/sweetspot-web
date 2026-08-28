@@ -63,7 +63,7 @@ export interface SweetSpotTransport {
     payload?: unknown,
     options?: TransportRequestOptions,
   ): Promise<Envelope<T>>
-  sendCaptureFrame(frame: ArrayBuffer): Promise<void>
+  sendCaptureFrame(frame: ArrayBuffer, options?: { signal?: AbortSignal }): Promise<void>
   onMessage(handler: (env: Envelope) => void): () => void
   onStateChange(handler: (state: DirectConnectionState) => void): () => void
   onDiagnostics(handler: (diagnostics: TransportDiagnostics) => void): () => void

@@ -1,4 +1,4 @@
-import { onScopeDispose, readonly, ref, shallowRef } from 'vue'
+import { onMounted, onScopeDispose, readonly, ref, shallowRef } from 'vue'
 import type { Envelope, Role } from '#shared/types/protocol'
 import type { PairingCredentials } from '#shared/transport/signaling'
 import { createWebRtcTransport } from '~/lib/transport/webrtc/peer'
@@ -12,6 +12,28 @@ import { connectionStateForTransport, type ConnectionState } from './connectionS
 
 export interface SweetSpotConnectionOptions {
   createTransport?: SweetSpotTransportFactory
+}
+
+const SENSITIVE_KEY = /secret|token|password|authorization/i
+const SESSION_KEY = /session(?:id)?$/i
+
+function redactDebugValue(value: unknown, key = ''): unknown {
+  if (SENSITIVE_KEY.test(key)) return '[redacted]'
+  if (SESSION_KEY.test(key) && typeof value === 'string') return `…${value.slice(-8)}`
+  if (Array.isArray(value)) return value.map((item) => redactDebugValue(item))
+  if (typeof value !== 'object' || value === null) return value
+  return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+    childKey,
+    redactDebugValue(childValue, childKey),
+  ]))
+}
+
+function debugJson(value: unknown): string {
+  try {
+    return JSON.stringify(redactDebugValue(value)) ?? '[unserializable]'
+  } catch {
+    return '[unserializable]'
+  }
 }
 
 export function useSweetSpotConnection(
@@ -29,8 +51,8 @@ export function useSweetSpotConnection(
   let disposed = false
   const transport: SweetSpotTransport = (options.createTransport ?? (() => createWebRtcTransport(role)))()
 
-  function log(direction: 'in' | 'out', text: string): void {
-    debugLog.value = [...debugLog.value.slice(-99), { at: Date.now(), direction, text }]
+  function log(direction: 'in' | 'out', value: unknown): void {
+    debugLog.value = [...debugLog.value.slice(-99), { at: Date.now(), direction, text: debugJson(value) }]
   }
 
   function setTransportState(next: DirectConnectionState): void {
@@ -46,7 +68,7 @@ export function useSweetSpotConnection(
   })
   const removeMessageListener = transport.onMessage((env) => {
     lastMessage.value = env
-    log('in', JSON.stringify(env))
+    log('in', env)
   })
 
   function connect(): void {
@@ -73,7 +95,7 @@ export function useSweetSpotConnection(
 
   function send(type: string, payload: unknown = {}, replyTo?: string): string {
     const id = transport.send(type, payload, replyTo)
-    log('out', JSON.stringify({ type, payload, replyTo, id }))
+    log('out', { type, payload, replyTo, id })
     return id
   }
 
@@ -82,7 +104,7 @@ export function useSweetSpotConnection(
     payload: unknown = {},
     requestOptions: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<Envelope<T>> {
-    log('out', JSON.stringify({ type, payload }))
+    log('out', { type, payload })
     return transport.request<T>(type, payload, requestOptions)
   }
 
@@ -90,9 +112,31 @@ export function useSweetSpotConnection(
     return transport.onMessage(handler)
   }
 
-  onScopeDispose(disconnect)
+  function onPageHide(event: PageTransitionEvent): void {
+    if (event.persisted) return
+    disconnect()
+  }
+
+  function onPageShow(event: PageTransitionEvent): void {
+    if (!event.persisted || disposed) return
+    connect()
+  }
+
+  onMounted(() => {
+    window.addEventListener('pagehide', onPageHide)
+    window.addEventListener('pageshow', onPageShow)
+  })
+
+  onScopeDispose(() => {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('pageshow', onPageShow)
+    }
+    disconnect()
+  })
 
   return {
+    state: () => transport.state,
     status: readonly(status),
     transportState: readonly(transportState),
     deviceOnline: readonly(deviceOnline),

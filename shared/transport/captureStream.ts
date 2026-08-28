@@ -18,6 +18,7 @@ export interface CaptureStreamBegin {
   kind: 'begin'
   sessionId: string
   captureId: string
+  captureAttemptId: string
   metadata: CalibrationCaptureStreamMetadata
   expectedSampleCount: number | null
   expectedByteCount: number | null
@@ -27,6 +28,7 @@ export interface CaptureStreamChunk {
   kind: 'chunk'
   sessionId: string
   captureId: string
+  captureAttemptId: string
   sequence: number
   sampleCount: number
   pcm: ArrayBuffer
@@ -36,6 +38,7 @@ export interface CaptureStreamEnd {
   kind: 'end'
   sessionId: string
   captureId: string
+  captureAttemptId: string
   chunkCount: number
   finalSampleCount: number
   finalByteCount: number
@@ -60,8 +63,11 @@ export type CaptureStreamDecodeResult =
   | { ok: false; code: CaptureStreamDecodeErrorCode; message: string }
 
 interface CaptureStreamHeader {
+  kind: unknown
   sessionId: string
   captureId: string
+  captureAttemptId: string
+  [key: string]: unknown
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -76,6 +82,14 @@ function isCount(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max
 }
 
+function isPositiveCount(value: unknown): value is number {
+  return isCount(value) && value > 0
+}
+
+function isNullableCount(value: unknown): value is number | null {
+  return value === null || isPositiveCount(value)
+}
+
 function isBeginMetadata(value: unknown): value is CalibrationCaptureStreamMetadata {
   if (!isRecord(value)) return false
   return isCalibrationCaptureFrameMetadata({
@@ -87,7 +101,10 @@ function isBeginMetadata(value: unknown): value is CalibrationCaptureStreamMetad
 }
 
 function isBaseHeader(value: unknown): value is CaptureStreamHeader {
-  return isRecord(value) && isBoundedId(value.sessionId) && isBoundedId(value.captureId)
+  return isRecord(value)
+    && isBoundedId(value.sessionId)
+    && isBoundedId(value.captureId)
+    && isBoundedId(value.captureAttemptId)
 }
 
 function metadataBytes(value: unknown): Uint8Array {
@@ -124,14 +141,15 @@ function encodeFrame(kind: number, header: unknown, payload: ArrayBuffer): Array
 }
 
 export function encodeCaptureBegin(input: Omit<CaptureStreamBegin, 'kind'>): ArrayBuffer {
-  if (!isBoundedId(input.sessionId) || !isBoundedId(input.captureId) || !isBeginMetadata(input.metadata)
+  if (!isBoundedId(input.sessionId) || !isBoundedId(input.captureId) || !isBoundedId(input.captureAttemptId)
+    || !isBeginMetadata(input.metadata)
     || input.metadata.captureId !== input.captureId) {
     throw new TypeError('Capture stream begin metadata is invalid')
   }
-  if (input.expectedSampleCount !== null && !isCount(input.expectedSampleCount)) {
+  if (input.expectedSampleCount !== null && !isPositiveCount(input.expectedSampleCount)) {
     throw new RangeError('Capture stream expected sample count is invalid')
   }
-  if (input.expectedByteCount !== null && !isCount(input.expectedByteCount)) {
+  if (input.expectedByteCount !== null && !isPositiveCount(input.expectedByteCount)) {
     throw new RangeError('Capture stream expected byte count is invalid')
   }
   if ((input.expectedSampleCount === null) !== (input.expectedByteCount === null)) {
@@ -144,6 +162,7 @@ export function encodeCaptureBegin(input: Omit<CaptureStreamBegin, 'kind'>): Arr
     kind: 'begin',
     sessionId: input.sessionId,
     captureId: input.captureId,
+    captureAttemptId: input.captureAttemptId,
     metadata: input.metadata,
     expectedSampleCount: input.expectedSampleCount,
     expectedByteCount: input.expectedByteCount,
@@ -152,7 +171,8 @@ export function encodeCaptureBegin(input: Omit<CaptureStreamBegin, 'kind'>): Arr
 
 export function encodeCaptureChunk(input: Omit<CaptureStreamChunk, 'kind' | 'pcm'> & { pcm: ArrayBuffer | Uint8Array }): ArrayBuffer {
   const pcm = input.pcm instanceof Uint8Array ? copyBuffer(input.pcm) : input.pcm.slice(0)
-  if (!isBoundedId(input.sessionId) || !isBoundedId(input.captureId) || !isCount(input.sequence)) {
+  if (!isBoundedId(input.sessionId) || !isBoundedId(input.captureId) || !isBoundedId(input.captureAttemptId)
+    || !isCount(input.sequence)) {
     throw new TypeError('Capture stream chunk identity is invalid')
   }
   if (!isCount(input.sampleCount) || input.sampleCount * 4 !== pcm.byteLength || pcm.byteLength === 0) {
@@ -163,15 +183,16 @@ export function encodeCaptureChunk(input: Omit<CaptureStreamChunk, 'kind' | 'pcm
     kind: 'chunk',
     sessionId: input.sessionId,
     captureId: input.captureId,
+    captureAttemptId: input.captureAttemptId,
     sequence: input.sequence,
     sampleCount: input.sampleCount,
   }, pcm)
 }
 
 export function encodeCaptureEnd(input: Omit<CaptureStreamEnd, 'kind'>): ArrayBuffer {
-  if (!isBoundedId(input.sessionId) || !isBoundedId(input.captureId)
-    || !isCount(input.chunkCount) || !isCount(input.finalSampleCount)
-    || !isCount(input.finalByteCount) || input.finalByteCount !== input.finalSampleCount * 4
+  if (!isBoundedId(input.sessionId) || !isBoundedId(input.captureId) || !isBoundedId(input.captureAttemptId)
+    || !isPositiveCount(input.chunkCount) || !isPositiveCount(input.finalSampleCount)
+    || !isPositiveCount(input.finalByteCount) || input.finalByteCount !== input.finalSampleCount * 4
     || !/^[a-f0-9]{64}$/i.test(input.finalSha256)
     || !isCalibrationCaptureFrameMetadata(input.metadata)
     || input.metadata.captureId !== input.captureId
@@ -184,6 +205,7 @@ export function encodeCaptureEnd(input: Omit<CaptureStreamEnd, 'kind'>): ArrayBu
     kind: 'end',
     sessionId: input.sessionId,
     captureId: input.captureId,
+    captureAttemptId: input.captureAttemptId,
     chunkCount: input.chunkCount,
     finalSampleCount: input.finalSampleCount,
     finalByteCount: input.finalByteCount,
@@ -225,12 +247,15 @@ export function decodeCaptureStreamFrame(input: ArrayBuffer | Uint8Array): Captu
       : failure('unknown_kind', 'Capture stream frame kind is unsupported')
   }
   if (kind === 1) {
-    if (payloadLength !== 0 || !isBeginMetadata(header.metadata)
-      || header.metadata.captureId !== header.captureId
-      || (header.expectedSampleCount !== null && !isCount(header.expectedSampleCount))
-      || (header.expectedByteCount !== null && !isCount(header.expectedByteCount))
-      || (header.expectedSampleCount === null) !== (header.expectedByteCount === null)
-      || (header.expectedSampleCount !== null && header.expectedByteCount !== header.expectedSampleCount * 4)) {
+    const metadata = header.metadata
+    const expectedSampleCount = header.expectedSampleCount
+    const expectedByteCount = header.expectedByteCount
+    if (payloadLength !== 0 || !isBeginMetadata(metadata)
+      || metadata.captureId !== header.captureId
+      || !isNullableCount(expectedSampleCount)
+      || !isNullableCount(expectedByteCount)
+      || (expectedSampleCount === null) !== (expectedByteCount === null)
+      || (expectedSampleCount !== null && expectedByteCount !== expectedSampleCount * 4)) {
       return failure('header_invalid', 'Capture stream begin header is invalid')
     }
     return {
@@ -239,15 +264,18 @@ export function decodeCaptureStreamFrame(input: ArrayBuffer | Uint8Array): Captu
         kind: 'begin',
         sessionId: header.sessionId,
         captureId: header.captureId,
-        metadata: header.metadata,
-        expectedSampleCount: header.expectedSampleCount,
-        expectedByteCount: header.expectedByteCount,
+        captureAttemptId: header.captureAttemptId,
+        metadata,
+        expectedSampleCount,
+        expectedByteCount,
       },
     }
   }
   if (kind === 2) {
-    if (!isCount(header.sequence) || !isCount(header.sampleCount)
-      || header.sampleCount === 0 || header.sampleCount * 4 !== payloadLength
+    const sequence = header.sequence
+    const sampleCount = header.sampleCount
+    if (!isCount(sequence) || !isPositiveCount(sampleCount)
+      || sampleCount * 4 !== payloadLength
       || payloadLength === 0 || payloadLength > MAX_CAPTURE_CHUNK_BYTES) {
       return failure('payload_invalid', 'Capture stream chunk payload is invalid')
     }
@@ -257,20 +285,26 @@ export function decodeCaptureStreamFrame(input: ArrayBuffer | Uint8Array): Captu
         kind: 'chunk',
         sessionId: header.sessionId,
         captureId: header.captureId,
-        sequence: header.sequence,
-        sampleCount: header.sampleCount,
+        captureAttemptId: header.captureAttemptId,
+        sequence,
+        sampleCount,
         pcm: copyBuffer(bytes.subarray(payloadOffset)),
       },
     }
   }
-  if (payloadLength !== 0 || !isCount(header.chunkCount) || !isCount(header.finalSampleCount)
-    || !isCount(header.finalByteCount) || header.finalByteCount !== header.finalSampleCount * 4
-    || !/^[a-f0-9]{64}$/i.test(String(header.finalSha256))
-    || !isCalibrationCaptureFrameMetadata(header.metadata)
-    || header.metadata.captureId !== header.captureId
-    || header.metadata.sampleCount !== header.finalSampleCount
-    || header.metadata.byteCount !== header.finalByteCount
-    || header.metadata.contentSha256.toLowerCase() !== String(header.finalSha256).toLowerCase()) {
+  const chunkCount = header.chunkCount
+  const finalSampleCount = header.finalSampleCount
+  const finalByteCount = header.finalByteCount
+  const finalSha256 = header.finalSha256
+  const metadata = header.metadata
+  if (payloadLength !== 0 || !isCount(chunkCount) || !isPositiveCount(finalSampleCount)
+    || !isPositiveCount(finalByteCount) || finalByteCount !== finalSampleCount * 4
+    || typeof finalSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(finalSha256)
+    || !isCalibrationCaptureFrameMetadata(metadata)
+    || metadata.captureId !== header.captureId
+    || metadata.sampleCount !== finalSampleCount
+    || metadata.byteCount !== finalByteCount
+    || metadata.contentSha256.toLowerCase() !== finalSha256.toLowerCase()) {
     return failure('header_invalid', 'Capture stream end header is invalid')
   }
   return {
@@ -279,11 +313,12 @@ export function decodeCaptureStreamFrame(input: ArrayBuffer | Uint8Array): Captu
       kind: 'end',
       sessionId: header.sessionId,
       captureId: header.captureId,
-      chunkCount: header.chunkCount,
-      finalSampleCount: header.finalSampleCount,
-      finalByteCount: header.finalByteCount,
-      finalSha256: String(header.finalSha256).toLowerCase(),
-      metadata: header.metadata,
+      captureAttemptId: header.captureAttemptId,
+      chunkCount,
+      finalSampleCount,
+      finalByteCount,
+      finalSha256: finalSha256.toLowerCase(),
+      metadata,
     },
   }
 }

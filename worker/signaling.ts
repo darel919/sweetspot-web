@@ -4,7 +4,12 @@ import {
   type SignalingMessage,
   type SignalingRole,
 } from '../shared/transport/signaling'
-import { isActiveGenerationAllowed, isRendezvousExpired } from './signaling-lifetime'
+import {
+  isConflictingSignalingGeneration,
+  isActiveGenerationAllowed,
+  isRendezvousExpired,
+  shouldForwardSignalingMessage,
+} from './signaling-lifetime'
 
 const PAIRING_TTL_MS = 10 * 60 * 1_000
 const SECRET_MAX_BYTES = 256
@@ -18,6 +23,8 @@ const GENERATION_KEY = 'peer-generation'
 interface SocketAttachment {
   role: SignalingRole
   secretHash: string
+  hello: boolean
+  generation?: string
 }
 
 export class SignalingDO extends DurableObject<unknown> {
@@ -53,13 +60,6 @@ export class SignalingDO extends DurableObject<unknown> {
     if (storedSecretHash && isRendezvousExpired(active, expiresAt)) {
       return jsonError('pairing_expired', 'This pairing link has expired. Scan the current QR code on the TV.', 410)
     }
-    if (role === 'client' && this.hasOpenSocket('client')) {
-      return jsonError('peer_in_use', 'This TV already has an active dashboard connection.', 409)
-    }
-    if (role === 'device' && this.hasOpenSocket('device')) {
-      return jsonError('device_in_use', 'This TV already has an active signaling connection.', 409)
-    }
-
     if (!storedSecretHash) {
       await this.state.storage.put(SECRET_HASH_KEY, secretHash)
       await this.state.storage.put(EXPIRY_KEY, Date.now() + PAIRING_TTL_MS)
@@ -69,12 +69,12 @@ export class SignalingDO extends DurableObject<unknown> {
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair)
     this.state.acceptWebSocket(server)
-    server.serializeAttachment({ role, secretHash } satisfies SocketAttachment)
+    server.serializeAttachment({ role, secretHash, hello: false } satisfies SocketAttachment)
     this.send(server, {
       v: 1,
       type: 'signal.ready',
       role,
-      peerOnline: this.hasOpenSocket(oppositeRole(role)),
+      peerOnline: this.findSocket(oppositeRole(role)) !== null,
     })
     this.notifyPeer(role, true)
     return new Response(null, { status: 101, webSocket: client })
@@ -102,12 +102,38 @@ export class SignalingDO extends DurableObject<unknown> {
       return
     }
     if (value.type === 'signal.hello') {
-      if (await this.isActiveGenerationMismatch(value.generation)) {
+      if (attachment.role === 'client' && await this.isActiveGenerationMismatch(value.generation)) {
         this.sendError(ws, 'peer_in_use', 'This TV already has an active dashboard connection.')
         try { ws.close(1008, 'active peer generation') } catch {}
         return
       }
-      if (attachment.role === 'client') await this.state.storage.put(GENERATION_KEY, value.generation)
+      const other = this.findSocket(attachment.role, ws)
+      const otherGeneration = other ? this.attachment(other)?.generation : undefined
+      const knownGeneration = await this.state.storage.get<string>(GENERATION_KEY)
+      if (other && attachment.role === 'client'
+        && isConflictingSignalingGeneration(otherGeneration, value.generation)) {
+        this.sendError(ws, attachment.role === 'client' ? 'peer_in_use' : 'device_in_use', 'This peer already has an active signaling connection.')
+        try { ws.close(1008, 'peer already connected') } catch {}
+        return
+      }
+      if (other && (attachment.role === 'device' || otherGeneration === value.generation)) {
+        try { other.close(1000, 'signaling connection replaced') } catch {}
+      }
+      ws.serializeAttachment({
+        ...attachment,
+        hello: true,
+        generation: attachment.role === 'client' ? value.generation : attachment.generation,
+      } satisfies SocketAttachment)
+      if (attachment.role === 'client' && knownGeneration !== value.generation) {
+        await this.state.storage.put(GENERATION_KEY, value.generation)
+      }
+      this.send(ws, {
+        v: 1,
+        type: 'signal.peer',
+        role: oppositeRole(attachment.role),
+        online: this.findSocket(oppositeRole(attachment.role)) !== null,
+      })
+      this.notifyPeer(attachment.role, true)
       return
     }
     if (value.type === 'signal.ready' || value.type === 'signal.peer' || value.type === 'signal.error') {
@@ -120,7 +146,15 @@ export class SignalingDO extends DurableObject<unknown> {
     }
     const generation = value.generation
     const knownGeneration = await this.state.storage.get<string>(GENERATION_KEY)
+    if (!attachment.hello) {
+      this.sendError(ws, 'bad_message', 'The signaling connection must complete its hello first.')
+      return
+    }
     if (!knownGeneration || generation !== knownGeneration) {
+      this.sendError(ws, 'stale_session', 'The peer session is no longer current.')
+      return
+    }
+    if (attachment.generation !== generation) {
       this.sendError(ws, 'stale_session', 'The peer session is no longer current.')
       return
     }
@@ -139,11 +173,31 @@ export class SignalingDO extends DurableObject<unknown> {
       }
       await this.state.storage.put(ACTIVE_KEY, true)
       await this.state.storage.put(ACTIVE_GENERATION_KEY, generation)
+      this.send(ws, {
+        v: 1,
+        type: 'signal.complete.ack',
+        generation,
+        attemptId: value.attemptId,
+      })
+      return
     }
+    if (!shouldForwardSignalingMessage(value)) return
     const target = this.findSocket(oppositeRole(attachment.role))
     if (!target) {
       this.sendError(ws, 'peer_offline', 'The other peer is not connected.')
       return
+    }
+    if (value.type === 'signal.offer') {
+      const targetAttachment = this.attachment(target)
+      if (!targetAttachment?.hello) {
+        this.sendError(ws, 'peer_offline', 'The other peer has not completed signaling setup.')
+        return
+      }
+      if (targetAttachment.generation && targetAttachment.generation !== generation) {
+        this.sendError(ws, 'stale_session', 'The peer session is no longer current.')
+        return
+      }
+      target.serializeAttachment({ ...targetAttachment, generation } satisfies SocketAttachment)
     }
     this.send(target, value)
   }
@@ -151,6 +205,7 @@ export class SignalingDO extends DurableObject<unknown> {
   async webSocketClose(ws: WebSocket): Promise<void> {
     const attachment = this.attachment(ws)
     if (!attachment) return
+    if (this.findSocket(attachment.role, ws) !== null) return
     this.notifyPeer(attachment.role, false)
   }
 
@@ -171,17 +226,20 @@ export class SignalingDO extends DurableObject<unknown> {
     const value = ws.deserializeAttachment()
     if (typeof value !== 'object' || value === null) return null
     const candidate = value as Partial<SocketAttachment>
-    return (candidate.role === 'client' || candidate.role === 'device') && typeof candidate.secretHash === 'string'
-      ? candidate as SocketAttachment
-      : null
+    if ((candidate.role !== 'client' && candidate.role !== 'device') || typeof candidate.secretHash !== 'string') return null
+    return {
+      role: candidate.role,
+      secretHash: candidate.secretHash,
+      hello: candidate.hello === true,
+      generation: typeof candidate.generation === 'string' ? candidate.generation : undefined,
+    }
   }
 
-  private hasOpenSocket(role: SignalingRole): boolean {
-    return this.findSocket(role) !== null
-  }
-
-  private findSocket(role: SignalingRole): WebSocket | null {
-    return this.state.getWebSockets().find((ws) => this.attachment(ws)?.role === role && ws.readyState === WebSocket.OPEN) ?? null
+  private findSocket(role: SignalingRole, excluded?: WebSocket): WebSocket | null {
+    return this.state.getWebSockets().find((ws) => ws !== excluded
+      && this.attachment(ws)?.role === role
+      && this.attachment(ws)?.hello === true
+      && ws.readyState === WebSocket.OPEN) ?? null
   }
 
   private notifyPeer(sourceRole: SignalingRole, online: boolean): void {

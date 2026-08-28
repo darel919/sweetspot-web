@@ -18,6 +18,8 @@ The collapsed developer details show browser transport diagnostics and can reque
 
 The TV owns job IDs, capture timing, integrity validation, acoustic analysis, accepted evidence, correction, validation, rollback, persistence, and recovery. The browser owns microphone permission, capture settings and profile metadata, PCM streaming, rendering, and cancellation requests. Browser analysis helpers are for diagnostics and parity fixtures only.
 
+The dashboard can start Auto Room Calibration or Advanced Room Calibration. Auto may stop when the mandatory center, left, and right solution is sufficient. Advanced continues optional forward and backward positions before the TV stages the best verified solution. The browser never changes correction during a deterministic sweep or declares an acoustic result accepted.
+
 ## Pairing and recovery
 
 Scan the current QR code displayed by the TV. It contains a short display code, a random rendezvous ID, and a random pair secret. Pairing credentials expire if unused, but expiry does not terminate an authenticated direct peer. A second dashboard cannot silently replace an active peer. Browser reload restores the pairing link's tab generation and requests the current TV state.

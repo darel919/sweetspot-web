@@ -849,7 +849,7 @@ export function useCalibrationSession(connection: CalibrationSessionConnection, 
         ? `Some measurements need attention: ${spatialConsistencyFailureMessage(failures)}`
         : 'Follow the instructions on the TV.'
     sendProgress('ending', message.value)
-    connection.send('calibrationSession.end', {
+    connection.send('diagnostics.calibrationSession.end', {
       sessionId: currentSessionId,
       outcome: sessionMode === 'measurement' ? convergenceOutcome.value ?? 'insufficient' : 'sufficient',
     })

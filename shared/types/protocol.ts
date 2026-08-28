@@ -17,6 +17,23 @@ export interface Envelope<P = unknown> {
   transportSessionId?: string
 }
 
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength
+}
+
+export function serializedUtf8ByteLength(value: unknown): number {
+  try {
+    const serialized = JSON.stringify(value)
+    return serialized === undefined ? Number.POSITIVE_INFINITY : utf8ByteLength(serialized)
+  } catch {
+    return Number.POSITIVE_INFINITY
+  }
+}
+
+export function isEnvelopeWithinSizeLimit(value: unknown): boolean {
+  return serializedUtf8ByteLength(value) <= MAX_PAYLOAD_BYTES
+}
+
 export function normalizePairCode(code: string): string {
   return code.replaceAll('-', '').trim().toUpperCase()
 }
@@ -191,7 +208,7 @@ export type CalibrationPositionReference = 'center'
 export type CalibrationJobStartMode = 'auto' | 'advanced'
 
 export interface CalibrationJobStartPayload {
-  mode?: CalibrationJobStartMode
+  mode: CalibrationJobStartMode
 }
 
 export interface CalibrationJobGetPayload {
@@ -207,6 +224,7 @@ export type CalibrationJobCancelScope = 'capture' | 'optional_refinement'
 export interface CalibrationJobCancelPayload extends CalibrationJobIdPayload {
   scope: CalibrationJobCancelScope
   captureId?: string
+  captureAttemptId?: string
 }
 
 export interface CalibrationJobDiscardPayload extends CalibrationJobIdPayload {}
@@ -299,6 +317,7 @@ export interface CalibrationJobView {
   revision: number
   analyzerRevision: string
   sweepRevision: string
+  mode?: CalibrationJobStartMode
   phase: CalibrationJobPhase
   acceptedPositions: CalibrationPositionId[]
   excludedPositions: CalibrationPositionId[]
@@ -366,15 +385,26 @@ export interface CalibrationCaptureFrameMetadata extends CalibrationCaptureMetad
 export interface CalibrationCaptureReadyPayload {
   jobId: string
   captureId: string
+  captureAttemptId: string
 }
 
 export interface CalibrationCaptureFinishedPayload extends CalibrationCaptureReadyPayload {}
+
+export interface CalibrationCaptureStartedPayload extends CalibrationCaptureReadyPayload {}
+
+export interface CalibrationCaptureWindowPayload {
+  captureId: string
+  captureAttemptId: string
+  nextSequence: number
+  windowSize: number
+}
 
 export type CalibrationCaptureUploadStatus = 'accepted' | 'rejected' | 'duplicate'
 
 export interface CalibrationCaptureUploadedPayload {
   jobId: string
   captureId: string
+  captureAttemptId: string
   contentSha256: string
   sampleCount: number
   byteCount: number
@@ -385,12 +415,14 @@ export interface CalibrationCaptureUploadedPayload {
 export interface CalibrationCaptureRejectedPayload {
   jobId: string
   captureId: string
+  captureAttemptId: string
   reason: string
 }
 
 export interface CalibrationValidationCaptureReadyPayload {
   jobId: string
   captureId: string
+  captureAttemptId: string
   candidateId: string
 }
 
@@ -984,10 +1016,6 @@ const DEVICE_TARGETED_TYPES = [
   'profile.load',
   'profile.delete',
   'calibration.get',
-  'calibration.applyCandidate',
-  'calibration.acceptCandidate',
-  'calibration.rollbackCandidate',
-  'calibration.validation.result',
   'calibration.reset',
   'calibration.export',
   'calibration.import',
@@ -999,7 +1027,7 @@ const DEVICE_TARGETED_TYPES = [
   'calibration.capture.ready',
   'calibration.validation.capture.ready',
   'calibrationSession.begin',
-  'calibrationSession.end',
+  'diagnostics.calibrationSession.end',
   'calibrationSession.abort',
   'calibrationSession.loudness.start',
   'calibrationSession.loudness.stop',
@@ -1043,6 +1071,8 @@ export const DEVICE_TO_CLIENT_TYPES = new Set<string>([
   'calibration.capture.uploaded',
   'calibration.capture.rejected',
   'calibration.capture.finished',
+  'calibration.capture.started',
+  'calibration.capture.window',
   'calibration.job.state',
   'probe.status',
   'probe.result',
@@ -1071,6 +1101,8 @@ export const KNOWN_TYPES = new Set<string>([
   'calibration.capture.uploaded',
   'calibration.capture.rejected',
   'calibration.capture.finished',
+  'calibration.capture.started',
+  'calibration.capture.window',
   'calibration.job.state',
   'probe.status',
   'probe.result',
@@ -1610,13 +1642,14 @@ export function isEnvelope(value: unknown): value is Envelope<unknown> {
   if (typeof value.type !== 'string' || value.type.length === 0) return false
   if (!isFiniteNumber(value.ts)) return false
   if (!Object.hasOwn(value, 'payload')) return false
-  return (value.replyTo === undefined || (typeof value.replyTo === 'string' && value.replyTo.length <= 256))
+  const shapeValid = (value.replyTo === undefined || (typeof value.replyTo === 'string' && value.replyTo.length <= 256))
     && (value.transportSessionId === undefined
       || (typeof value.transportSessionId === 'string'
         && value.transportSessionId.length > 0
         && value.transportSessionId.length <= 128))
     && (value.expiresAt === undefined
       || (isFiniteNumber(value.expiresAt) && value.expiresAt > value.ts && value.expiresAt <= value.ts + 120_000))
+  return shapeValid && isEnvelopeWithinSizeLimit(value)
 }
 
 function isSessionPayload(value: unknown): value is Record<string, unknown> & CalibrationSessionPayload {
@@ -1874,6 +1907,7 @@ export function isCalibrationJobView(value: unknown): value is CalibrationJobVie
     || value.revision < 0
     || !isBoundedText(value.analyzerRevision, 128)
     || !isBoundedText(value.sweepRevision, 128)
+    || (value.mode !== 'auto' && value.mode !== 'advanced')
     || !isCalibrationJobPhase(value.phase)
     || !isUniquePositionList(value.acceptedPositions)
     || !isUniquePositionList(value.excludedPositions)
@@ -1922,11 +1956,14 @@ function isCalibrationJobCancelPayload(value: unknown): value is CalibrationJobC
   if (!isCalibrationJobIdPayload(value)) return false
   if (value.scope !== 'capture' && value.scope !== 'optional_refinement') return false
   if (value.scope === 'capture') return isBoundedText(value.captureId, 128)
+    && (value.captureAttemptId === undefined || isBoundedText(value.captureAttemptId, 128))
   return value.captureId === undefined
 }
 
 function isCalibrationCaptureIdPayload(value: unknown): value is CalibrationCaptureReadyPayload {
-  return isCalibrationJobIdPayload(value) && isBoundedText(value.captureId, 128)
+  return isCalibrationJobIdPayload(value)
+    && isBoundedText(value.captureId, 128)
+    && isBoundedText(value.captureAttemptId, 128)
 }
 
 function isCalibrationCaptureChannel(value: unknown): value is CalibrationCaptureChannel {
@@ -2015,10 +2052,11 @@ export function isCalibrationCaptureFrameMetadata(value: unknown): value is Cali
   return isCalibrationCaptureMetadata(value) && isSha256(value.contentSha256)
 }
 
-function isCalibrationCaptureUploadedPayload(value: unknown): value is CalibrationCaptureUploadedPayload {
+export function isCalibrationCaptureUploadedPayload(value: unknown): value is CalibrationCaptureUploadedPayload {
   if (!isRecord(value)
     || !isBoundedText(value.jobId, 128)
     || !isBoundedText(value.captureId, 128)
+    || !isBoundedText(value.captureAttemptId, 128)
     || !isSha256(value.contentSha256)
     || !isInteger(value.sampleCount)
     || value.sampleCount <= 0
@@ -2033,11 +2071,26 @@ function isCalibrationCaptureRejectedPayload(value: unknown): value is Calibrati
   return isRecord(value)
     && isBoundedText(value.jobId, 128)
     && isBoundedText(value.captureId, 128)
+    && isBoundedText(value.captureAttemptId, 128)
     && isBoundedText(value.reason, 1_024)
 }
 
 function isCalibrationCaptureFinishedPayload(value: unknown): value is CalibrationCaptureFinishedPayload {
   return isCalibrationCaptureIdPayload(value)
+}
+
+function isCalibrationCaptureStartedPayload(value: unknown): value is CalibrationCaptureStartedPayload {
+  return isCalibrationCaptureIdPayload(value)
+}
+
+export function isCalibrationCaptureWindowPayload(value: unknown): value is CalibrationCaptureWindowPayload {
+  return isRecord(value)
+    && isBoundedText(value.captureId, 128)
+    && isBoundedText(value.captureAttemptId, 128)
+    && isNonNegativeSafeInteger(value.nextSequence)
+    && isInteger(value.windowSize)
+    && value.windowSize >= 1
+    && value.windowSize <= 32
 }
 
 function isCalibrationValidationCaptureReadyPayload(value: unknown): value is CalibrationValidationCaptureReadyPayload {
@@ -2128,6 +2181,7 @@ export function validatePayload(type: string, payload: unknown): string | null {
     case 'calibrationSession.progress':
       return isProgressPayload(payload) ? null : `${type} requires a valid calibration progress payload`
     case 'calibrationSession.end':
+    case 'diagnostics.calibrationSession.end':
       return isCalibrationSessionEndPayload(payload) ? null : `${type} requires sessionId and a final outcome`
     case 'measurement.abort':
     case 'calibrationSession.started':
@@ -2165,6 +2219,10 @@ export function validatePayload(type: string, payload: unknown): string | null {
       return isCalibrationCaptureRejectedPayload(payload) ? null : `${type} requires a job, capture, and reason`
     case 'calibration.capture.finished':
       return isCalibrationCaptureFinishedPayload(payload) ? null : `${type} requires a job id and capture id`
+    case 'calibration.capture.started':
+      return isCalibrationCaptureStartedPayload(payload) ? null : `${type} requires a job id and capture id`
+    case 'calibration.capture.window':
+      return isCalibrationCaptureWindowPayload(payload) ? null : `${type} requires a capture id and valid receive window`
     case 'calibration.job.state':
       return isCalibrationJobView(payload) ? null : `${type} requires a valid calibration job view`
     case 'measurement.ready':

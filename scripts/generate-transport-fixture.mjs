@@ -13,6 +13,7 @@ const androidRoot = resolve(webRoot, '../sweetspot')
 const sessionId = 'fixture-session-1'
 const jobId = 'fixture-job-1'
 const captureId = 'fixture-capture-1'
+const captureAttemptId = 'fixture-attempt-1'
 const samples = [0.25, -0.5, 0.75, -1]
 const pcm = new ArrayBuffer(samples.length * 4)
 const pcmView = new DataView(pcm)
@@ -58,17 +59,19 @@ const chunkPcm = (start, end) => pcm.slice(start * 4, end * 4)
 const begin = encodeCaptureBegin({
   sessionId,
   captureId,
+  captureAttemptId,
   metadata: metadataBase,
   expectedSampleCount: samples.length,
   expectedByteCount: pcm.byteLength,
 })
 const chunks = [
-  encodeCaptureChunk({ sessionId, captureId, sequence: 0, sampleCount: 2, pcm: chunkPcm(0, 2) }),
-  encodeCaptureChunk({ sessionId, captureId, sequence: 1, sampleCount: 2, pcm: chunkPcm(2, 4) }),
+  encodeCaptureChunk({ sessionId, captureId, captureAttemptId, sequence: 0, sampleCount: 2, pcm: chunkPcm(0, 2) }),
+  encodeCaptureChunk({ sessionId, captureId, captureAttemptId, sequence: 1, sampleCount: 2, pcm: chunkPcm(2, 4) }),
 ]
 const end = encodeCaptureEnd({
   sessionId,
   captureId,
+  captureAttemptId,
   chunkCount: chunks.length,
   finalSampleCount: samples.length,
   finalByteCount: pcm.byteLength,
@@ -82,6 +85,7 @@ const fixture = {
   sessionId,
   jobId,
   captureId,
+  captureAttemptId,
   metadataJsonBase64: Buffer.from(JSON.stringify(metadataBase)).toString('base64'),
   pcmBase64: base64(pcm),
   sha256,

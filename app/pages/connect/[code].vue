@@ -25,6 +25,7 @@
           :eq-draft="eqDraft"
           :eq-dirty="eqDirty"
           :profile-name="profileName"
+          :locked="calibrationLocked"
           @band-input="onBandInput"
           @commit-bands="commitBands"
           @reset-bands="resetBands"
@@ -47,6 +48,9 @@
           :profiles="remoteCalibrationProfiles"
           :selected-profile-id="remoteSelectedProfileId"
           :profile-error="remoteProfileError"
+          :job-state-known="remoteCalibrationJobStateKnown"
+          :capture-resource-ready="remoteCaptureResourceReady"
+          :capture-resource-error="remoteCaptureResourceError"
           @start="startRemoteCalibration"
           @resume="resumeRemoteCalibration"
           @cancel-capture="cancelRemoteCapture"
@@ -54,6 +58,7 @@
           @finish="finishRemoteCalibration"
           @discard="discardRemoteCalibration"
           @retry-upload="retryRemoteUpload"
+          @retry-capture-resources="retryRemoteCaptureResources"
           @select-profile="selectRemoteProfile"
         />
 
@@ -68,6 +73,7 @@
           :probe-lab-pending="probeLabPending"
           :probe-lab-message="probeLabMessage"
           :probe-evidence="probeEvidence"
+          :locked="calibrationLocked"
           :virtualizer-on="virtualizerOn"
           :device-info="deviceInfo"
           :dev-info-pending="devInfoPending"
@@ -126,6 +132,7 @@ import type { PairingCredentials } from '#shared/transport/signaling'
 import { isStateSnapshot } from '#shared/types/protocol'
 import { shouldNotifyOffline, transportErrorMessage } from '~/composables/connection/connectionState'
 import { onMounted, onScopeDispose, ref, watch, computed, watchEffect } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import '~/components/connect/connect.css'
 import ConnectCalibrationRemoteSection from '~/components/connect/ConnectCalibrationRemoteSection.vue'
 import ConnectDebugPanel from '~/components/connect/ConnectDebugPanel.vue'
@@ -155,7 +162,7 @@ const room = computed(() => rawCode.value.toUpperCase())
 const rendezvousId = computed(() => String(route.query.r ?? '').trim().toLowerCase())
 const pairSecret = computed(() => String(route.hash ?? '').replace(/^#/, '').trim())
 const pairingError = computed(() => codeValid.value
-  && (!/^[a-f0-9]{32}$/.test(rendezvousId.value) || pairSecret.value.length < 32))
+  && (!/^[a-f0-9]{32}$/.test(rendezvousId.value) || !/^[A-Za-z0-9_-]{32,128}$/.test(pairSecret.value)))
 const pairing = computed<PairingCredentials | null>(() => {
   if (!codeValid.value || pairingError.value) return null
   return {
@@ -189,6 +196,10 @@ const {
   finishWithBest: finishRemoteCalibration,
   discardJob: discardRemoteCalibration,
   retryUpload: retryRemoteUpload,
+  jobStateKnown: remoteCalibrationJobStateKnown,
+  captureResourceReady: remoteCaptureResourceReady,
+  captureResourceError: remoteCaptureResourceError,
+  preloadCaptureWorklet: preloadRemoteCaptureWorklet,
 } = remoteCalibration
 const {
   stage: measurementStage,
@@ -238,9 +249,37 @@ const tvTransportDiagnostics = ref<TransportDiagnosticsPayload | null>(null)
 
 const profileName = ref('')
 
+const calibrationLocked = computed(() => {
+  const phase = remoteCalibrationJob.value?.phase
+  const remoteJobActive = phase !== undefined && phase !== 'complete' && phase !== 'failed' && phase !== 'cancelled'
+  return !remoteCalibrationJobStateKnown.value
+    || remoteJobActive
+    || remoteCaptureState.value !== 'idle'
+    || measurementBusy.value
+    || probeLabPending.value
+})
+
+function preventCalibrationNavigation(event: BeforeUnloadEvent): void {
+  if (!calibrationLocked.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
 onMounted(() => {
   void loadRemoteCalibrationProfiles().catch(() => undefined)
-  refreshRemoteCalibrationJob()
+  void preloadRemoteCaptureWorklet().catch(() => undefined)
+  resumeRemoteCalibration()
+  window.addEventListener('beforeunload', preventCalibrationNavigation)
+})
+
+function retryRemoteCaptureResources(): void {
+  void preloadRemoteCaptureWorklet().catch(() => undefined)
+}
+
+onBeforeRouteLeave(() => {
+  if (!calibrationLocked.value) return true
+  showToast('Finish or cancel calibration before leaving this page.')
+  return false
 })
 
 watch(deviceOnline, (online) => {
@@ -266,6 +305,7 @@ watch([status, deviceOnline], ([nextStatus, nextOnline], [previousStatus, previo
 })
 
 onScopeDispose(() => {
+  window.removeEventListener('beforeunload', preventCalibrationNavigation)
   if (toastTimer !== null) clearTimeout(toastTimer)
   if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)
   if (persistentState.value?.active) send('probe.persistent.release')
@@ -320,6 +360,7 @@ function resetBands() {
 }
 
 function setBands(bandsDb: number[]) {
+  if (calibrationLocked.value) return
   eqSentRevision = eqDraftRevision
   const commandId = send('engine.setBands', { bandsDb })
   eqCommandRevision.track(commandId)
@@ -331,14 +372,17 @@ function setBands(bandsDb: number[]) {
 }
 
 function setEngine(enabled: boolean) {
+  if (calibrationLocked.value) return
   send(enabled ? 'engine.enable' : 'engine.bypass')
 }
 
 function applyPreset(preset: number) {
+  if (calibrationLocked.value) return
   send('engine.applyPreset', { preset })
 }
 
 function saveProfile() {
+  if (calibrationLocked.value) return
   const name = profileName.value.trim()
   if (!name) return
   send('profile.save', { name })
@@ -346,10 +390,12 @@ function saveProfile() {
 }
 
 function loadProfile(name: string) {
+  if (calibrationLocked.value) return
   send('profile.load', { name })
 }
 
 function deleteProfile(name: string) {
+  if (calibrationLocked.value) return
   send('profile.delete', { name })
 }
 
@@ -386,11 +432,13 @@ function getState() {
 const virtualizerOn = ref(false)
 
 async function setVirtualizer(on: boolean) {
+  if (calibrationLocked.value) return
   virtualizerOn.value = on
   await withTimeout(request('virtualizer.' + (on ? 'on' : 'off')), 10_000)
 }
 
 async function runEffectsDiagnostics() {
+  if (calibrationLocked.value) return
   if (diagPending.value) return
   diagPending.value = true
   const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 30_000))
@@ -403,6 +451,7 @@ async function runEffectsDiagnostics() {
 }
 
 async function refreshProbeState() {
+  if (calibrationLocked.value) return
   const res = await withTimeout(request<ProbeDiagnostics>('probe.status'), 20_000)
   if (res) {
     const p = res.payload as ProbeDiagnostics
@@ -412,6 +461,7 @@ async function refreshProbeState() {
 }
 
 async function runCapacityProbe() {
+  if (calibrationLocked.value) return
   if (probePending.value) return
   probePending.value = true
   try {
@@ -429,18 +479,21 @@ async function runCapacityProbe() {
 }
 
 async function createPersistent() {
+  if (calibrationLocked.value) return
   const bands = 64
   await withTimeout(request('probe.persistent.start', { bands }), 30_000)
   await refreshProbeState()
 }
 
 async function releasePersistent() {
+  if (calibrationLocked.value) return
   await withTimeout(request('probe.persistent.release'), 20_000)
   persistentState.value = { active: false, bands: 0, curve: null, curveSummary: null }
   await refreshProbeState()
 }
 
 async function applyTestCurve(curve: 'hollow' | 'flat') {
+  if (calibrationLocked.value) return
   await withTimeout(request('probe.curve.apply', { curve }), 20_000)
   await refreshProbeState()
 }
@@ -512,6 +565,7 @@ function snapshotProbeEvidence(
 }
 
 async function captureProbeSweep(kind: 'transfer' | 'routing'): Promise<AggregateResponse> {
+  if (calibrationLocked.value) throw new Error('Finish or cancel calibration before running diagnostics.')
   const finished = new Promise<AggregateResponse>((resolve, reject) => {
     const stop = watch(measurementStage, (nextStage) => {
       if (nextStage === 'complete') {
@@ -535,6 +589,7 @@ async function captureProbeSweep(kind: 'transfer' | 'routing'): Promise<Aggregat
 type MarkerProbeKind = 'marker-only' | 'marker-production-spacing'
 
 async function runMarkerProbe(kind: MarkerProbeKind = 'marker-only') {
+  if (calibrationLocked.value) return
   if (probeLabPending.value || measurementBusy.value || !deviceOnline.value) return
   probeLabPending.value = true
   const label = kind === 'marker-only' ? 'marker-only' : 'production-spacing marker'
@@ -572,6 +627,7 @@ function runProductionSpacingMarkerProbe() {
 }
 
 async function applyProbeCurvePayload(payload: Record<string, number[]>) {
+  if (calibrationLocked.value) throw new Error('Finish or cancel calibration before running diagnostics.')
   const response = await withTimeout(request('probe.curve.apply', payload), 20_000)
   if (!response || !responseWasAccepted(response.payload)) {
     throw new Error('The TV rejected the diagnostic curve. Keep the persistent 64-band probe active.')
@@ -580,6 +636,7 @@ async function applyProbeCurvePayload(payload: Record<string, number[]>) {
 }
 
 async function captureTransferProbe() {
+  if (calibrationLocked.value) return
   if (probeLabPending.value || measurementBusy.value || !deviceOnline.value) return
   probeLabPending.value = true
   probeLabMessage.value = 'Preparing a 64-band transfer probe…'
@@ -603,6 +660,7 @@ async function captureTransferProbe() {
 }
 
 async function runRoutingProbe() {
+  if (calibrationLocked.value) return
   if (probeLabPending.value || measurementBusy.value || !deviceOnline.value) return
   probeLabPending.value = true
   const gainDb = Math.min(0, boundedProbeGain())
@@ -644,6 +702,7 @@ async function runRoutingProbe() {
 }
 
 function exportProbeEvidence() {
+  if (calibrationLocked.value) return
   if (probeEvidence.value.length === 0) return
   const blob = new Blob([JSON.stringify({ version: 1, captures: probeEvidence.value }, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -655,6 +714,7 @@ function exportProbeEvidence() {
 }
 
 async function fetchDeviceInfo() {
+  if (calibrationLocked.value) return
   if (devInfoPending.value) return
   devInfoPending.value = true
   try {

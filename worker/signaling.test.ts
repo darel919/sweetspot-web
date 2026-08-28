@@ -1,7 +1,23 @@
 import { describe, expect, test } from 'bun:test'
-import { isActiveGenerationAllowed, isRendezvousExpired } from './signaling-lifetime'
+import {
+  isConflictingSignalingGeneration,
+  isActiveGenerationAllowed,
+  isRendezvousExpired,
+  shouldForwardSignalingMessage,
+} from './signaling-lifetime'
 
 describe('signaling rendezvous lifetime', () => {
+  test('does not forward the client completion acknowledgement to the TV', () => {
+    expect(shouldForwardSignalingMessage({ v: 1, type: 'signal.complete', generation: 'generation-1', attemptId: 'attempt-1' })).toBe(false)
+    expect(shouldForwardSignalingMessage({
+      v: 1,
+      type: 'signal.offer',
+      generation: 'generation-1',
+      attemptId: 'attempt-1',
+      description: { type: 'offer', sdp: 'v=0' },
+    })).toBe(true)
+  })
+
   test('expires unused credentials but keeps an authenticated peer generation alive', () => {
     expect(isRendezvousExpired(false, 1_000, 1_001)).toBe(true)
     expect(isRendezvousExpired(true, 1_000, 1_001)).toBe(false)
@@ -12,5 +28,11 @@ describe('signaling rendezvous lifetime', () => {
     expect(isActiveGenerationAllowed(undefined, 'generation-1')).toBe(true)
     expect(isActiveGenerationAllowed('generation-1', 'generation-1')).toBe(true)
     expect(isActiveGenerationAllowed('generation-1', 'generation-2')).toBe(false)
+  })
+
+  test('allows the client hello to bind a device that has no client generation yet', () => {
+    expect(isConflictingSignalingGeneration(undefined, 'generation-1')).toBe(false)
+    expect(isConflictingSignalingGeneration('generation-1', 'generation-1')).toBe(false)
+    expect(isConflictingSignalingGeneration('generation-1', 'generation-2')).toBe(true)
   })
 })

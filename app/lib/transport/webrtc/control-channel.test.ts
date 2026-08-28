@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { MAX_PAYLOAD_BYTES } from '../../../../shared/types/protocol'
 import { parseControlMessage } from './control-channel'
 
 describe('WebRTC control channel parsing', () => {
@@ -33,5 +34,21 @@ describe('WebRTC control channel parsing', () => {
     expect(parseControlMessage('{').kind).toBe('error')
     expect(parseControlMessage(JSON.stringify({ v: 1, id: 'm', type: 'eq.set', ts: 1, payload: {} })).kind).toBe('error')
     expect(parseControlMessage(JSON.stringify({ v: 1, id: 'm', type: 'state.snapshot', ts: 1, payload: null })).kind).toBe('error')
+  })
+
+  test('rejects an oversized UTF-8 control message before parsing', () => {
+    const message = JSON.stringify({
+      v: 1,
+      id: 'oversized',
+      type: 'pong',
+      ts: 1,
+      payload: { padding: 'x'.repeat(MAX_PAYLOAD_BYTES) },
+    })
+    const result = parseControlMessage(message)
+    expect(result).toEqual({
+      kind: 'error',
+      code: 'control_too_large',
+      message: 'The TV sent an oversized control message.',
+    })
   })
 })

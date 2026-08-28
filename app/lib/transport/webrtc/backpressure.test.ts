@@ -49,4 +49,18 @@ describe('bounded capture backpressure', () => {
     await expect(pending).rejects.toThrow('closed during upload')
     expect(queue.pendingFrames).toBe(0)
   })
+
+  test('cancels a pending frame without waiting for the drain timeout', async () => {
+    const queue = new BoundedCaptureQueue({
+      maxFrames: 2,
+      highWaterBytes: 4,
+      send: () => 4,
+    })
+    queue.updateBufferedAmount(4)
+    const controller = new AbortController()
+    const pending = queue.enqueue(new ArrayBuffer(4), { signal: controller.signal })
+    controller.abort()
+    await expect(pending).rejects.toThrow('upload was cancelled')
+    expect(queue.pendingFrames).toBe(0)
+  })
 })

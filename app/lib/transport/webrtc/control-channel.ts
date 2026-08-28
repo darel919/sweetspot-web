@@ -3,8 +3,10 @@ import {
   type TransportCapabilityMessage,
 } from '../../../../shared/transport/capabilities'
 import {
+  MAX_PAYLOAD_BYTES,
   isDeviceToClient,
   isEnvelope,
+  utf8ByteLength,
   validatePayload,
   type Envelope,
 } from '../../../../shared/types/protocol'
@@ -17,6 +19,9 @@ export type ControlMessage =
 
 export function parseControlMessage(data: unknown): ControlMessage {
   if (typeof data !== 'string') return { kind: 'ignored' }
+  if (utf8ByteLength(data) > MAX_PAYLOAD_BYTES) {
+    return { kind: 'error', code: 'control_too_large', message: 'The TV sent an oversized control message.' }
+  }
   let value: unknown
   try {
     value = JSON.parse(data)
@@ -39,6 +44,7 @@ export interface ControlChannelHandlers {
   onOpen: () => void
   onClose: () => void
   onError: () => void
+  onBufferedAmountLow: () => void
 }
 
 export function bindControlChannel(
@@ -51,5 +57,6 @@ export function bindControlChannel(
   channel.onopen = () => { if (isCurrent()) handlers.onOpen() }
   channel.onclose = () => { if (isCurrent()) handlers.onClose() }
   channel.onerror = () => { if (isCurrent()) handlers.onError() }
+  channel.onbufferedamountlow = () => { if (isCurrent()) handlers.onBufferedAmountLow() }
   if (!isCurrent()) channel.close()
 }

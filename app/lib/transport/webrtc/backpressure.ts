@@ -9,6 +9,8 @@ interface PendingFrame {
   resolve: () => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
+  signal?: AbortSignal
+  abortListener?: () => void
 }
 
 /** Bounded FIFO for capture frames. Control traffic never enters this queue. */
@@ -28,10 +30,11 @@ export class BoundedCaptureQueue {
     return this.pending.length
   }
 
-  enqueue(frame: ArrayBuffer): Promise<void> {
+  enqueue(frame: ArrayBuffer, options: { signal?: AbortSignal } = {}): Promise<void> {
     if (this.pending.length >= this.options.maxFrames) {
       return Promise.reject(new Error('The capture buffer is full.'))
     }
+    if (options.signal?.aborted) return Promise.reject(new Error('The capture upload was cancelled.'))
     return new Promise((resolve, reject) => {
       let item: PendingFrame
       item = {
@@ -39,6 +42,11 @@ export class BoundedCaptureQueue {
         resolve,
         reject,
         timeout: setTimeout(() => this.expire(item), 15_000),
+        signal: options.signal,
+      }
+      if (item.signal) {
+        item.abortListener = () => this.remove(item, new Error('The capture upload was cancelled.'))
+        item.signal.addEventListener('abort', item.abortListener, { once: true })
       }
       this.pending.push(item)
       this.pump()
@@ -53,7 +61,7 @@ export class BoundedCaptureQueue {
   reset(error = new Error('The direct capture channel closed during upload.')): void {
     const pending = this.pending.splice(0)
     for (const item of pending) {
-      clearTimeout(item.timeout)
+      this.clearTimers(item)
       item.reject(error)
     }
     this.bufferedAmount = 0
@@ -65,14 +73,15 @@ export class BoundedCaptureQueue {
     try {
       while (this.pending.length > 0) {
         const next = this.pending[0]
+        if (!next) return
         if (this.bufferedAmount + next.frame.byteLength > this.options.highWaterBytes) return
         this.pending.shift()
         try {
           this.bufferedAmount = Math.max(0, this.options.send(next.frame))
-          clearTimeout(next.timeout)
+          this.clearTimers(next)
           next.resolve()
         } catch (error: unknown) {
-          clearTimeout(next.timeout)
+          this.clearTimers(next)
           next.reject(error instanceof Error ? error : new Error('The direct capture channel rejected the chunk.'))
         }
       }
@@ -85,7 +94,23 @@ export class BoundedCaptureQueue {
     const index = this.pending.indexOf(item)
     if (index < 0) return
     this.pending.splice(index, 1)
+    this.clearTimers(item)
     item.reject(new Error('The direct capture channel did not drain.'))
     this.pump()
+  }
+
+  private remove(item: PendingFrame, error: Error): void {
+    const index = this.pending.indexOf(item)
+    if (index < 0) return
+    this.pending.splice(index, 1)
+    this.clearTimers(item)
+    item.reject(error)
+    this.pump()
+  }
+
+  private clearTimers(item: PendingFrame): void {
+    clearTimeout(item.timeout)
+    if (item.signal && item.abortListener) item.signal.removeEventListener('abort', item.abortListener)
+    item.abortListener = undefined
   }
 }

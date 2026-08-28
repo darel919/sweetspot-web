@@ -44,9 +44,26 @@ The browser creates two ordered, reliable channels. The TV accepts only the same
 
 Text JSON carries the v1 application envelope and the `sweetspot.transport` capability handshake. It carries commands, request/reply messages, TV state, calibration job state and actions, diagnostics, cancellation, and application ping/RTT probes. Control has its own event path and is never queued behind PCM.
 
+Every UTF-8 control message, including its envelope and payload, is limited to
+16 KiB. Both endpoints validate the byte length before parsing or queueing it.
+The browser also validates outbound message direction and payload shape, so a
+remote client cannot send TV-owned candidate or validation decisions.
+
 ### `capture`
 
 Binary frames carry only the capture stream. The browser honors `bufferedAmount` and `bufferedamountlow` with a bounded queue. The initial limits are 16 KiB PCM chunks and 32 KiB complete frames. A slow receiver rejects or pauses bounded work rather than accumulating a whole recording in memory.
+
+The TV publishes `calibration.capture.started` only after it accepts the
+TV-issued capture action. The browser sends `capture.begin` only after that
+barrier, then waits for a cumulative eight-chunk receive window. The TV
+publishes the next window after each eight accepted chunks. This application
+window complements SCTP `bufferedAmount` backpressure and keeps the TV's
+partial-file writer from being overrun.
+
+The job start payload may select `auto` or `advanced`. Auto can stop optional
+refinement once the mandatory solution is sufficient. Advanced continues the
+optional forward and backward positions before staging. The mode is persisted
+in the TV job view and is never inferred or decided by the browser.
 
 ## Capability handshake
 

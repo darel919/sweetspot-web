@@ -46,6 +46,7 @@ const metadata: CalibrationCaptureFrameMetadata = {
   byteCount: 12,
   contentSha256: 'a'.repeat(64),
 }
+const captureAttemptId = 'capture-attempt-1'
 
 describe('calibration capture stream', () => {
   test('consumes the cross-repository capture vector', () => {
@@ -64,6 +65,7 @@ describe('calibration capture stream', () => {
         kind: 'begin',
         sessionId: transportFixture.sessionId,
         captureId: transportFixture.captureId,
+        captureAttemptId: transportFixture.captureAttemptId,
         metadata,
         expectedSampleCount: 4,
         expectedByteCount: 16,
@@ -77,6 +79,7 @@ describe('calibration capture stream', () => {
         kind: 'end',
         sessionId: transportFixture.sessionId,
         captureId: transportFixture.captureId,
+        captureAttemptId: transportFixture.captureAttemptId,
         chunkCount: 2,
         finalSampleCount: 4,
         finalByteCount: 16,
@@ -93,6 +96,7 @@ describe('calibration capture stream', () => {
     const begin = encodeCaptureBegin({
       sessionId: 'session-1',
       captureId: metadata.captureId,
+      captureAttemptId,
       metadata: metadataBase,
       expectedSampleCount: metadata.sampleCount,
       expectedByteCount: metadata.byteCount,
@@ -103,6 +107,7 @@ describe('calibration capture stream', () => {
         kind: 'begin',
         sessionId: 'session-1',
         captureId: metadata.captureId,
+        captureAttemptId,
         metadata: metadataBase,
         expectedSampleCount: 3,
         expectedByteCount: 12,
@@ -117,6 +122,7 @@ describe('calibration capture stream', () => {
     const chunk = encodeCaptureChunk({
       sessionId: 'session-1',
       captureId: metadata.captureId,
+      captureAttemptId,
       sequence: 0,
       sampleCount: 3,
       pcm,
@@ -131,6 +137,7 @@ describe('calibration capture stream', () => {
     const end = encodeCaptureEnd({
       sessionId: 'session-1',
       captureId: metadata.captureId,
+      captureAttemptId,
       chunkCount: 1,
       finalSampleCount: metadata.sampleCount,
       finalByteCount: metadata.byteCount,
@@ -143,6 +150,7 @@ describe('calibration capture stream', () => {
         kind: 'end',
         sessionId: 'session-1',
         captureId: metadata.captureId,
+        captureAttemptId,
         chunkCount: 1,
         finalSampleCount: 3,
         finalByteCount: 12,
@@ -157,6 +165,7 @@ describe('calibration capture stream', () => {
     const encoded = encodeCaptureChunk({
       sessionId: 'session-1',
       captureId: metadata.captureId,
+      captureAttemptId,
       sequence: 0,
       sampleCount: MAX_CAPTURE_CHUNK_BYTES / 4,
       pcm,
@@ -169,6 +178,7 @@ describe('calibration capture stream', () => {
     const encoded = encodeCaptureChunk({
       sessionId: 'session-1',
       captureId: metadata.captureId,
+      captureAttemptId,
       sequence: 0,
       sampleCount: 1,
       pcm: new ArrayBuffer(4),
@@ -185,6 +195,7 @@ describe('calibration capture stream', () => {
     const encoded = encodeCaptureBegin({
       sessionId: 'session-1',
       captureId: metadata.captureId,
+      captureAttemptId,
       metadata: metadataBase,
       expectedSampleCount: null,
       expectedByteCount: null,
@@ -206,9 +217,23 @@ describe('calibration capture stream', () => {
     expect(() => encodeCaptureChunk({
       sessionId: 'session-1',
       captureId: metadata.captureId,
+      captureAttemptId,
       sequence: 0,
       sampleCount: MAX_CAPTURE_CHUNK_BYTES / 4 + 1,
       pcm: new ArrayBuffer(MAX_CAPTURE_CHUNK_BYTES + 4),
     })).toThrow('chunk exceeds')
+  })
+
+  test('rejects an empty finalized capture', () => {
+    expect(() => encodeCaptureEnd({
+      sessionId: 'session-1',
+      captureId: metadata.captureId,
+      captureAttemptId,
+      chunkCount: 0,
+      finalSampleCount: metadata.sampleCount,
+      finalByteCount: metadata.byteCount,
+      finalSha256: metadata.contentSha256,
+      metadata,
+    })).toThrow()
   })
 })

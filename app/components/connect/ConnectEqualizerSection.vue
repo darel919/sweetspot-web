@@ -7,6 +7,7 @@ defineProps<{
   eqDraft: readonly number[]
   eqDirty: boolean
   profileName: string
+  locked: boolean
 }>()
 
 const emit = defineEmits<{
@@ -37,8 +38,8 @@ function updateProfileName(event: Event) {
     <h2 class="label">02 · Equalizer</h2>
 
     <div class="actions">
-      <button @click="emit('set-engine', true)" :disabled="snapshot.engine.enabled">Enable</button>
-      <button :disabled="!snapshot.engine.enabled" @click="emit('set-engine', false)">Bypass</button>
+      <button @click="emit('set-engine', true)" :disabled="locked || snapshot.engine.enabled">Enable</button>
+      <button :disabled="locked || !snapshot.engine.enabled" @click="emit('set-engine', false)">Bypass</button>
     </div>
 
     <div v-if="presets.length" class="actions">
@@ -47,6 +48,7 @@ function updateProfileName(event: Event) {
         v-for="p in presets"
         :key="p.id"
         :class="{ active: snapshot.engine.activePreset === p.id }"
+        :disabled="locked"
         @click="emit('apply-preset', p.id)"
       >
         {{ p.name }}
@@ -62,6 +64,7 @@ function updateProfileName(event: Event) {
           :max="snapshot.userEq.maxDb"
           step="0.5"
           :value="lvl"
+          :disabled="locked"
           @input="emit('band-input', i, $event)"
           @change="emit('commit-bands')"
         />
@@ -70,7 +73,7 @@ function updateProfileName(event: Event) {
     </div>
 
     <div class="actions">
-      <button :disabled="!eqDirty" @click="emit('reset-bands')">Discard changes</button>
+      <button :disabled="locked || !eqDirty" @click="emit('reset-bands')">Discard changes</button>
     </div>
 
     <form class="inline-form" @submit.prevent="emit('save-profile')">
@@ -78,17 +81,18 @@ function updateProfileName(event: Event) {
         :value="profileName"
         type="text"
         placeholder="new profile name"
+        :disabled="locked"
         @input="updateProfileName"
       />
-      <button type="submit" :disabled="!profileName.trim()">Save</button>
+      <button type="submit" :disabled="locked || !profileName.trim()">Save</button>
     </form>
 
     <ul v-if="snapshot.profiles.length" class="list">
       <li v-for="p in snapshot.profiles" :key="p.id">
         <span>{{ p.name }}</span>
         <span class="list-actions">
-          <button @click="emit('load-profile', p.name)">Load</button>
-          <button @click="emit('delete-profile', p.name)">Delete</button>
+          <button :disabled="locked" @click="emit('load-profile', p.name)">Load</button>
+          <button :disabled="locked" @click="emit('delete-profile', p.name)">Delete</button>
         </span>
       </li>
     </ul>

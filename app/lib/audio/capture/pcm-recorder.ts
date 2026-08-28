@@ -1,5 +1,25 @@
 import type { MicrophoneCapture } from './microphone'
 
+let workletSourcePromise: Promise<string> | null = null
+
+function loadCaptureWorkletSource(): Promise<string> {
+  if (workletSourcePromise) return workletSourcePromise
+  workletSourcePromise = fetch('/calibration-capture-worklet.js', { cache: 'force-cache' })
+    .then((response) => {
+      if (!response.ok) throw new Error('The capture worklet could not be loaded.')
+      return response.text()
+    })
+    .catch((error: unknown) => {
+      workletSourcePromise = null
+      throw error
+    })
+  return workletSourcePromise
+}
+
+export async function preloadPcmCaptureWorklet(): Promise<void> {
+  await loadCaptureWorkletSource()
+}
+
 export interface CaptureSignalDiagnostics {
   sampleRate: number
   channelCount: number
@@ -50,6 +70,7 @@ function isStoppedMessage(value: unknown): value is StoppedMessage {
 export interface PcmRecorderOptions {
   onTrackEnded?: () => void
   onChunk?: (samples: Float32Array) => Promise<void> | void
+  shouldStreamChunk?: () => boolean
   retainSamples?: boolean
 }
 
@@ -111,7 +132,13 @@ class PcmRecorderImpl implements PcmRecorder {
     if (!this.context) {
       this.context = new AudioContext({ latencyHint: 'interactive' })
       try {
-        await this.context.audioWorklet.addModule('/calibration-capture-worklet.js')
+        const source = await loadCaptureWorkletSource()
+        const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }))
+        try {
+          await this.context.audioWorklet.addModule(moduleUrl)
+        } finally {
+          URL.revokeObjectURL(moduleUrl)
+        }
       } catch (error: unknown) {
         await this.context.close()
         this.context = null
@@ -241,7 +268,7 @@ class PcmRecorderImpl implements PcmRecorder {
         if (absolute >= 0.999) this.windowClippedSamples++
       }
       if (this.options.retainSamples !== false) this.chunks.push({ startSample, samples })
-      if (!this.options.onChunk || this.streamError) return
+      if (!this.options.onChunk || this.streamError || this.options.shouldStreamChunk?.() === false) return
       if (this.streamInFlight >= PcmRecorderImpl.MAX_PENDING_STREAM_CHUNKS) {
         this.streamPaused = true
         this.node?.port.postMessage({ type: 'pause' })

@@ -22,6 +22,7 @@ const usableView: CalibrationJobView = {
   revision: 4,
   analyzerRevision: 'android-response-v1',
   sweepRevision: 'android-sweep-v3',
+  mode: 'advanced',
   phase: 'validating',
   acceptedPositions: ['center', 'left', 'right', 'forward'],
   excludedPositions: [],
@@ -92,10 +93,12 @@ describe('TV-owned calibration job protocol', () => {
     expect(validatePayload('calibration.capture.ready', {
       jobId: 'job-1',
       captureId: 'center-left-0',
+      captureAttemptId: 'capture-attempt-1',
     })).toBeNull()
     expect(validatePayload('calibration.capture.uploaded', {
       jobId: 'job-1',
       captureId: 'center-left-0',
+      captureAttemptId: 'capture-attempt-1',
       contentSha256: 'a'.repeat(64),
       sampleCount: 4,
       byteCount: 16,
@@ -104,6 +107,7 @@ describe('TV-owned calibration job protocol', () => {
     expect(validatePayload('calibration.capture.uploaded', {
       jobId: 'job-1',
       captureId: 'center-left-0',
+      captureAttemptId: 'capture-attempt-1',
       contentSha256: 'invalid',
       sampleCount: 4,
       byteCount: 16,
@@ -112,22 +116,26 @@ describe('TV-owned calibration job protocol', () => {
     expect(validatePayload('calibration.capture.rejected', {
       jobId: 'job-1',
       captureId: 'center-left-0',
+      captureAttemptId: 'capture-attempt-1',
       reason: 'The capture stream was incomplete',
     })).toBeNull()
     expect(validatePayload('calibration.validation.capture.ready', {
       jobId: 'job-1',
       captureId: 'validation-candidate-0',
+      captureAttemptId: 'capture-attempt-1',
       candidateId: 'candidate-4',
     })).toBeNull()
     expect(validatePayload('calibration.capture.finished', {
       jobId: 'job-1',
       captureId: 'center-left-0',
+      captureAttemptId: 'capture-attempt-1',
     })).toBeNull()
   })
 
   test('accepts a usable job view and rejects contradictory usability', () => {
     expect(isCalibrationJobView(usableView)).toBe(true)
     expect(validatePayload('calibration.job.state', usableView)).toBeNull()
+    expect(validatePayload('calibration.job.state', { ...usableView, mode: undefined })).not.toBeNull()
     expect(validatePayload('calibration.job.state', {
       ...usableView,
       minimumViableCalibration: false,

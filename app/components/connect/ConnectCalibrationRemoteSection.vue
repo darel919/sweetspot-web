@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type {
   CalibrationCaptureMetadata,
+  CalibrationJobStartMode,
   CalibrationJobPhase,
   CalibrationJobView,
   CalibrationNextAction,
@@ -20,16 +21,20 @@ const props = defineProps<{
   profiles: readonly MicCalibrationProfile[]
   selectedProfileId: string
   profileError: string
+  jobStateKnown: boolean
+  captureResourceReady: boolean
+  captureResourceError: string
 }>()
 
 const emit = defineEmits<{
-  (event: 'start'): void
+  (event: 'start', mode: CalibrationJobStartMode): void
   (event: 'resume'): void
   (event: 'cancel-capture'): void
   (event: 'cancel-refinement'): void
   (event: 'finish'): void
   (event: 'discard'): void
   (event: 'retry-upload'): void
+  (event: 'retry-capture-resources'): void
   (event: 'select-profile', profileId: string): void
 }>()
 
@@ -51,16 +56,29 @@ const terminal = computed(() => props.job !== null && terminalPhases.includes(pr
 const canStart = computed(() => props.deviceOnline
   && props.snapshot.capabilities.supportsSweep
   && props.snapshot.capabilities.supportsCalibratedCorrection
+  && props.jobStateKnown
+  && props.captureResourceReady
   && !active.value
   && props.captureState === 'idle')
-const canResume = computed(() => props.deviceOnline && props.job !== null && !terminal.value && props.captureState === 'idle')
-const canRetryCapture = computed(() => props.captureState === 'error'
+const canResume = computed(() => props.deviceOnline && props.captureResourceReady
+  && props.jobStateKnown && props.job !== null && !terminal.value && props.captureState === 'idle')
+const canRetryCapture = computed(() => props.deviceOnline && props.captureState === 'error'
+  && props.captureResourceReady
   && (action.value?.kind === 'capture' || action.value?.kind === 'validate'))
 const canCancelCapture = computed(() => props.captureState === 'opening'
   || props.captureState === 'recording'
   || props.captureState === 'uploading'
   || props.captureState === 'waiting')
+const optionalRefinementCapture = computed(() => active.value
+  && action.value?.kind === 'capture'
+  && action.value.optional)
+const canFinishCurrent = computed(() => active.value
+  && props.job?.minimumViableCalibration
+  && action.value?.kind === 'capture')
 const statusText = computed(() => {
+  if (!props.jobStateKnown) return 'Checking the TV’s saved calibration state…'
+  if (props.captureResourceError) return props.captureResourceError
+  if (!props.captureResourceReady) return 'Preparing browser microphone capture…'
   if (props.captureState === 'opening') return 'Opening the microphone…'
   if (props.captureState === 'recording') return 'Recording. Keep the phone still.'
   if (props.captureState === 'uploading') return 'Sending the recording to the TV…'
@@ -84,6 +102,12 @@ const actionInstruction = computed(() => {
   if (!current) return null
   if (current.kind === 'capture' || current.kind === 'validate') return current.instruction
   return current.kind === 'wait' ? current.message : 'Calibration is complete.'
+})
+
+const modeLabel = computed(() => {
+  if (props.job?.mode === 'advanced') return 'Advanced room calibration'
+  if (props.job?.mode === 'auto') return 'Auto room calibration'
+  return 'Calibration mode unavailable'
 })
 
 function profileChanged(event: Event) {
@@ -122,6 +146,10 @@ function confidenceLabel(): string {
       </label>
     </div>
     <p v-if="profileError" class="error">{{ profileError }}</p>
+    <p v-if="captureResourceError" class="error" role="alert">
+      {{ captureResourceError }}
+      <button class="inline-button" @click="emit('retry-capture-resources')">Retry microphone setup</button>
+    </p>
     <p v-if="!snapshot.capabilities.supportsSweep" class="note">
       This TV build does not advertise a validated calibration sweep.
     </p>
@@ -130,12 +158,13 @@ function confidenceLabel(): string {
     </p>
 
     <div class="actions">
-      <button :disabled="!canStart" @click="emit('start')">Start Auto Room Calibration</button>
+      <button :disabled="!canStart" @click="emit('start', 'auto')">Start Auto Room Calibration</button>
+      <button :disabled="!canStart" @click="emit('start', 'advanced')">Start Advanced Room Calibration</button>
       <button v-if="canResume" @click="emit('resume')">Resume saved calibration</button>
       <button v-if="canRetryCapture" @click="emit('retry-upload')">Retry capture</button>
-      <button v-if="canCancelCapture && !(captureState === 'waiting' && active && job?.minimumViableCalibration)" @click="emit('cancel-capture')">Cancel capture</button>
-      <button v-if="active && job?.minimumViableCalibration" :disabled="captureState === 'opening' || captureState === 'recording' || captureState === 'uploading'" @click="emit('finish')">Finish with current solution</button>
-      <button v-if="active && job?.minimumViableCalibration" :disabled="captureState !== 'idle' && captureState !== 'waiting'" @click="emit('cancel-refinement')">Stop optional refinement</button>
+      <button v-if="canCancelCapture && !(captureState === 'waiting' && optionalRefinementCapture)" @click="emit('cancel-capture')">Cancel capture</button>
+      <button v-if="canFinishCurrent" :disabled="captureState === 'opening' || captureState === 'recording' || captureState === 'uploading'" @click="emit('finish')">Finish with current solution</button>
+      <button v-if="optionalRefinementCapture && job?.minimumViableCalibration" :disabled="captureState !== 'idle' && captureState !== 'waiting'" @click="emit('cancel-refinement')">Stop optional refinement</button>
       <button v-if="job && !terminal" :disabled="captureState === 'uploading'" @click="emit('discard')">Discard calibration job</button>
     </div>
 
@@ -150,6 +179,7 @@ function confidenceLabel(): string {
 
     <dl v-if="job" class="spec">
       <dt>job</dt><dd>{{ job.jobId }}</dd>
+      <dt>mode</dt><dd>{{ modeLabel }}</dd>
       <dt>phase</dt><dd>{{ job.phase.replaceAll('_', ' ') }}</dd>
       <dt>positions used</dt><dd>{{ job.acceptedPositions.map(positionLabel).join(', ') || 'none' }}</dd>
       <dt>positions excluded</dt><dd>{{ job.excludedPositions.map(positionLabel).join(', ') || 'none' }}</dd>
@@ -164,7 +194,7 @@ function confidenceLabel(): string {
       The TV may keep it while an optional position is retried or excluded.
     </p>
     <p v-if="job?.phase === 'complete'" class="calibration-result calibration-result-good">
-      AUTO ROOM CALIBRATION COMPLETE · {{ confidenceLabel().toUpperCase() }} CONFIDENCE
+      {{ modeLabel.toUpperCase() }} COMPLETE · {{ confidenceLabel().toUpperCase() }} CONFIDENCE
     </p>
     <p v-else-if="job?.phase === 'failed' && job.minimumViableCalibration" class="calibration-result calibration-result-good">
       CALIBRATION RETAINED · {{ job.lastError?.message ?? 'The TV kept the best verified room solution.' }}

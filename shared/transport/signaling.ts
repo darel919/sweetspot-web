@@ -24,10 +24,11 @@ export interface SignalCandidate {
 
 export type SignalingMessage =
   | { v: typeof SIGNALING_VERSION; type: 'signal.hello'; generation: string }
-  | { v: typeof SIGNALING_VERSION; type: 'signal.offer'; generation: string; description: SignalDescription }
-  | { v: typeof SIGNALING_VERSION; type: 'signal.answer'; generation: string; description: SignalDescription }
-  | { v: typeof SIGNALING_VERSION; type: 'signal.ice'; generation: string; candidate: SignalCandidate }
-  | { v: typeof SIGNALING_VERSION; type: 'signal.complete'; generation: string }
+  | { v: typeof SIGNALING_VERSION; type: 'signal.offer'; generation: string; attemptId: string; description: SignalDescription }
+  | { v: typeof SIGNALING_VERSION; type: 'signal.answer'; generation: string; attemptId: string; description: SignalDescription }
+  | { v: typeof SIGNALING_VERSION; type: 'signal.ice'; generation: string; attemptId: string; candidate: SignalCandidate }
+  | { v: typeof SIGNALING_VERSION; type: 'signal.complete'; generation: string; attemptId: string }
+  | { v: typeof SIGNALING_VERSION; type: 'signal.complete.ack'; generation: string; attemptId: string }
   | { v: typeof SIGNALING_VERSION; type: 'signal.ready'; role: SignalingRole; peerOnline: boolean }
   | { v: typeof SIGNALING_VERSION; type: 'signal.peer'; role: SignalingRole; online: boolean }
   | { v: typeof SIGNALING_VERSION; type: 'signal.error'; code: string; message: string }
@@ -44,6 +45,10 @@ function validGeneration(value: unknown): value is string {
   return boundedText(value, 128) && /^[A-Za-z0-9_-]+$/.test(value)
 }
 
+function validAttemptId(value: unknown): value is string {
+  return boundedText(value, 128) && /^[A-Za-z0-9_-]+$/.test(value)
+}
+
 function isDescription(value: unknown): value is SignalDescription {
   return isRecord(value)
     && (value.type === 'offer' || value.type === 'answer')
@@ -52,8 +57,8 @@ function isDescription(value: unknown): value is SignalDescription {
 
 function isCandidate(value: unknown): value is SignalCandidate {
   return isRecord(value)
-    && boundedText(value.candidate)
-    && (value.sdpMid === null || typeof value.sdpMid === 'string')
+    && boundedText(value.candidate, MAX_SIGNALING_TEXT_BYTES)
+    && (value.sdpMid === null || typeof value.sdpMid === 'string' && value.sdpMid.length <= 128)
     && typeof value.sdpMLineIndex === 'number'
     && Number.isInteger(value.sdpMLineIndex)
     && value.sdpMLineIndex >= 0
@@ -71,11 +76,13 @@ export function isSignalingMessage(value: unknown): value is SignalingMessage {
       return validGeneration(value.generation)
     case 'signal.offer':
     case 'signal.answer':
-      return validGeneration(value.generation) && isDescription(value.description)
+      return validGeneration(value.generation) && validAttemptId(value.attemptId) && isDescription(value.description)
     case 'signal.ice':
-      return validGeneration(value.generation) && isCandidate(value.candidate)
+      return validGeneration(value.generation) && validAttemptId(value.attemptId) && isCandidate(value.candidate)
     case 'signal.complete':
-      return validGeneration(value.generation)
+      return validGeneration(value.generation) && validAttemptId(value.attemptId)
+    case 'signal.complete.ack':
+      return validGeneration(value.generation) && validAttemptId(value.attemptId)
     case 'signal.ready':
       return (value.role === 'device' || value.role === 'client') && typeof value.peerOnline === 'boolean'
     case 'signal.peer':
