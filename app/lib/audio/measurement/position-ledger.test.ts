@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { CALIBRATION_POSITION_TARGETS, type MeasurementContext } from '../../../../shared/types/protocol'
 import { decideNextCapture, type ConvergenceAssessment } from './adaptive-planner'
 import {
-  acceptedPositionCount,
   appendCompositeCapture,
+  completeAcceptedPositionCount,
   createPositionLedger,
   projectAcceptedRecords,
   projectPhysicalPositionLedger,
@@ -150,7 +150,7 @@ describe('append-only physical-position ledger', () => {
     ledger = append(ledger, context('right', 2), composite(analysis('ok', 4), analysis('ok', 5)))
 
     const projected = projectPhysicalPositionLedger(ledger)
-    expect(acceptedPositionCount(ledger)).toBe(3)
+    expect(completeAcceptedPositionCount(ledger)).toBe(3)
     expect(projected.positions).toHaveLength(3)
     expect(projectAcceptedRecords(ledger)).toHaveLength(6)
     expect(decideNextCapture(projected, converged)).toEqual({
@@ -235,7 +235,7 @@ describe('append-only physical-position ledger', () => {
     ledger = append(ledger, context('backward', 4), composite(analysis('direct_arrival_low_confidence'), analysis('ok')))
 
     const projected = projectPhysicalPositionLedger(ledger)
-    expect(acceptedPositionCount(ledger)).toBe(4)
+    expect(completeAcceptedPositionCount(ledger)).toBe(4)
     expect(projected.positions.find((position) => position.positionId === 'backward')).toMatchObject({
       left: { kind: 'rejected' },
       right: { kind: 'accepted' },

@@ -1,4 +1,4 @@
-export interface CaptureTrackSettings {
+interface CaptureTrackSettings {
   sampleRate: number | null
   channelCount: number | null
   echoCancellation: boolean | null
@@ -6,12 +6,12 @@ export interface CaptureTrackSettings {
   autoGainControl: boolean | null
 }
 
-export interface CaptureCapabilityRange {
+interface CaptureCapabilityRange {
   min: number
   max: number
 }
 
-export interface CaptureTrackCapabilities {
+interface CaptureTrackCapabilities {
   sampleRate: CaptureCapabilityRange | null
   channelCount: CaptureCapabilityRange | null
   echoCancellation: boolean[]
@@ -26,9 +26,9 @@ export interface MicrophoneCapture {
   capabilities: CaptureTrackCapabilities
 }
 
-export type MicrophoneErrorCode = 'microphone_unavailable' | 'microphone_ended'
+type MicrophoneErrorCode = 'microphone_unavailable' | 'microphone_ended'
 
-export class MicrophoneCaptureError extends Error {
+class MicrophoneCaptureError extends Error {
   readonly code: MicrophoneErrorCode
 
   constructor(code: MicrophoneErrorCode, message: string) {

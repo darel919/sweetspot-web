@@ -2,8 +2,7 @@
   "name": "sweetspot-web",
   "dependencies": {
     "nuxt": "^4.5.2",
-    "vue": "^3.5.41",
-    "vue-router": "^5.2.0"
+    "vue": "^3.5.41"
   },
   "private": true,
   "scripts": {

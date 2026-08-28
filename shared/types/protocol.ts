@@ -123,7 +123,7 @@ export interface CalibrationState {
   transaction: CalibrationTransaction
 }
 
-export type CalibrationValidationStatus = 'pending' | 'rolling_back' | 'passed' | 'worse' | 'inconclusive' | 'failed' | 'imported'
+export type CalibrationValidationStatus = 'pending' | 'rolling_back' | 'passed' | 'neutral' | 'worse' | 'inconclusive' | 'failed' | 'imported'
 
 export const CALIBRATION_VALIDATION_WORSE_TOLERANCE_DB = 0.5
 
@@ -325,6 +325,24 @@ export interface CalibrationCaptureSettings {
   autoGainControl: boolean | null
 }
 
+export type CalibrationMicrophoneProfileStatus = 'validated' | 'provisional' | 'unvalidated'
+
+const CALIBRATION_MIC_PROFILE_MIN_FREQUENCY_HZ = 1
+const CALIBRATION_MIC_PROFILE_MAX_FREQUENCY_HZ = 192_000
+const CALIBRATION_MIC_PROFILE_MAX_RESPONSE_DB = 120
+
+export interface CalibrationMicrophoneProfilePayload {
+  id: string
+  revision: string
+  capturePathStatus: CalibrationMicrophoneProfileStatus
+  frequenciesHz: number[]
+  responseDb: number[]
+  normalizeAtHz: number
+  trustMinHz: number
+  trustFullMaxHz: number
+  trustTaperToHz: number
+}
+
 export interface CalibrationCaptureMetadata {
   jobId: string
   captureId: string
@@ -339,6 +357,7 @@ export interface CalibrationCaptureMetadata {
   userAgent: string
   microphoneProfileId: string
   microphoneProfileRevision: string
+  microphoneProfile: CalibrationMicrophoneProfilePayload
   capturedAtMs: number
 }
 
@@ -352,8 +371,6 @@ export interface CalibrationCaptureReadyPayload {
 }
 
 export interface CalibrationCaptureFinishedPayload extends CalibrationCaptureReadyPayload {}
-
-export interface CalibrationCaptureMetadataPayload extends CalibrationCaptureMetadata {}
 
 export type CalibrationCaptureUploadStatus = 'accepted' | 'rejected' | 'duplicate'
 
@@ -806,6 +823,7 @@ function isCalibrationTransaction(value: unknown): value is CalibrationTransacti
     && (value.validationStatus === 'pending'
       || value.validationStatus === 'rolling_back'
       || value.validationStatus === 'passed'
+      || value.validationStatus === 'neutral'
       || value.validationStatus === 'worse'
       || value.validationStatus === 'inconclusive'
       || value.validationStatus === 'failed'
@@ -975,7 +993,6 @@ const DEVICE_TARGETED_TYPES = [
   'calibration.job.discard',
   'calibration.job.finish',
   'calibration.capture.ready',
-  'calibration.capture.metadata',
   'calibration.validation.capture.ready',
   'calibrationSession.begin',
   'calibrationSession.end',
@@ -1897,7 +1914,13 @@ export function isCalibrationJobView(value: unknown): value is CalibrationJobVie
   if (value.minimumViableCalibration
     && !MANDATORY_CALIBRATION_POSITIONS.every((position) => value.acceptedPositions.includes(position))) return false
   if (value.bestSolution !== null
-    && !value.bestSolution.sourcePositionIds.every((position) => value.acceptedPositions.includes(position))) return false
+    && (!MANDATORY_CALIBRATION_POSITIONS.every((position) => value.bestSolution.sourcePositionIds.includes(position))
+      || !value.bestSolution.sourcePositionIds.every((position) => value.acceptedPositions.includes(position)))) return false
+  if (value.bestSolution !== null
+    && (value.confidence === null
+      || value.bestSolution.confidence.usableBandCount !== value.confidence.usableBandCount
+      || value.bestSolution.confidence.score !== value.confidence.score
+      || value.bestSolution.confidence.grade !== value.confidence.grade)) return false
   return value.minimumViableCalibration === (value.bestSolution !== null)
 }
 
@@ -1937,7 +1960,44 @@ function isCalibrationCaptureSettings(value: unknown): value is CalibrationCaptu
     && (value.autoGainControl === null || typeof value.autoGainControl === 'boolean')
 }
 
-export function isCalibrationCaptureMetadata(value: unknown): value is CalibrationCaptureMetadata {
+function isCalibrationMicrophoneProfilePayload(value: unknown): value is CalibrationMicrophoneProfilePayload {
+  if (!isRecord(value)
+    || !isBoundedText(value.id, 128)
+    || !isBoundedText(value.revision, 128)
+    || (value.capturePathStatus !== 'validated'
+      && value.capturePathStatus !== 'provisional'
+      && value.capturePathStatus !== 'unvalidated')
+    || !Array.isArray(value.frequenciesHz)
+    || !Array.isArray(value.responseDb)
+    || value.frequenciesHz.length < 2
+    || value.frequenciesHz.length > 512
+    || value.frequenciesHz.length !== value.responseDb.length
+    || !value.frequenciesHz.every((frequency) => isFiniteNumber(frequency)
+      && frequency >= CALIBRATION_MIC_PROFILE_MIN_FREQUENCY_HZ
+      && frequency <= CALIBRATION_MIC_PROFILE_MAX_FREQUENCY_HZ)
+    || !value.responseDb.every((response) => isFiniteNumber(response)
+      && Math.abs(response) <= CALIBRATION_MIC_PROFILE_MAX_RESPONSE_DB)
+    || !isFiniteNumber(value.normalizeAtHz)
+    || !isFiniteNumber(value.trustMinHz)
+    || !isFiniteNumber(value.trustFullMaxHz)
+    || !isFiniteNumber(value.trustTaperToHz)
+    || !(value.trustMinHz >= CALIBRATION_MIC_PROFILE_MIN_FREQUENCY_HZ
+      && value.trustMinHz <= CALIBRATION_MIC_PROFILE_MAX_FREQUENCY_HZ
+      && value.trustFullMaxHz >= CALIBRATION_MIC_PROFILE_MIN_FREQUENCY_HZ
+      && value.trustFullMaxHz <= CALIBRATION_MIC_PROFILE_MAX_FREQUENCY_HZ
+      && value.trustTaperToHz >= CALIBRATION_MIC_PROFILE_MIN_FREQUENCY_HZ
+      && value.trustTaperToHz <= CALIBRATION_MIC_PROFILE_MAX_FREQUENCY_HZ
+      && value.trustMinHz < value.trustFullMaxHz
+      && value.trustFullMaxHz < value.trustTaperToHz)
+    || value.normalizeAtHz < value.frequenciesHz[0]
+    || value.normalizeAtHz > value.frequenciesHz[value.frequenciesHz.length - 1]) return false
+  for (let index = 1; index < value.frequenciesHz.length; index++) {
+    if (value.frequenciesHz[index] <= value.frequenciesHz[index - 1]) return false
+  }
+  return true
+}
+
+function isCalibrationCaptureMetadata(value: unknown): value is CalibrationCaptureMetadata {
   if (!isRecord(value)) return false
   if (!isBoundedText(value.jobId, 128)
     || !isBoundedText(value.captureId, 128)
@@ -1959,6 +2019,9 @@ export function isCalibrationCaptureMetadata(value: unknown): value is Calibrati
     || !isBoundedText(value.userAgent, 512)
     || !isBoundedText(value.microphoneProfileId, 128)
     || !isBoundedText(value.microphoneProfileRevision, 128)
+    || !isCalibrationMicrophoneProfilePayload(value.microphoneProfile)
+    || value.microphoneProfile.id !== value.microphoneProfileId
+    || value.microphoneProfile.revision !== value.microphoneProfileRevision
     || !isFiniteNumber(value.capturedAtMs)
     || value.capturedAtMs <= 0) return false
   return true
@@ -2027,8 +2090,6 @@ export function validatePayload(type: string, payload: unknown): string | null {
       return isCalibrationJobIdPayload(payload) ? null : `${type} requires a job id`
     case 'calibration.capture.ready':
       return isCalibrationCaptureIdPayload(payload) ? null : `${type} requires a job id and capture id`
-    case 'calibration.capture.metadata':
-      return isCalibrationCaptureMetadata(payload) ? null : `${type} requires valid capture metadata`
     case 'calibration.validation.capture.ready':
       return isCalibrationValidationCaptureReadyPayload(payload)
         ? null

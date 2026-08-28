@@ -41,8 +41,9 @@ Device-targeted (client -> device): `state.get`, `engine.enable`,
 `calibration.reset`, `calibration.export`, `calibration.import`,
 `calibration.job.start`, `calibration.job.get`, `calibration.job.cancel`,
 `calibration.job.discard`, `calibration.job.finish`,
-`calibration.capture.ready`, `calibration.capture.metadata`,
-`calibration.validation.capture.ready`,
+`calibration.capture.ready`, `calibration.validation.capture.ready`.
+
+Legacy diagnostic session commands (client -> device):
 `calibrationSession.begin`,
 `calibrationSession.end`, `calibrationSession.abort`,
 `calibrationSession.loudness.start`, `calibrationSession.loudness.stop`,
@@ -50,12 +51,15 @@ Device-targeted (client -> device): `state.get`, `engine.enable`,
 `measurement.playSweep`, `measurement.abort`, `measurement.diagnostics`.
 
 Device-published (device -> clients): `state.snapshot`, `state.changed`,
+`calibration.exported`, `calibration.capture.finished`,
+`calibration.capture.uploaded`, `calibration.job.state`.
+
+Legacy diagnostic session events:
 `calibrationSession.started`, `calibrationSession.ended`,
 `calibrationSession.loudness.started`, `calibrationSession.loudness.stopped`,
 `calibrationSession.position.continued`,
 `measurement.ready`, `measurement.started`, `measurement.finished`,
-`measurement.error`, `calibration.exported`, `calibration.capture.finished`,
-`calibration.capture.uploaded`, `calibration.job.state`.
+`measurement.error`.
 
 `calibration.job.state` carries a compact `CalibrationJobView`. Its
 `nextAction` is a discriminated capture, validation, wait, or complete action.
@@ -75,7 +79,7 @@ The `calibrationSession.end` and `.ended` payloads carry an explicit final
 outcome. The ended payload also includes `completedSessionId`, which must match
 `sessionId` so the result remains tied to its originating session.
 
-Diagnostics (dev builds only): `diagnostics.deviceInfo`, `diagnostics.probe`,
+Explicit diagnostics: `diagnostics.deviceInfo`, `diagnostics.probe`,
 `diagnostics.effects`, `probe.run`, `probe.status`,
 `probe.persistent.start`, `probe.persistent.release`, and
 `probe.curve.apply`. The persistent probe is a temporary 64-band overlay on
@@ -88,7 +92,7 @@ evidence until the real-device transfer and routing gates are explicitly
 reviewed.
 
 `measurement.diagnostics` carries compact scalar diagnostics only. Candidate,
-pair, and early-impulse arrays remain in the browser-local debug bundle.
+pair, and early-impulse arrays remain in the browser-local diagnostic bundle.
 
 ## Calibration capture frames
 
@@ -99,10 +103,11 @@ little-endian Float32 mono PCM bytes.
 
 The frame version is `1`. Metadata is limited to 64 KiB and the whole frame is
 limited to 8 MiB. The metadata includes the job and capture IDs, physical
-position, channel, actual sample rate, sample count, browser settings,
-microphone profile identity, timestamp, and SHA-256 content hash. The TV
-validates the frame before analysis. The relay forwards a valid frame without
-changing its bytes.
+position, channel, actual sample rate, sample count, browser settings, the
+complete versioned microphone profile supplied by the phone, timestamp, and
+SHA-256 content hash. A profile is correction-eligible only when its capture
+path status is `validated`. The TV validates the frame before analysis. The
+relay forwards a valid frame without changing its bytes.
 
 ## State snapshot
 

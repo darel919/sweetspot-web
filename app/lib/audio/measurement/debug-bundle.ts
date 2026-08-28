@@ -3,7 +3,7 @@ import type { MeasurementContext, MeasurementCaptureMetadata, MeasurementMarkerC
 import type { CaptureSignalDiagnostics } from '../capture/pcm-recorder'
 import type { MicCalibrationProfile } from '../mics/types'
 
-export const CALIBRATION_DEBUG_BUNDLE_SCHEMA_VERSION = 2 as const
+const CALIBRATION_DEBUG_BUNDLE_SCHEMA_VERSION = 2 as const
 
 export interface CalibrationDebugCapture {
   sessionId: string
@@ -78,7 +78,7 @@ export function createCalibrationDebugBundle(
   }
 }
 
-export function serializeCalibrationDebugBundle(bundle: CalibrationDebugBundle): string {
+function serializeCalibrationDebugBundle(bundle: CalibrationDebugBundle): string {
   return JSON.stringify(bundle)
 }
 

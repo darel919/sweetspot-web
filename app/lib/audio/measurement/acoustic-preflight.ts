@@ -1,4 +1,4 @@
-export type AcousticPreflightFailure = 'capture_too_short' | 'signal_too_low' | 'capture_clipped'
+type AcousticPreflightFailure = 'capture_too_short' | 'signal_too_low' | 'capture_clipped'
 
 export interface AcousticPreflightResult {
   ok: boolean

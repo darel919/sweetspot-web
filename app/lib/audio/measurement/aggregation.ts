@@ -3,7 +3,7 @@ import type { CalibrationPositionId } from '#shared/types/protocol'
 import type { MeasurementAnalysis, ResponsePoint } from './response'
 
 export type MeasurementChannel = 'left' | 'right' | 'both'
-export type PositionChannel = Exclude<MeasurementChannel, 'both'>
+type PositionChannel = Exclude<MeasurementChannel, 'both'>
 
 export interface MeasurementRecord {
   context: MeasurementContext

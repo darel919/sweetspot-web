@@ -50,7 +50,7 @@ import {
 } from '../lib/audio/measurement/failure-diagnostics'
 import {
   appendCompositeCapture,
-  acceptedPositionCount,
+  completeAcceptedPositionCount,
   createPositionLedger,
   projectAcceptedRecords,
   projectPhysicalPositionLedger,
@@ -303,7 +303,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
     .sort()
     .join('|')
 
-  const completeAcceptedMeasurementPositionCount = computed(() => positionLedger.value ? acceptedPositionCount(positionLedger.value) : 0)
+  const completeAcceptedMeasurementPositionCount = computed(() => positionLedger.value ? completeAcceptedPositionCount(positionLedger.value) : 0)
   const measurementBaselineEligibility = computed(() => evaluateCalibrationBaselineEligibility({
     ledger: positionLedger.value ?? createPositionLedger('missing'),
     aggregateLeft: aggregateLeft.value,
@@ -529,7 +529,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
         return
       }
       resumeAvailable.value = true
-      resumePositionCount.value = acceptedPositionCount(checkpoint.ledger)
+      resumePositionCount.value = completeAcceptedPositionCount(checkpoint.ledger)
       resumeMessage.value = ''
     } catch {
       loadedResumeCheckpoint = null
@@ -562,7 +562,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       .catch(() => undefined)
     loadedResumeCheckpoint = checkpoint
     resumeAvailable.value = true
-    resumePositionCount.value = acceptedPositionCount(ledger)
+    resumePositionCount.value = completeAcceptedPositionCount(ledger)
   }
 
   function clearPersistedCheckpoint(): void {
@@ -1162,7 +1162,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
               const next = contextForAdaptiveDecision(decision)
               plan = [next]
               progress.value = {
-                current: acceptedPositionCount(positionLedger.value),
+                current: completeAcceptedPositionCount(positionLedger.value),
                 total: next.positionCount,
               }
               break
@@ -1869,7 +1869,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       if (endedMode === 'measurement') {
         completedMeasurementId.value = endedSessionId
         if (hadAnalysis && positionLedger.value
-          && acceptedPositionCount(positionLedger.value) >= 3
+          && completeAcceptedPositionCount(positionLedger.value) >= 3
           && measurementQualityPassed.value
           && convergenceOutcome.value === 'sufficient') clearPersistedCheckpoint()
       }

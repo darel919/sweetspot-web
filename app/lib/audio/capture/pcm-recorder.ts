@@ -20,7 +20,7 @@ export interface PcmRecording {
   endSample: number
 }
 
-export class PcmRecorderError extends Error {
+class PcmRecorderError extends Error {
   readonly code = 'capture_unavailable' as const
 
   constructor(message: string) {

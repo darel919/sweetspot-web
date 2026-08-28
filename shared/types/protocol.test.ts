@@ -249,6 +249,22 @@ describe('measurement protocol boundary', () => {
         },
       },
     })).toBe(true)
+    expect(isStateSnapshot({
+      ...snapshot,
+      calibration: {
+        ...snapshot.calibration,
+        active: true,
+        transaction: {
+          state: 'candidate_pending',
+          candidateId: 'candidate-neutral',
+          validationStatus: 'neutral',
+          previousActive: false,
+          beforeDb: 1,
+          afterDb: 1.1,
+          reason: 'within tolerance',
+        },
+      },
+    })).toBe(true)
     const pendingWithoutRollbackTarget = {
       state: 'candidate_pending' as const,
       candidateId: 'candidate-missing-target',

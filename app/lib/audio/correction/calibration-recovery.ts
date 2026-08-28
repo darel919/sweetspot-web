@@ -60,7 +60,7 @@ export type CalibrationAbortRecovery =
 
 export type CalibrationAbortState = CalibrationAbortRecovery['state']
 
-export const CALIBRATION_ABORT_RECOVERY_POLL_LIMIT = 30
+const CALIBRATION_ABORT_RECOVERY_POLL_LIMIT = 30
 
 export function shouldContinueCalibrationAbortRecoveryPoll(attempts: number): boolean {
   return attempts < CALIBRATION_ABORT_RECOVERY_POLL_LIMIT

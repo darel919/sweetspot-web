@@ -102,6 +102,7 @@ function confidenceLabel(): string {
     <h3 class="sub-label">TV-owned room measurement</h3>
     <p class="note">
       The TV plays and analyzes the test signal. This browser only records the microphone and sends temporary PCM to the paired TV.
+      Raw calibration audio is deleted after completion unless debug retention is enabled.
     </p>
 
     <div v-if="profiles.length" class="actions">
@@ -129,10 +130,14 @@ function confidenceLabel(): string {
       <button v-if="captureState === 'recording' || captureState === 'opening'" @click="emit('cancel-capture')">Cancel capture</button>
       <button v-if="active && job?.minimumViableCalibration" :disabled="captureState === 'opening' || captureState === 'recording' || captureState === 'uploading'" @click="emit('finish')">Finish with current solution</button>
       <button v-if="active && job?.minimumViableCalibration" :disabled="captureState !== 'idle' && captureState !== 'waiting'" @click="emit('cancel-refinement')">Stop optional refinement</button>
-      <button v-if="job && !terminal && !active && captureState === 'idle'" @click="emit('discard')">Discard saved calibration job</button>
+      <button v-if="job && !terminal" :disabled="captureState === 'uploading'" @click="emit('discard')">Discard calibration job</button>
     </div>
 
     <p class="note" aria-live="polite">{{ statusText }}</p>
+    <p v-if="job?.lastError && captureState === 'idle'" class="error" aria-live="polite">
+      TV note: {{ job.lastError.message }}
+      <span v-if="job.minimumViableCalibration">The TV kept the accepted positions.</span>
+    </p>
     <p v-if="actionInstruction" class="calibration-take" aria-live="polite">
       {{ actionInstruction }}
     </p>
@@ -154,6 +159,9 @@ function confidenceLabel(): string {
     </p>
     <p v-if="job?.phase === 'complete'" class="calibration-result calibration-result-good">
       AUTO ROOM CALIBRATION COMPLETE · {{ confidenceLabel().toUpperCase() }} CONFIDENCE
+    </p>
+    <p v-else-if="job?.phase === 'failed' && job.minimumViableCalibration" class="calibration-result calibration-result-good">
+      CALIBRATION RETAINED · {{ job.lastError?.message ?? 'The TV kept the best verified room solution.' }}
     </p>
     <p v-else-if="job?.phase === 'failed'" class="calibration-result calibration-result-failed">
       NO USABLE CALIBRATION · {{ job.lastError?.message ?? 'The TV did not find enough trustworthy evidence.' }}

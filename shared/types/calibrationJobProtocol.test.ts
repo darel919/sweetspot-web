@@ -6,30 +6,8 @@ import {
   isDeviceToClient,
   KNOWN_TYPES,
   validatePayload,
-  type CalibrationCaptureMetadata,
   type CalibrationJobView,
 } from './protocol'
-
-const metadata: CalibrationCaptureMetadata = {
-  jobId: 'job-1',
-  captureId: 'center-left-0',
-  positionId: 'center',
-  attemptIndex: 0,
-  channel: 'left',
-  sampleRate: 48_000,
-  channelCount: 1,
-  sampleCount: 4,
-  byteCount: 16,
-  settings: {
-    echoCancellation: false,
-    noiseSuppression: false,
-    autoGainControl: false,
-  },
-  userAgent: 'test browser',
-  microphoneProfileId: 'iphone-17-pro',
-  microphoneProfileRevision: '2026-08-24',
-  capturedAtMs: 1_757_000_000_000,
-}
 
 const confidence = {
   usableBandCount: 64,
@@ -79,7 +57,6 @@ describe('TV-owned calibration job protocol', () => {
     expect(isClientToDevice('calibration.job.discard')).toBe(true)
     expect(isClientToDevice('calibration.job.finish')).toBe(true)
     expect(isClientToDevice('calibration.capture.ready')).toBe(true)
-    expect(isClientToDevice('calibration.capture.metadata')).toBe(true)
     expect(isClientToDevice('calibration.validation.capture.ready')).toBe(true)
     expect(isDeviceToClient('calibration.capture.uploaded')).toBe(true)
     expect(isDeviceToClient('calibration.job.state')).toBe(true)
@@ -110,20 +87,11 @@ describe('TV-owned calibration job protocol', () => {
     expect(validatePayload('calibration.job.discard', { jobId: 'job-1' })).toBeNull()
   })
 
-  test('validates capture metadata and upload acknowledgements', () => {
+  test('validates capture readiness and upload acknowledgements', () => {
     expect(validatePayload('calibration.capture.ready', {
       jobId: 'job-1',
       captureId: 'center-left-0',
     })).toBeNull()
-    expect(validatePayload('calibration.capture.metadata', metadata)).toBeNull()
-    expect(validatePayload('calibration.capture.metadata', {
-      ...metadata,
-      channelCount: 2,
-    })).not.toBeNull()
-    expect(validatePayload('calibration.capture.metadata', {
-      ...metadata,
-      byteCount: 12,
-    })).not.toBeNull()
     expect(validatePayload('calibration.capture.uploaded', {
       jobId: 'job-1',
       captureId: 'center-left-0',
@@ -144,6 +112,10 @@ describe('TV-owned calibration job protocol', () => {
       jobId: 'job-1',
       captureId: 'validation-candidate-0',
       candidateId: 'candidate-4',
+    })).toBeNull()
+    expect(validatePayload('calibration.capture.finished', {
+      jobId: 'job-1',
+      captureId: 'center-left-0',
     })).toBeNull()
   })
 
@@ -169,6 +141,13 @@ describe('TV-owned calibration job protocol', () => {
     expect(validatePayload('calibration.job.state', {
       ...usableView,
       acceptedPositions: ['center', 'center'],
+    })).not.toBeNull()
+    expect(validatePayload('calibration.job.state', {
+      ...usableView,
+      bestSolution: {
+        ...usableView.bestSolution,
+        sourcePositionIds: ['left', 'right', 'forward'],
+      },
     })).not.toBeNull()
   })
 

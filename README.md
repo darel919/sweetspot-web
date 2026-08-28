@@ -12,11 +12,12 @@ Nuxt generates a static Vue dashboard. The Cloudflare Worker serves the generate
 - The browser connects as the `client` role.
 - `RoomDO` owns room membership and forwards protocol envelopes over WebSockets.
 - The TV owns safety-critical calibration state, candidate acceptance, and rollback.
-- The browser keeps microphone capture and audio analysis local. It sends compact calibration results and control messages, not raw microphone samples.
+- The browser opens the phone microphone when the TV requests a capture, then sends the temporary raw PCM frame to the TV for analysis.
+- The browser renders TV-owned calibration state; it does not accept markers, positions, convergence, correction, or validation results.
 
 The dashboard uses the current WebSocket transport only. It has no HTTP mailbox fallback, WebRTC path, or legacy heartbeat protocol.
 
-During automatic calibration, the TV gives the instructions. After you start calibration, the dashboard locks normal controls while it shows progress and keeps cancellation available.
+During automatic calibration, the TV gives the instructions. The dashboard shows progress and keeps cancellation available while the job runs.
 
 ## Requirements
 
@@ -95,7 +96,7 @@ This command runs `bun run generate` before `bunx wrangler deploy`.
 
 | Path | Responsibility |
 | --- | --- |
-| `app/` | Dashboard pages, Vue components, connection state, microphone capture, measurement analysis, and correction logic. |
+| `app/` | Dashboard pages, Vue components, connection state, remote-microphone capture, calibration presentation, and diagnostic/parity analysis helpers. |
 | `worker/index.ts` | Serves `dist/` and routes `/api/room/{code}/ws` requests to `RoomDO`. |
 | `worker/room.ts` | Cloudflare Durable Object that validates envelopes, tracks open sockets, queues bounded messages, and broadcasts device messages. |
 | `shared/types/protocol.ts` | Canonical v1 message types, payload validation, and state shapes shared with Android. |
@@ -120,8 +121,17 @@ Read [`shared/types/README.md`](./shared/types/README.md) before changing a mess
 
 ## Calibration boundaries
 
-Calibration runs in the browser and uses the TV for playback and user instructions. The browser keeps captured PCM and FFT or impulse-response work local. It sends compact response curves and calibration commands through the room WebSocket.
+The TV owns playback, capture timing, acoustic analysis, accepted evidence,
+position planning, correction, candidate validation, and rollback. The browser
+opens the microphone only for a TV-issued capture action, uploads a binary
+Float32 mono PCM frame with the phone's complete versioned microphone profile,
+and renders the resulting TV job state. Raw PCM is temporary and is deleted
+after successful completion unless debug retention is enabled.
 
-The calibration flow preserves session IDs, repeatability checks, progress, cancellation, automatic candidate validation, and TV-owned rollback. A successful local test or static generation run does not prove microphone behavior on iPhone Safari, audio routing on a real TV, hosted Worker behavior, or an end-to-end connected session.
+The browser still contains analysis helpers for explicit diagnostics and parity
+fixtures. They are not production calibration authority. A successful local
+test or static generation run does not prove microphone behavior on iPhone
+Safari, audio routing on a real TV, hosted Worker behavior, or an end-to-end
+connected session.
 
 Keep those checks separate when reporting validation results.

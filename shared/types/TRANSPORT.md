@@ -55,13 +55,16 @@ client sockets. Nothing is replayed after reconnect.
 
 Calibration PCM uses a separate binary WebSocket frame. A client frame must
 contain the `SSCP` capture format, use version 1, and stay below 8 MiB. The
-metadata JSON is limited to 64 KiB. The room validates the frame and forwards
-the original bytes to the device. A device-origin binary frame is rejected.
+metadata JSON is limited to 64 KiB and contains the complete versioned
+microphone profile selected on the phone. The room validates the frame and
+forwards the original bytes to the device. A device-origin binary frame is
+rejected.
 
 The browser sends `calibration.capture.ready` or
-`calibration.validation.capture.ready`, then `calibration.capture.metadata`
-around the binary upload. The TV publishes `calibration.capture.finished`
-after playback so the browser can stop recording. It publishes
+`calibration.validation.capture.ready`, then uploads the binary frame. The
+metadata and SHA-256 are inside that frame; a JSON metadata command is not part
+of the production remote-microphone flow. The TV publishes
+`calibration.capture.finished` after playback so the browser can stop recording. It publishes
 `calibration.capture.uploaded` and `calibration.job.state` after it stores and
 analyzes the capture. A reconnecting browser requests
 `calibration.job.get` and renders the returned TV-owned view.
@@ -82,7 +85,7 @@ are:
 | `diagnostics.effects` | `diagnostics.effects` |
 | `diagnostics.deviceInfo` | `diagnostics.deviceInfo` |
 | `probe.status` | `probe.status` |
-| `calibrationSession.*` and `measurement.*` | session lifecycle/events |
+| legacy diagnostic `calibrationSession.*` and `measurement.*` | diagnostic session lifecycle/events |
 
 Every command and event still uses the shared payload validator. A message
 without a validator is rejected at the room boundary.

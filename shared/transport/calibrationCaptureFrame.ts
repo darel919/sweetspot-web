@@ -22,7 +22,7 @@ export type CalibrationCaptureFrameDecodeResult =
       message: string
     }
 
-export type CalibrationCaptureFrameDecodeErrorCode =
+type CalibrationCaptureFrameDecodeErrorCode =
   | 'frame_too_small'
   | 'frame_too_large'
   | 'bad_magic'

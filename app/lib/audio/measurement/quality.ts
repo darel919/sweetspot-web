@@ -3,7 +3,7 @@ import type { AggregateResponse } from './aggregation'
 import { projectPhysicalPositionLedger, type PositionLedger } from './position-ledger'
 import type { PhysicalPositionLedger } from './physical-position'
 
-export type AggregateQualityFailure =
+type AggregateQualityFailure =
   | 'aggregate-missing'
   | 'insufficient-positions'
   | 'position-missing'

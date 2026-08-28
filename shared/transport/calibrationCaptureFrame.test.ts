@@ -30,6 +30,17 @@ const metadata: CalibrationCaptureFrameMetadata = {
   userAgent: 'test browser',
   microphoneProfileId: 'iphone-17-pro',
   microphoneProfileRevision: '2026-08-24',
+  microphoneProfile: {
+    id: 'iphone-17-pro',
+    revision: '2026-08-24',
+    capturePathStatus: 'validated',
+    frequenciesHz: [20, 20_000],
+    responseDb: [0, 0],
+    normalizeAtHz: 1_000,
+    trustMinHz: 30,
+    trustFullMaxHz: 8_000,
+    trustTaperToHz: 12_000,
+  },
   capturedAtMs: 1_757_000_000_000,
   contentSha256: 'a'.repeat(64),
 }

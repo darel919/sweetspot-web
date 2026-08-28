@@ -23,7 +23,7 @@ function isMarkerDiagnosticCaptureKind(value: MeasurementSweep['captureKind']): 
 }
 
 /** Expected recorder/TV clock mismatch is normally within 250 ppm. */
-export const CLOCK_DRIFT_WARNING_PPM = 250
+const CLOCK_DRIFT_WARNING_PPM = 250
 /** Larger mismatch is retained for diagnosis, but not accepted for analysis. */
 export const CLOCK_DRIFT_HARD_REJECT_PPM = 1_000
 
@@ -43,7 +43,7 @@ const MARKER_AMBIGUITY_MIN_CORRELATION = MARKER_MIN_CORRELATION
 const MARKER_PAIR_AMBIGUITY_MARGIN = 0.05
 const MARKER_PAIR_AMBIGUITY_RATIO = 1.1
 
-export type SyncMarkerFailureReason = MeasurementSyncMarkerFailureReason
+type SyncMarkerFailureReason = MeasurementSyncMarkerFailureReason
 
 export interface ResponsePoint {
   frequencyHz: number
@@ -94,10 +94,10 @@ export interface SweepDetection {
   failureReason: SyncMarkerFailureReason | null
 }
 
-export type MeasurementAnalysisStatus = 'ok' | 'signal_too_low' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
-export type MeasurementAnalysisFailure = Exclude<MeasurementAnalysisStatus, 'ok'>
+type MeasurementAnalysisStatus = 'ok' | 'signal_too_low' | 'direct_arrival_low_confidence' | 'impulse_not_found' | 'response_not_generated' | 'sync_marker_not_found' | 'clock_drift_unreliable' | 'capture_too_short' | 'capture_clipped'
+type MeasurementAnalysisFailure = Exclude<MeasurementAnalysisStatus, 'ok'>
 
-export interface MeasurementAnalysisDiagnostics {
+interface MeasurementAnalysisDiagnostics {
   detected: boolean
   /** Where the recorded sweep envelope was found inside the browser capture. */
   detectionOffsetMs: number | null

@@ -1,6 +1,7 @@
-import { computed, onScopeDispose, readonly, ref, shallowRef } from 'vue'
+import { computed, onScopeDispose, readonly, ref, shallowRef, watch } from 'vue'
 import type {
   CalibrationCaptureMetadata,
+  CalibrationMicrophoneProfilePayload,
   CalibrationJobView,
   CalibrationNextAction,
   CalibrationPositionId,
@@ -9,9 +10,11 @@ import type {
 import { isCalibrationJobView } from '../../shared/types/protocol'
 import { encodeCalibrationCaptureFrame } from '../../shared/transport/calibrationCaptureFrame'
 import { discoverMicCalibrationProfiles } from '../lib/audio/mics/registry'
+import { isMicCalibrationProfileEligibleForCorrection } from '../lib/audio/mics/profile'
 import type { MicCalibrationProfile } from '../lib/audio/mics/types'
 import { closeMicrophone, openMicrophone, type MicrophoneCapture } from '../lib/audio/capture/microphone'
 import { createPcmRecorder, type PcmRecorder } from '../lib/audio/capture/pcm-recorder'
+import { useScreenWakeLock } from './useScreenWakeLock'
 
 export type RemoteMicCaptureState = 'idle' | 'opening' | 'recording' | 'uploading' | 'waiting' | 'error'
 
@@ -21,7 +24,7 @@ export interface CalibrationRemoteMicConnection {
   onMessage(handler: (env: Envelope) => void): () => void
 }
 
-export interface CalibrationRemoteMicDependencies {
+interface CalibrationRemoteMicDependencies {
   openMicrophone: typeof openMicrophone
   closeMicrophone: typeof closeMicrophone
   createPcmRecorder: typeof createPcmRecorder
@@ -42,7 +45,7 @@ export interface CalibrationCaptureBuildInput {
   sampleRate: number
   sampleCount: number
   contentSha256: string
-  microphoneProfile: Pick<MicCalibrationProfile, 'id' | 'sourceDate'>
+  microphoneProfile: MicCalibrationProfile
   capturedAtMs: number
 }
 
@@ -71,9 +74,9 @@ const defaultDependencies: CalibrationRemoteMicDependencies = {
 function profileForId(
   profiles: readonly MicCalibrationProfile[],
   profileId: string,
-): Pick<MicCalibrationProfile, 'id' | 'sourceDate'> | null {
-  const profile = profiles.find((candidate) => candidate.id === profileId)
-  return profile ? { id: profile.id, sourceDate: profile.sourceDate } : null
+): MicCalibrationProfile | null {
+  return profiles.find((candidate) => candidate.id === profileId
+    && isMicCalibrationProfileEligibleForCorrection(candidate)) ?? null
 }
 
 function validSampleRate(value: number): boolean {
@@ -86,6 +89,20 @@ function validSampleCount(value: number): boolean {
 
 function actionPosition(action: CalibrationNextAction): CalibrationPositionId {
   return action.positionId
+}
+
+function microphoneProfilePayload(profile: MicCalibrationProfile): CalibrationMicrophoneProfilePayload {
+  return {
+    id: profile.id,
+    revision: profile.sourceDate,
+    capturePathStatus: profile.capturePathStatus,
+    frequenciesHz: profile.points.map((point) => point.frequencyHz),
+    responseDb: profile.points.map((point) => point.responseDb),
+    normalizeAtHz: profile.normalizeAtHz,
+    trustMinHz: profile.trust.minHz,
+    trustFullMaxHz: profile.trust.fullTrustMaxHz,
+    trustTaperToHz: profile.trust.taperToHz,
+  }
 }
 
 export function buildCalibrationCapture(
@@ -114,6 +131,7 @@ export function buildCalibrationCapture(
     userAgent: typeof navigator === 'undefined' ? 'unknown-browser' : navigator.userAgent,
     microphoneProfileId: input.microphoneProfile.id,
     microphoneProfileRevision: input.microphoneProfile.sourceDate,
+    microphoneProfile: microphoneProfilePayload(input.microphoneProfile),
     capturedAtMs: input.capturedAtMs,
   }
   if (input.action.kind === 'capture') {
@@ -136,8 +154,11 @@ export function buildCalibrationCapture(
 
 function jobStateIsCurrent(current: CalibrationJobView | null, next: CalibrationJobView): boolean {
   if (!current) return true
-  if (next.jobId !== current.jobId) return true
-  return next.revision >= current.revision
+  if (next.jobId !== current.jobId) {
+    return (current.phase === 'complete' || current.phase === 'failed' || current.phase === 'cancelled')
+      && next.createdAtMs >= current.createdAtMs
+  }
+  return next.revision > current.revision || (next.revision === current.revision && next === current)
 }
 
 export function acceptCalibrationJobState(
@@ -148,32 +169,10 @@ export function acceptCalibrationJobState(
   return jobStateIsCurrent(current, incoming) ? incoming : current
 }
 
-function payloadPosition(payload: unknown): CalibrationPositionId | null {
-  if (typeof payload !== 'object' || payload === null || !('context' in payload)) return null
-  const context = payload.context
-  if (typeof context !== 'object' || context === null || !('positionId' in context)) return null
-  const position = context.positionId
-  return position === 'center'
-    || position === 'left'
-    || position === 'right'
-    || position === 'forward'
-    || position === 'backward'
-    ? position
-    : null
-}
-
-function isPlaybackFinishedFor(
-  env: Envelope,
-  action: Extract<CalibrationNextAction, { kind: 'capture' | 'validate' }>,
-): boolean {
-  if (env.type !== 'measurement.finished') return false
-  const position = payloadPosition(env.payload)
-  return position === null || position === action.positionId
-}
-
-function pcmBuffer(samples: Float32Array): ArrayBuffer {
+export function encodeCalibrationPcm(samples: Float32Array): ArrayBuffer {
   const result = new ArrayBuffer(samples.byteLength)
-  new Uint8Array(result).set(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength))
+  const view = new DataView(result)
+  samples.forEach((sample, index) => view.setFloat32(index * 4, sample, true))
   return result
 }
 
@@ -189,9 +188,17 @@ export function useCalibrationRemoteMic(
   const profiles = shallowRef<MicCalibrationProfile[]>([])
   const selectedProfileId = ref(options.defaultProfileId ?? DEFAULT_PROFILE_ID)
   const profileError = ref('')
+  const screenWakeLock = useScreenWakeLock()
   const busy = computed(() => captureState.value === 'opening'
     || captureState.value === 'recording'
     || captureState.value === 'uploading')
+
+  const stopWakeLockWatch = watch(captureState, (state) => {
+    screenWakeLock.setActive(state === 'opening'
+      || state === 'recording'
+      || state === 'uploading'
+      || state === 'waiting')
+  }, { immediate: true })
 
   let disposed = false
   let capture: MicrophoneCapture | null = null
@@ -209,12 +216,16 @@ export function useCalibrationRemoteMic(
     if (profileLoadPromise) return profileLoadPromise
     profileLoadPromise = dependencies.discoverMicCalibrationProfiles()
       .then((loaded) => {
-        profiles.value = loaded
-        if (!loaded.some((candidate) => candidate.id === selectedProfileId.value)) {
-          selectedProfileId.value = loaded[0]?.id ?? ''
+        const eligible = loaded.filter(isMicCalibrationProfileEligibleForCorrection)
+        if (eligible.length === 0) {
+          throw new Error('No validated microphone profile is available for automatic correction.')
+        }
+        profiles.value = eligible
+        if (!eligible.some((candidate) => candidate.id === selectedProfileId.value)) {
+          selectedProfileId.value = eligible[0]?.id ?? ''
         }
         profileError.value = ''
-        return loaded
+        return eligible
       })
       .catch((error: unknown) => {
         profileError.value = error instanceof Error ? error.message : 'Could not load microphone profiles.'
@@ -311,7 +322,7 @@ export function useCalibrationRemoteMic(
       try {
         const recording = await recorder?.stop()
         if (!recording || recording.samples.length === 0) throw new Error('The microphone returned no samples.')
-        const pcm = pcmBuffer(recording.samples)
+        const pcm = encodeCalibrationPcm(recording.samples)
         const sampleRate = Math.round(recording.diagnostics.sampleRate)
         const profile = profileForId(profiles.value, selectedProfileId.value)
         if (!profile) throw new Error('The selected microphone profile is no longer available.')
@@ -337,7 +348,6 @@ export function useCalibrationRemoteMic(
           captureError.value = 'The calibration recording could not reach the TV. Retry the upload without moving the phone.'
           return
         }
-        connection.send('calibration.capture.metadata', built.metadata)
         captureState.value = 'waiting'
       } catch (error: unknown) {
         captureState.value = 'error'
@@ -359,7 +369,6 @@ export function useCalibrationRemoteMic(
       captureError.value = 'The calibration recording could not reach the TV. Check the connection and retry.'
       return
     }
-    connection.send('calibration.capture.metadata', pending.metadata)
     captureState.value = 'waiting'
   }
 
@@ -377,6 +386,8 @@ export function useCalibrationRemoteMic(
     armed = true
     captureError.value = ''
     connection.send('calibration.job.get', job.value ? { jobId: job.value.jobId } : {})
+    const action = job.value?.nextAction
+    if (action?.kind === 'capture' || action?.kind === 'validate') void prepareCapture(action)
   }
 
   function refreshJob(): void {
@@ -429,6 +440,13 @@ export function useCalibrationRemoteMic(
       if (next === job.value) return
       job.value = next
       const action = next?.nextAction
+      const actionCaptureId = action?.kind === 'capture' || action?.kind === 'validate'
+        ? action.captureId
+        : null
+      if (pendingUpload && pendingUpload.metadata.captureId !== actionCaptureId) {
+        pendingUpload = null
+        captureMetadata.value = null
+      }
       if (action?.kind === 'capture' || action?.kind === 'validate') {
         void prepareCapture(action)
       } else if (next?.phase === 'complete' || next?.phase === 'failed' || next?.phase === 'cancelled') {
@@ -439,10 +457,6 @@ export function useCalibrationRemoteMic(
       } else {
         captureState.value = 'idle'
       }
-      return
-    }
-    if (activeAction && isPlaybackFinishedFor(env, activeAction)) {
-      void completeCapture()
       return
     }
     if (env.type === 'calibration.capture.finished') {
@@ -464,11 +478,14 @@ export function useCalibrationRemoteMic(
     }
     if (env.type === 'calibration.capture.uploaded') {
       const payload = env.payload
-      if (typeof payload !== 'object' || payload === null || !('captureId' in payload)) return
-      if (typeof payload.captureId !== 'string' || payload.captureId !== captureMetadata.value?.captureId) return
+      if (typeof payload !== 'object' || payload === null || !('jobId' in payload) || !('captureId' in payload)) return
+      if (typeof payload.jobId !== 'string' || payload.jobId !== captureMetadata.value?.jobId
+        || typeof payload.captureId !== 'string' || payload.captureId !== captureMetadata.value?.captureId) return
       if ('status' in payload && payload.status === 'rejected') {
         captureState.value = 'error'
-        captureError.value = 'The TV rejected this calibration recording.'
+        captureError.value = 'reason' in payload && typeof payload.reason === 'string' && payload.reason.trim().length > 0
+          ? payload.reason
+          : 'The TV rejected this calibration recording.'
       } else if ('status' in payload && (payload.status === 'accepted' || payload.status === 'duplicate')) {
         pendingUpload = null
       }
@@ -480,6 +497,8 @@ export function useCalibrationRemoteMic(
     disposed = true
     armed = false
     unsubscribe()
+    stopWakeLockWatch()
+    screenWakeLock.dispose()
     void disposeCapture()
   })
 
