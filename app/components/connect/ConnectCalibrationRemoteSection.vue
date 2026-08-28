@@ -54,6 +54,12 @@ const canStart = computed(() => props.deviceOnline
   && !active.value
   && props.captureState === 'idle')
 const canResume = computed(() => props.deviceOnline && props.job !== null && !terminal.value && props.captureState === 'idle')
+const canRetryCapture = computed(() => props.captureState === 'error'
+  && (action.value?.kind === 'capture' || action.value?.kind === 'validate'))
+const canCancelCapture = computed(() => props.captureState === 'opening'
+  || props.captureState === 'recording'
+  || props.captureState === 'uploading'
+  || props.captureState === 'waiting')
 const statusText = computed(() => {
   if (props.captureState === 'opening') return 'Opening the microphone…'
   if (props.captureState === 'recording') return 'Recording. Keep the phone still.'
@@ -126,8 +132,8 @@ function confidenceLabel(): string {
     <div class="actions">
       <button :disabled="!canStart" @click="emit('start')">Start Auto Room Calibration</button>
       <button v-if="canResume" @click="emit('resume')">Resume saved calibration</button>
-      <button v-if="captureState === 'error' && captureMetadata" @click="emit('retry-upload')">Retry upload</button>
-      <button v-if="captureState === 'recording' || captureState === 'opening'" @click="emit('cancel-capture')">Cancel capture</button>
+      <button v-if="canRetryCapture" @click="emit('retry-upload')">Retry capture</button>
+      <button v-if="canCancelCapture && !(captureState === 'waiting' && active && job?.minimumViableCalibration)" @click="emit('cancel-capture')">Cancel capture</button>
       <button v-if="active && job?.minimumViableCalibration" :disabled="captureState === 'opening' || captureState === 'recording' || captureState === 'uploading'" @click="emit('finish')">Finish with current solution</button>
       <button v-if="active && job?.minimumViableCalibration" :disabled="captureState !== 'idle' && captureState !== 'waiting'" @click="emit('cancel-refinement')">Stop optional refinement</button>
       <button v-if="job && !terminal" :disabled="captureState === 'uploading'" @click="emit('discard')">Discard calibration job</button>

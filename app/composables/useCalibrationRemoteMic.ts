@@ -1,6 +1,7 @@
 import { computed, onScopeDispose, readonly, ref, shallowRef, watch } from 'vue'
 import type {
   CalibrationCaptureMetadata,
+  CalibrationCaptureFrameMetadata,
   CalibrationMicrophoneProfilePayload,
   CalibrationJobView,
   CalibrationNextAction,
@@ -8,20 +9,29 @@ import type {
   Envelope,
 } from '../../shared/types/protocol'
 import { isCalibrationJobView } from '../../shared/types/protocol'
-import { encodeCalibrationCaptureFrame } from '../../shared/transport/calibrationCaptureFrame'
+import {
+  encodeCaptureBegin,
+  encodeCaptureChunk,
+  encodeCaptureEnd,
+  type CalibrationCaptureStreamMetadata,
+} from '../../shared/transport/captureStream'
 import { discoverMicCalibrationProfiles } from '../lib/audio/mics/registry'
 import { isMicCalibrationProfileEligibleForCorrection } from '../lib/audio/mics/profile'
 import type { MicCalibrationProfile } from '../lib/audio/mics/types'
 import { closeMicrophone, openMicrophone, type MicrophoneCapture } from '../lib/audio/capture/microphone'
 import { createPcmRecorder, type PcmRecorder } from '../lib/audio/capture/pcm-recorder'
+import { Sha256 } from '../lib/transport/sha256'
+import type { DirectConnectionState } from '../lib/transport/types'
 import { useScreenWakeLock } from './useScreenWakeLock'
 
 export type RemoteMicCaptureState = 'idle' | 'opening' | 'recording' | 'uploading' | 'waiting' | 'error'
 
 export interface CalibrationRemoteMicConnection {
   send(type: string, payload?: unknown): string
-  uploadBinary(data: ArrayBuffer): boolean
+  sendCaptureFrame(data: ArrayBuffer): Promise<void>
+  sessionId?(): string | null
   onMessage(handler: (env: Envelope) => void): () => void
+  onStateChange?(handler: (state: DirectConnectionState) => void): () => void
 }
 
 interface CalibrationRemoteMicDependencies {
@@ -29,7 +39,6 @@ interface CalibrationRemoteMicDependencies {
   closeMicrophone: typeof closeMicrophone
   createPcmRecorder: typeof createPcmRecorder
   discoverMicCalibrationProfiles: typeof discoverMicCalibrationProfiles
-  digest: (data: ArrayBuffer) => Promise<string>
   now: () => number
 }
 
@@ -57,17 +66,35 @@ export interface CalibrationCaptureBuildResult {
     | { jobId: string; captureId: string; candidateId: string }
 }
 
+interface CalibrationCaptureBaseInput {
+  jobId: string
+  action: Extract<CalibrationNextAction, { kind: 'capture' | 'validate' }>
+  captureSettings: MicrophoneCapture['settings']
+  sampleRate: number
+  microphoneProfile: MicCalibrationProfile
+  capturedAtMs: number
+}
+
+interface ActiveCaptureStream {
+  sessionId: string
+  captureId: string
+  metadata: CalibrationCaptureStreamMetadata
+  hash: Sha256
+  sampleCount: number
+  byteCount: number
+  sequence: number
+  beginPromise: Promise<void>
+  cancelled: boolean
+}
+
 const DEFAULT_PROFILE_ID = 'apple_iphone17pro_2025'
+const CAPTURE_ACK_TIMEOUT_MS = 30_000
 
 const defaultDependencies: CalibrationRemoteMicDependencies = {
   openMicrophone,
   closeMicrophone,
   createPcmRecorder,
   discoverMicCalibrationProfiles,
-  digest: async (data) => {
-    const digest = await crypto.subtle.digest('SHA-256', data)
-    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
-  },
   now: () => Date.now(),
 }
 
@@ -105,15 +132,10 @@ function microphoneProfilePayload(profile: MicCalibrationProfile): CalibrationMi
   }
 }
 
-export function buildCalibrationCapture(
-  input: CalibrationCaptureBuildInput,
-): CalibrationCaptureBuildResult {
+function buildCalibrationCaptureBase(input: CalibrationCaptureBaseInput): CalibrationCaptureStreamMetadata {
   if (!validSampleRate(input.sampleRate)) throw new RangeError('The microphone reported an unsupported sample rate.')
-  if (!validSampleCount(input.sampleCount)) throw new RangeError('The microphone returned no samples.')
-  if (!/^[a-f0-9]{64}$/i.test(input.contentSha256)) throw new TypeError('The PCM hash is invalid.')
-
   const channel = input.action.kind === 'capture' ? input.action.channel : 'both'
-  const metadata: CalibrationCaptureMetadata = {
+  return {
     jobId: input.jobId,
     captureId: input.action.captureId,
     positionId: actionPosition(input.action),
@@ -121,8 +143,6 @@ export function buildCalibrationCapture(
     channel,
     sampleRate: input.sampleRate,
     channelCount: 1,
-    sampleCount: input.sampleCount,
-    byteCount: input.sampleCount * 4,
     settings: {
       echoCancellation: input.captureSettings.echoCancellation,
       noiseSuppression: input.captureSettings.noiseSuppression,
@@ -133,6 +153,19 @@ export function buildCalibrationCapture(
     microphoneProfileRevision: input.microphoneProfile.sourceDate,
     microphoneProfile: microphoneProfilePayload(input.microphoneProfile),
     capturedAtMs: input.capturedAtMs,
+  }
+}
+
+export function buildCalibrationCapture(
+  input: CalibrationCaptureBuildInput,
+): CalibrationCaptureBuildResult {
+  if (!validSampleRate(input.sampleRate)) throw new RangeError('The microphone reported an unsupported sample rate.')
+  if (!validSampleCount(input.sampleCount)) throw new RangeError('The microphone returned no samples.')
+  if (!/^[a-f0-9]{64}$/i.test(input.contentSha256)) throw new TypeError('The PCM hash is invalid.')
+  const metadata: CalibrationCaptureMetadata = {
+    ...buildCalibrationCaptureBase(input),
+    sampleCount: input.sampleCount,
+    byteCount: input.sampleCount * 4,
   }
   if (input.action.kind === 'capture') {
     return {
@@ -208,8 +241,31 @@ export function useCalibrationRemoteMic(
   let preparedActionKey: string | null = null
   let armed = false
   let profileLoadPromise: Promise<MicCalibrationProfile[]> | null = null
-  let pendingUpload: { frame: ArrayBuffer; metadata: CalibrationCaptureMetadata } | null = null
+  let activeStream: ActiveCaptureStream | null = null
+  let retryCapture: { jobId: string; action: Extract<CalibrationNextAction, { kind: 'capture' | 'validate' }> } | null = null
   let completionInFlight: Promise<void> | null = null
+  let captureAckTimer: ReturnType<typeof setTimeout> | null = null
+
+  function clearCaptureAckTimer(): void {
+    if (captureAckTimer === null) return
+    clearTimeout(captureAckTimer)
+    captureAckTimer = null
+  }
+
+  function waitForCaptureAcknowledgement(
+    jobId: string,
+    action: Extract<CalibrationNextAction, { kind: 'capture' | 'validate' }>,
+  ): void {
+    clearCaptureAckTimer()
+    captureAckTimer = setTimeout(() => {
+      captureAckTimer = null
+      if (captureState.value !== 'waiting'
+        || retryCapture?.jobId !== jobId
+        || retryCapture.action.captureId !== action.captureId) return
+      captureState.value = 'error'
+      captureError.value = 'The TV did not confirm this recording. Reconnect, then retry this capture.'
+    }, CAPTURE_ACK_TIMEOUT_MS)
+  }
 
   async function loadProfiles(): Promise<MicCalibrationProfile[]> {
     if (profiles.value.length > 0) return profiles.value
@@ -245,13 +301,27 @@ export function useCalibrationRemoteMic(
   async function disposeCapture(): Promise<void> {
     const currentRecorder = recorder
     const currentCapture = capture
+    const currentStream = activeStream
+    if (currentStream) currentStream.cancelled = true
     recorder = null
     capture = null
+    activeStream = null
     activeAction = null
     activeJobId = null
     preparedActionKey = null
     if (currentRecorder) await currentRecorder.dispose()
     if (currentCapture) dependencies.closeMicrophone(currentCapture)
+  }
+
+  function handleTransportState(state: DirectConnectionState): void {
+    if ((state !== 'reconnecting' && state !== 'failed') || !activeStream || !activeAction || completionInFlight) return
+    retryCapture = {
+      jobId: activeJobId ?? job.value?.jobId ?? '',
+      action: activeAction,
+    }
+    captureState.value = 'error'
+    captureError.value = 'Connection interrupted during this capture. Reconnect, then retry this capture without moving the phone.'
+    void disposeCapture()
   }
 
   function isCurrentAction(action: Extract<CalibrationNextAction, { kind: 'capture' | 'validate' }>): boolean {
@@ -266,11 +336,11 @@ export function useCalibrationRemoteMic(
 
   async function prepareCapture(action: Extract<CalibrationNextAction, { kind: 'capture' | 'validate' }>): Promise<void> {
     const key = `${job.value?.jobId ?? ''}:${action.captureId}`
-    if (!armed || preparedActionKey === key || busy.value || disposed
-      || pendingUpload?.metadata.captureId === action.captureId) return
+    if (!armed || preparedActionKey === key || busy.value || disposed) return
     preparedActionKey = key
     activeAction = action
     activeJobId = job.value?.jobId ?? null
+    retryCapture = { jobId: activeJobId ?? '', action }
     captureState.value = 'opening'
     captureError.value = ''
     try {
@@ -278,12 +348,36 @@ export function useCalibrationRemoteMic(
       const profile = profileForId(loadedProfiles, selectedProfileId.value)
       if (!profile) throw new Error('Select a microphone profile before calibration.')
       const opened = await dependencies.openMicrophone()
+      let resolveStreamReady: (stream: ActiveCaptureStream) => void = () => undefined
+      const streamReady = new Promise<ActiveCaptureStream>((resolve) => {
+        resolveStreamReady = resolve
+      })
       const createdRecorder = dependencies.createPcmRecorder(opened, {
         onTrackEnded: () => {
           captureError.value = 'The microphone ended during calibration.'
           void cancelCapture().then(() => {
             captureState.value = 'error'
           })
+        },
+        retainSamples: false,
+        onChunk: async (samples) => {
+          const stream = await streamReady
+          if (stream.cancelled) return
+          const pcm = encodeCalibrationPcm(samples)
+          stream.hash.update(pcm)
+          stream.sampleCount += samples.length
+          stream.byteCount += pcm.byteLength
+          const sequence = stream.sequence
+          stream.sequence++
+          await stream.beginPromise
+          if (stream.cancelled) return
+          await connection.sendCaptureFrame(encodeCaptureChunk({
+            sessionId: stream.sessionId,
+            captureId: stream.captureId,
+            sequence,
+            sampleCount: samples.length,
+            pcm,
+          }))
         },
       })
       capture = opened
@@ -294,6 +388,26 @@ export function useCalibrationRemoteMic(
         captureState.value = 'idle'
         return
       }
+      const sampleRate = Math.round(createdRecorder.sampleRate() ?? opened.settings.sampleRate ?? 0)
+      const stream: ActiveCaptureStream = {
+        sessionId: connection.sessionId?.() ?? 'browser-session',
+        captureId: action.captureId,
+        metadata: buildCalibrationCaptureBase({
+          jobId: activeJobId ?? job.value?.jobId ?? '',
+          action,
+          captureSettings: opened.settings,
+          sampleRate,
+          microphoneProfile: profile,
+          capturedAtMs: dependencies.now(),
+        }),
+        hash: new Sha256(),
+        sampleCount: 0,
+        byteCount: 0,
+        sequence: 0,
+        beginPromise: Promise.resolve(),
+        cancelled: false,
+      }
+      activeStream = stream
       captureState.value = 'recording'
       if (action.kind === 'capture') {
         connection.send('calibration.capture.ready', {
@@ -307,6 +421,15 @@ export function useCalibrationRemoteMic(
           candidateId: action.candidateId,
         })
       }
+      stream.beginPromise = connection.sendCaptureFrame(encodeCaptureBegin({
+        sessionId: stream.sessionId,
+        captureId: stream.captureId,
+        metadata: stream.metadata,
+        expectedSampleCount: null,
+        expectedByteCount: null,
+      }))
+      stream.beginPromise.catch(() => undefined)
+      resolveStreamReady(stream)
     } catch (error: unknown) {
       await disposeCapture()
       captureState.value = 'error'
@@ -315,43 +438,62 @@ export function useCalibrationRemoteMic(
   }
 
   async function completeCapture(): Promise<void> {
-    if (completionInFlight || !recorder || !capture || !activeAction || disposed) return
+    if (completionInFlight || !recorder || !capture || !activeAction || !activeStream || disposed) return
     const action = activeAction
+    const stream = activeStream
     completionInFlight = (async () => {
       captureState.value = 'uploading'
       try {
         const recording = await recorder?.stop()
-        if (!recording || recording.samples.length === 0) throw new Error('The microphone returned no samples.')
-        const pcm = encodeCalibrationPcm(recording.samples)
+        if (!recording || recording.diagnostics.sampleCount === 0 || stream.sampleCount === 0) {
+          throw new Error('The microphone returned no samples.')
+        }
+        if (stream.cancelled || activeStream !== stream) return
         const sampleRate = Math.round(recording.diagnostics.sampleRate)
+        if (sampleRate !== stream.metadata.sampleRate) {
+          throw new Error('The microphone sample rate changed during capture. Retry this capture.')
+        }
         const profile = profileForId(profiles.value, selectedProfileId.value)
         if (!profile) throw new Error('The selected microphone profile is no longer available.')
-        const hash = await dependencies.digest(pcm)
+        const hash = stream.hash.digestHex()
+        if (stream.byteCount !== stream.sampleCount * 4) throw new Error('The capture byte count is invalid.')
         const built = buildCalibrationCapture({
           jobId: activeJobId ?? job.value?.jobId ?? '',
           action,
           captureSettings: capture.settings,
           sampleRate,
-          sampleCount: recording.samples.length,
+          sampleCount: stream.sampleCount,
           contentSha256: hash,
           microphoneProfile: profile,
-          capturedAtMs: dependencies.now(),
-        })
-        const frame = encodeCalibrationCaptureFrame({
-          metadata: { ...built.metadata, contentSha256: hash },
-          pcm,
+          capturedAtMs: stream.metadata.capturedAtMs,
         })
         captureMetadata.value = built.metadata
-        pendingUpload = { frame, metadata: built.metadata }
-        if (!connection.uploadBinary(frame)) {
-          captureState.value = 'error'
-          captureError.value = 'The calibration recording could not reach the TV. Retry the upload without moving the phone.'
-          return
-        }
+        const finalMetadata: CalibrationCaptureFrameMetadata = { ...built.metadata, contentSha256: hash }
+        await connection.sendCaptureFrame(encodeCaptureEnd({
+          sessionId: stream.sessionId,
+          captureId: stream.captureId,
+          chunkCount: stream.sequence,
+          finalSampleCount: stream.sampleCount,
+          finalByteCount: stream.byteCount,
+          finalSha256: hash,
+          metadata: finalMetadata,
+        }))
+        if (stream.cancelled || activeStream !== stream) return
+        const jobId = activeJobId ?? job.value?.jobId ?? ''
+        retryCapture = { jobId, action }
         captureState.value = 'waiting'
+        waitForCaptureAcknowledgement(jobId, action)
       } catch (error: unknown) {
+        if (stream.cancelled) return
+        clearCaptureAckTimer()
+        retryCapture = {
+          jobId: activeJobId ?? job.value?.jobId ?? '',
+          action,
+        }
         captureState.value = 'error'
-        captureError.value = error instanceof Error ? error.message : 'Calibration recording could not be uploaded.'
+        captureError.value = error instanceof Error
+          ? error.message
+          : 'The calibration recording could not reach the TV. Retry this capture without moving the phone.'
       } finally {
         await disposeCapture()
         completionInFlight = null
@@ -361,21 +503,21 @@ export function useCalibrationRemoteMic(
   }
 
   function retryUpload(): void {
-    const pending = pendingUpload
-    if (!pending || captureState.value === 'uploading') return
-    captureState.value = 'uploading'
-    if (!connection.uploadBinary(pending.frame)) {
-      captureState.value = 'error'
-      captureError.value = 'The calibration recording could not reach the TV. Check the connection and retry.'
-      return
-    }
-    captureState.value = 'waiting'
+    const retry = retryCapture
+    if (!retry || captureState.value === 'uploading' || disposed) return
+    clearCaptureAckTimer()
+    armed = true
+    preparedActionKey = null
+    captureError.value = ''
+    captureMetadata.value = null
+    void prepareCapture(retry.action)
   }
 
   function startNewJob(mode: 'auto' | 'advanced' = 'auto'): void {
     if (busy.value || disposed) return
     armed = true
-    pendingUpload = null
+    retryCapture = null
+    clearCaptureAckTimer()
     captureMetadata.value = null
     captureError.value = ''
     connection.send('calibration.job.start', { mode })
@@ -384,6 +526,7 @@ export function useCalibrationRemoteMic(
   function resumeJob(): void {
     if (busy.value || disposed) return
     armed = true
+    clearCaptureAckTimer()
     captureError.value = ''
     connection.send('calibration.job.get', job.value ? { jobId: job.value.jobId } : {})
     const action = job.value?.nextAction
@@ -396,12 +539,15 @@ export function useCalibrationRemoteMic(
   }
 
   async function cancelCapture(): Promise<void> {
-    armed = false
     const currentJob = job.value
-    const currentAction = activeAction
-    if (currentJob && currentAction) {
+    const currentAction = activeAction ?? retryCapture?.action
+    const currentJobId = currentJob?.jobId ?? activeJobId ?? retryCapture?.jobId
+    armed = false
+    retryCapture = null
+    clearCaptureAckTimer()
+    if (currentJobId && currentAction) {
       connection.send('calibration.job.cancel', {
-        jobId: currentJob.jobId,
+        jobId: currentJobId,
         scope: 'capture',
         captureId: currentAction.captureId,
       })
@@ -412,6 +558,8 @@ export function useCalibrationRemoteMic(
 
   async function cancelOptionalRefinement(): Promise<void> {
     armed = false
+    retryCapture = null
+    clearCaptureAckTimer()
     const currentJob = job.value
     if (currentJob) connection.send('calibration.job.cancel', { jobId: currentJob.jobId, scope: 'optional_refinement' })
     await disposeCapture()
@@ -422,6 +570,8 @@ export function useCalibrationRemoteMic(
     const currentJob = job.value
     if (!currentJob?.minimumViableCalibration) return
     armed = false
+    retryCapture = null
+    clearCaptureAckTimer()
     void disposeCapture()
     connection.send('calibration.job.finish', { jobId: currentJob.jobId })
   }
@@ -430,6 +580,8 @@ export function useCalibrationRemoteMic(
     const currentJob = job.value
     if (!currentJob) return
     armed = false
+    retryCapture = null
+    clearCaptureAckTimer()
     void disposeCapture()
     connection.send('calibration.job.discard', { jobId: currentJob.jobId })
   }
@@ -443,15 +595,17 @@ export function useCalibrationRemoteMic(
       const actionCaptureId = action?.kind === 'capture' || action?.kind === 'validate'
         ? action.captureId
         : null
-      if (pendingUpload && pendingUpload.metadata.captureId !== actionCaptureId) {
-        pendingUpload = null
+      if (retryCapture && retryCapture.action.captureId !== actionCaptureId) {
+        retryCapture = null
+        clearCaptureAckTimer()
         captureMetadata.value = null
       }
       if (action?.kind === 'capture' || action?.kind === 'validate') {
         void prepareCapture(action)
       } else if (next?.phase === 'complete' || next?.phase === 'failed' || next?.phase === 'cancelled') {
         armed = false
-        pendingUpload = null
+        retryCapture = null
+        clearCaptureAckTimer()
         void disposeCapture()
         captureState.value = 'idle'
       } else {
@@ -479,24 +633,45 @@ export function useCalibrationRemoteMic(
     if (env.type === 'calibration.capture.uploaded') {
       const payload = env.payload
       if (typeof payload !== 'object' || payload === null || !('jobId' in payload) || !('captureId' in payload)) return
-      if (typeof payload.jobId !== 'string' || payload.jobId !== captureMetadata.value?.jobId
-        || typeof payload.captureId !== 'string' || payload.captureId !== captureMetadata.value?.captureId) return
+      const expectedJobId = captureMetadata.value?.jobId ?? activeJobId
+      const expectedCaptureId = captureMetadata.value?.captureId ?? activeAction?.captureId
+      if (typeof payload.jobId !== 'string' || payload.jobId !== expectedJobId
+        || typeof payload.captureId !== 'string' || payload.captureId !== expectedCaptureId) return
       if ('status' in payload && payload.status === 'rejected') {
+        clearCaptureAckTimer()
+        if (!retryCapture && activeAction) {
+          retryCapture = { jobId: expectedJobId ?? '', action: activeAction }
+        }
         captureState.value = 'error'
         captureError.value = 'reason' in payload && typeof payload.reason === 'string' && payload.reason.trim().length > 0
           ? payload.reason
           : 'The TV rejected this calibration recording.'
       } else if ('status' in payload && (payload.status === 'accepted' || payload.status === 'duplicate')) {
-        pendingUpload = null
+        clearCaptureAckTimer()
+        retryCapture = null
       }
+    }
+    if (env.type === 'calibration.capture.rejected') {
+      const payload = env.payload
+      if (typeof payload !== 'object' || payload === null
+        || !('jobId' in payload) || !('captureId' in payload) || !('reason' in payload)
+        || typeof payload.jobId !== 'string' || typeof payload.captureId !== 'string'
+        || typeof payload.reason !== 'string') return
+      if (retryCapture?.jobId !== payload.jobId || retryCapture.action.captureId !== payload.captureId) return
+      clearCaptureAckTimer()
+      captureState.value = 'error'
+      captureError.value = payload.reason.trim() || 'The TV rejected this calibration recording.'
     }
   }
 
   const unsubscribe = connection.onMessage(onMessage)
+  const unsubscribeTransportState = connection.onStateChange?.(handleTransportState) ?? (() => undefined)
   onScopeDispose(() => {
     disposed = true
     armed = false
+    clearCaptureAckTimer()
     unsubscribe()
+    unsubscribeTransportState()
     stopWakeLockWatch()
     screenWakeLock.dispose()
     void disposeCapture()

@@ -12,7 +12,7 @@ defineProps<{
   <section class="block">
     <h2 class="label">01 · Device</h2>
     <dl class="spec">
-      <dt>room</dt>
+      <dt>pairing code</dt>
       <dd>{{ room }}</dd>
       <dt>television</dt>
       <dd>{{ deviceOnline ? 'online' : 'offline' }}</dd>

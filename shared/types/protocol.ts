@@ -1,10 +1,8 @@
 export const PROTOCOL_VERSION = 1 as const
 
 export const MAX_PAYLOAD_BYTES = 16 * 1024
-export const CALIBRATION_CAPTURE_FRAME_VERSION = 1 as const
-export const CALIBRATION_CAPTURE_FRAME_MAGIC = 'SSCP' as const
 export const MAX_CALIBRATION_CAPTURE_METADATA_BYTES = 64 * 1024
-export const MAX_CALIBRATION_CAPTURE_FRAME_BYTES = 8 * 1024 * 1024
+export const MAX_CALIBRATION_CAPTURE_BYTES = 2 * 1024 * 1024
 
 export type Role = 'device' | 'client'
 
@@ -16,6 +14,7 @@ export interface Envelope<P = unknown> {
   payload: P
   replyTo?: string
   expiresAt?: number
+  transportSessionId?: string
 }
 
 export function normalizePairCode(code: string): string {
@@ -28,41 +27,40 @@ export function isValidPairCode(code: string): boolean {
   return PAIR_CODE_PATTERN.test(normalizePairCode(code))
 }
 
-export function pairRoom(code: string): string {
-  return `pair:${normalizePairCode(code)}`
-}
-
-export interface HelloPayload {
-  role: Role
-  room: string
-}
-
-export interface WelcomePayload {
-  room: string
-  peers: { deviceOnline: boolean; clients: number }
-}
-
-export interface PeerEventPayload {
-  role: Role
-}
-
-export interface ErrorPayload {
-  code:
-    | 'bad_envelope'
-    | 'version_mismatch'
-    | 'unknown_type'
-    | 'payload_too_large'
-    | 'rate_limited'
-    | 'not_in_room'
-    | 'internal'
-  message?: string
-}
-
 export interface DeviceInfo {
   id: string
   name: string
   appVersion: string
   buildId?: string
+}
+
+export type TransportDiagnosticState =
+  | 'idle'
+  | 'pairing'
+  | 'signaling'
+  | 'connecting'
+  | 'direct'
+  | 'reconnecting'
+  | 'failed'
+  | 'closed'
+
+export interface TransportDiagnosticsPayload {
+  state: TransportDiagnosticState
+  sessionId: string | null
+  iceConnectionState: string | null
+  iceGatheringState: string | null
+  peerConnectionState: string | null
+  selectedCandidateType: string | null
+  selectedCandidateProtocol: string | null
+  rttMs: number | null
+  bytesSent: number
+  bytesReceived: number
+  captureBufferedBytes: number
+  reconnectCount: number
+  signalingRoundTripMs: number | null
+  lastControlMessageAt: number | null
+  lastPeerTrafficAt: number | null
+  lastError: string | null
 }
 
 export const CALIBRATION_PACKAGE_FORMAT = 'sweetspot.calibration' as const
@@ -382,6 +380,12 @@ export interface CalibrationCaptureUploadedPayload {
   byteCount: number
   status: CalibrationCaptureUploadStatus
   reason?: string
+}
+
+export interface CalibrationCaptureRejectedPayload {
+  jobId: string
+  captureId: string
+  reason: string
 }
 
 export interface CalibrationValidationCaptureReadyPayload {
@@ -1012,6 +1016,7 @@ const DEVICE_TARGETED_TYPES = [
   'probe.curve.apply',
   'diagnostics.deviceInfo',
   'diagnostics.effects',
+  'diagnostics.transport',
 ] as const
 
 export type DeviceTargetedType = (typeof DEVICE_TARGETED_TYPES)[number]
@@ -1036,6 +1041,7 @@ export const DEVICE_TO_CLIENT_TYPES = new Set<string>([
   'measurement.error',
   'calibration.exported',
   'calibration.capture.uploaded',
+  'calibration.capture.rejected',
   'calibration.capture.finished',
   'calibration.job.state',
   'probe.status',
@@ -1043,15 +1049,11 @@ export const DEVICE_TO_CLIENT_TYPES = new Set<string>([
   'diagnostics.deviceInfo',
   'diagnostics.probe',
   'diagnostics.effects',
+  'diagnostics.transport',
 ])
 
 export const KNOWN_TYPES = new Set<string>([
   ...DEVICE_TARGETED_TYPES,
-  'session.hello',
-  'session.welcome',
-  'session.peerJoined',
-  'session.peerLeft',
-  'session.error',
   'ping',
   'pong',
   'state.snapshot',
@@ -1067,6 +1069,7 @@ export const KNOWN_TYPES = new Set<string>([
   'measurement.error',
   'calibration.exported',
   'calibration.capture.uploaded',
+  'calibration.capture.rejected',
   'calibration.capture.finished',
   'calibration.job.state',
   'probe.status',
@@ -1074,13 +1077,7 @@ export const KNOWN_TYPES = new Set<string>([
   'diagnostics.deviceInfo',
   'diagnostics.probe',
   'diagnostics.effects',
-])
-export const SESSION_ONLY_TYPES = new Set<string>([
-  'session.hello',
-  'session.welcome',
-  'session.peerJoined',
-  'session.peerLeft',
-  'session.error',
+  'diagnostics.transport',
 ])
 
 export function isDeviceTargeted(type: string): type is DeviceTargetedType {
@@ -1093,53 +1090,6 @@ export function isClientToDevice(type: string): boolean {
 
 export function isDeviceToClient(type: string): boolean {
   return DEVICE_TO_CLIENT_TYPES.has(type)
-}
-
-export interface RoomSocketReadyMessage {
-  kind: 'room.ready'
-  role: Role
-  deviceOnline: boolean
-  messages: Envelope[]
-}
-
-export interface RoomSocketPresenceMessage {
-  kind: 'room.presence'
-  deviceOnline: boolean
-}
-
-export interface RoomSocketClientPresenceMessage {
-  kind: 'room.clientPresence'
-  clientOnline: boolean
-}
-
-export interface RoomSocketErrorMessage {
-  kind: 'room.error'
-  code: ErrorPayload['code'] | 'bad_json' | 'bad_message'
-  message?: string
-}
-
-export type RoomSocketServerMessage =
-  | RoomSocketReadyMessage
-  | RoomSocketPresenceMessage
-  | RoomSocketClientPresenceMessage
-  | RoomSocketErrorMessage
-
-export function isRoomSocketServerMessage(value: unknown): value is RoomSocketServerMessage {
-  if (!isRecord(value) || typeof value.kind !== 'string') return false
-  if (value.kind === 'room.ready') {
-    return (value.role === 'client' || value.role === 'device')
-      && typeof value.deviceOnline === 'boolean'
-      && Array.isArray(value.messages)
-      && value.messages.every(isEnvelope)
-  }
-  if (value.kind === 'room.presence') return typeof value.deviceOnline === 'boolean'
-  if (value.kind === 'room.clientPresence') return typeof value.clientOnline === 'boolean'
-  if (value.kind === 'room.error') {
-    return typeof value.code === 'string'
-      && ['bad_json', 'bad_message', 'bad_envelope', 'version_mismatch', 'unknown_type', 'payload_too_large', 'rate_limited', 'not_in_room', 'internal'].includes(value.code)
-      && (value.message === undefined || typeof value.message === 'string')
-  }
-  return false
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1661,6 +1611,10 @@ export function isEnvelope(value: unknown): value is Envelope<unknown> {
   if (!isFiniteNumber(value.ts)) return false
   if (!Object.hasOwn(value, 'payload')) return false
   return (value.replyTo === undefined || (typeof value.replyTo === 'string' && value.replyTo.length <= 256))
+    && (value.transportSessionId === undefined
+      || (typeof value.transportSessionId === 'string'
+        && value.transportSessionId.length > 0
+        && value.transportSessionId.length <= 128))
     && (value.expiresAt === undefined
       || (isFiniteNumber(value.expiresAt) && value.expiresAt > value.ts && value.expiresAt <= value.ts + 120_000))
 }
@@ -1729,6 +1683,32 @@ function isDiagnosticDeviceInfoPayload(value: unknown): boolean {
   return numericFields.every((field) => isFiniteNumber(value[field]))
     && (value.audioserverPid === null || isInteger(value.audioserverPid))
     && typeof value.persistentProbeActive === 'boolean'
+}
+
+function isTransportDiagnosticsPayload(value: unknown): value is TransportDiagnosticsPayload {
+  if (!isRecord(value)
+    || typeof value.state !== 'string'
+    || !['idle', 'pairing', 'signaling', 'connecting', 'direct', 'reconnecting', 'failed', 'closed'].includes(value.state)
+    || (value.sessionId !== null && !isBoundedText(value.sessionId, 128))
+    || (value.iceConnectionState !== null && !isBoundedText(value.iceConnectionState, 64))
+    || (value.iceGatheringState !== null && !isBoundedText(value.iceGatheringState, 64))
+    || (value.peerConnectionState !== null && !isBoundedText(value.peerConnectionState, 64))
+    || (value.selectedCandidateType !== null && !isBoundedText(value.selectedCandidateType, 64))
+    || (value.selectedCandidateProtocol !== null && !isBoundedText(value.selectedCandidateProtocol, 64))
+    || (value.rttMs !== null && !isFiniteNumber(value.rttMs))
+    || !isNonNegativeSafeInteger(value.bytesSent)
+    || !isNonNegativeSafeInteger(value.bytesReceived)
+    || !isNonNegativeSafeInteger(value.captureBufferedBytes)
+    || !isNonNegativeSafeInteger(value.reconnectCount)
+    || (value.signalingRoundTripMs !== null && !isFiniteNumber(value.signalingRoundTripMs))
+    || (value.lastControlMessageAt !== null && !isNonNegativeSafeInteger(value.lastControlMessageAt))
+    || (value.lastPeerTrafficAt !== null && !isNonNegativeSafeInteger(value.lastPeerTrafficAt))
+    || (value.lastError !== null && !isBoundedText(value.lastError, 2_048))) return false
+  return true
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && value >= 0
 }
 
 function isSessionWithChannel(value: unknown): value is Record<string, unknown> & CalibrationSessionBeginPayload {
@@ -2012,7 +1992,7 @@ function isCalibrationCaptureMetadata(value: unknown): value is CalibrationCaptu
     || value.channelCount !== 1
     || !isInteger(value.sampleCount)
     || value.sampleCount <= 0
-    || value.sampleCount > Math.floor(MAX_CALIBRATION_CAPTURE_FRAME_BYTES / 4)
+    || value.sampleCount > Math.floor(MAX_CALIBRATION_CAPTURE_BYTES / 4)
     || !isInteger(value.byteCount)
     || value.byteCount !== value.sampleCount * 4
     || !isCalibrationCaptureSettings(value.settings)
@@ -2042,11 +2022,18 @@ function isCalibrationCaptureUploadedPayload(value: unknown): value is Calibrati
     || !isSha256(value.contentSha256)
     || !isInteger(value.sampleCount)
     || value.sampleCount <= 0
-    || value.sampleCount > Math.floor(MAX_CALIBRATION_CAPTURE_FRAME_BYTES / 4)
+    || value.sampleCount > Math.floor(MAX_CALIBRATION_CAPTURE_BYTES / 4)
     || !isInteger(value.byteCount)
     || value.byteCount !== value.sampleCount * 4
     || (value.status !== 'accepted' && value.status !== 'rejected' && value.status !== 'duplicate')) return false
   return value.reason === undefined || isBoundedText(value.reason, 1024)
+}
+
+function isCalibrationCaptureRejectedPayload(value: unknown): value is CalibrationCaptureRejectedPayload {
+  return isRecord(value)
+    && isBoundedText(value.jobId, 128)
+    && isBoundedText(value.captureId, 128)
+    && isBoundedText(value.reason, 1_024)
 }
 
 function isCalibrationCaptureFinishedPayload(value: unknown): value is CalibrationCaptureFinishedPayload {
@@ -2116,6 +2103,10 @@ export function validatePayload(type: string, payload: unknown): string | null {
         || (isRecord(payload) && Array.isArray(payload.inventory) && Array.isArray(payload.sessionProbes))
         ? null
         : `${type} requires an empty request or valid effect diagnostics`
+    case 'diagnostics.transport':
+      return isEmptyPayload(payload) || isTransportDiagnosticsPayload(payload)
+        ? null
+        : `${type} requires an empty request or valid transport diagnostics`
     case 'state.snapshot':
     case 'state.changed':
       return isStateSnapshot(payload) ? null : `${type} requires a valid state snapshot`
@@ -2170,6 +2161,8 @@ export function validatePayload(type: string, payload: unknown): string | null {
       return isCalibrationPackage(payload) ? null : `${type} requires a valid SweetSpot calibration package`
     case 'calibration.capture.uploaded':
       return isCalibrationCaptureUploadedPayload(payload) ? null : `${type} requires a valid upload result`
+    case 'calibration.capture.rejected':
+      return isCalibrationCaptureRejectedPayload(payload) ? null : `${type} requires a job, capture, and reason`
     case 'calibration.capture.finished':
       return isCalibrationCaptureFinishedPayload(payload) ? null : `${type} requires a job id and capture id`
     case 'calibration.job.state':

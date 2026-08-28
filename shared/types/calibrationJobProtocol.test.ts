@@ -59,6 +59,7 @@ describe('TV-owned calibration job protocol', () => {
     expect(isClientToDevice('calibration.capture.ready')).toBe(true)
     expect(isClientToDevice('calibration.validation.capture.ready')).toBe(true)
     expect(isDeviceToClient('calibration.capture.uploaded')).toBe(true)
+    expect(isDeviceToClient('calibration.capture.rejected')).toBe(true)
     expect(isDeviceToClient('calibration.job.state')).toBe(true)
     expect(KNOWN_TYPES.has('calibration.job.state')).toBe(true)
   })
@@ -108,6 +109,11 @@ describe('TV-owned calibration job protocol', () => {
       byteCount: 16,
       status: 'accepted',
     })).not.toBeNull()
+    expect(validatePayload('calibration.capture.rejected', {
+      jobId: 'job-1',
+      captureId: 'center-left-0',
+      reason: 'The capture stream was incomplete',
+    })).toBeNull()
     expect(validatePayload('calibration.validation.capture.ready', {
       jobId: 'job-1',
       captureId: 'validation-candidate-0',

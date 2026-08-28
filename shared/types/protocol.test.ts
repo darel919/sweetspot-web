@@ -7,7 +7,6 @@ import {
   KNOWN_TYPES,
   isMeasurementContext,
   isMeasurementSweep,
-  isRoomSocketServerMessage,
   isStateSnapshot,
   CALIBRATION_POSITION_TARGETS,
   CALIBRATION_ANALYSIS_REVISION,
@@ -53,7 +52,7 @@ const context = {
 } as const
 
 describe('measurement protocol boundary', () => {
-  test('enforces explicit relay direction sets and payload validators', () => {
+  test('enforces explicit direction sets and payload validators', () => {
     expect(isClientToDevice('engine.enable')).toBe(true)
     expect(isClientToDevice('state.snapshot')).toBe(false)
     expect(isDeviceToClient('state.snapshot')).toBe(true)
@@ -63,6 +62,28 @@ describe('measurement protocol boundary', () => {
     expect(validatePayload('profile.save', { name: 'Living Room' })).toBeNull()
     expect(validatePayload('profile.save', { name: '' })).not.toBeNull()
     expect(validatePayload('state.get', {})).toBeNull()
+    expect(isClientToDevice('diagnostics.transport')).toBe(true)
+    expect(isDeviceToClient('diagnostics.transport')).toBe(true)
+    expect(validatePayload('diagnostics.transport', {})).toBeNull()
+    expect(validatePayload('diagnostics.transport', {
+      state: 'direct',
+      sessionId: '…12345678',
+      iceConnectionState: 'connected',
+      iceGatheringState: 'complete',
+      peerConnectionState: 'connected',
+      selectedCandidateType: null,
+      selectedCandidateProtocol: null,
+      rttMs: null,
+      bytesSent: 10,
+      bytesReceived: 20,
+      captureBufferedBytes: 0,
+      reconnectCount: 0,
+      signalingRoundTripMs: null,
+      lastControlMessageAt: null,
+      lastPeerTrafficAt: null,
+      lastError: null,
+    })).toBeNull()
+    expect(validatePayload('diagnostics.transport', { state: 'invalid' })).not.toBeNull()
     expect(validatePayload('unhandled.type', {})).not.toBeNull()
   })
 
@@ -403,7 +424,7 @@ describe('measurement protocol boundary', () => {
     })).toBe(true)
   })
 
-  test('rejects full candidate diagnostics at the relay boundary', () => {
+  test('rejects full candidate diagnostics at the transport boundary', () => {
     expect(validatePayload('measurement.diagnostics', {
       sessionId: 'cal_test',
       context,
@@ -546,13 +567,4 @@ describe('measurement protocol boundary', () => {
     })).not.toBeNull()
   })
 
-  test('recognizes room socket control messages separately from envelopes', () => {
-    expect(isRoomSocketServerMessage({ kind: 'room.presence', deviceOnline: false })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', role: 'client', deviceOnline: true, messages: [] })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', role: 'device', deviceOnline: true, messages: [] })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.clientPresence', clientOnline: true })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.ping' })).toBe(false)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', deviceOnline: true, messages: [] })).toBe(false)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', deviceOnline: true, messages: [{ type: 'bad' }] })).toBe(false)
-  })
 })

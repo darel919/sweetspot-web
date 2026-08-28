@@ -49,6 +49,8 @@ function isStoppedMessage(value: unknown): value is StoppedMessage {
 
 export interface PcmRecorderOptions {
   onTrackEnded?: () => void
+  onChunk?: (samples: Float32Array) => Promise<void> | void
+  retainSamples?: boolean
 }
 
 /**
@@ -83,6 +85,16 @@ class PcmRecorderImpl implements PcmRecorder {
   private stopPromise: Promise<PcmRecording> | null = null
   private streamSampleCount = 0
   private windowStartSample = 0
+  private windowSampleCount = 0
+  private windowSumSquares = 0
+  private windowPeak = 0
+  private windowClippedSamples = 0
+  private streamError: Error | null = null
+  private streamChain: Promise<void> = Promise.resolve()
+  private streamInFlight = 0
+  private streamPaused = false
+
+  private static readonly MAX_PENDING_STREAM_CHUNKS = 8
 
   constructor(capture: MicrophoneCapture, options: PcmRecorderOptions) {
     this.capture = capture
@@ -129,6 +141,14 @@ class PcmRecorderImpl implements PcmRecorder {
 
     this.chunks.length = 0
     this.windowStartSample = this.streamSampleCount
+    this.windowSampleCount = 0
+    this.windowSumSquares = 0
+    this.windowPeak = 0
+    this.windowClippedSamples = 0
+    this.streamError = null
+    this.streamChain = Promise.resolve()
+    this.streamInFlight = 0
+    this.streamPaused = false
     this.windowActive = true
     this.node?.port.postMessage({ type: 'start' })
   }
@@ -161,6 +181,14 @@ class PcmRecorderImpl implements PcmRecorder {
     }
     this.streamSampleCount = 0
     this.windowStartSample = 0
+    this.windowSampleCount = 0
+    this.windowSumSquares = 0
+    this.windowPeak = 0
+    this.windowClippedSamples = 0
+    this.streamError = null
+    this.streamChain = Promise.resolve()
+    this.streamInFlight = 0
+    this.streamPaused = false
   }
 
   sampleRate(): number | null {
@@ -175,15 +203,27 @@ class PcmRecorderImpl implements PcmRecorder {
       this.chunks.length = 0
       throw new PcmRecorderError('The capture worklet did not finish draining the recording.')
     }
+    await this.streamChain
+    if (this.streamError) {
+      this.windowActive = false
+      this.chunks.length = 0
+      throw this.streamError
+    }
     this.windowActive = false
     const samples = this.combineChunks()
     const startSample = this.windowStartSample
     this.chunks.length = 0
+    const diagnostics = this.diagnostics(samples)
+    const endSample = startSample + this.windowSampleCount
+    this.windowSampleCount = 0
+    this.windowSumSquares = 0
+    this.windowPeak = 0
+    this.windowClippedSamples = 0
     return {
       samples,
       startSample,
-      endSample: startSample + samples.length,
-      diagnostics: this.diagnostics(samples),
+      endSample,
+      diagnostics,
     }
   }
 
@@ -192,7 +232,40 @@ class PcmRecorderImpl implements PcmRecorder {
       const samples = new Float32Array(data.buffer)
       const startSample = this.streamSampleCount
       this.streamSampleCount += samples.length
-      if (this.windowActive) this.chunks.push({ startSample, samples })
+      if (!this.windowActive) return
+      this.windowSampleCount += samples.length
+      for (const sample of samples) {
+        const absolute = Math.abs(sample)
+        this.windowSumSquares += sample * sample
+        this.windowPeak = Math.max(this.windowPeak, absolute)
+        if (absolute >= 0.999) this.windowClippedSamples++
+      }
+      if (this.options.retainSamples !== false) this.chunks.push({ startSample, samples })
+      if (!this.options.onChunk || this.streamError) return
+      if (this.streamInFlight >= PcmRecorderImpl.MAX_PENDING_STREAM_CHUNKS) {
+        this.streamPaused = true
+        this.node?.port.postMessage({ type: 'pause' })
+        this.streamError = new PcmRecorderError('The capture transport could not keep up. Retry this capture.')
+        return
+      }
+      this.streamInFlight++
+      if (this.streamInFlight >= PcmRecorderImpl.MAX_PENDING_STREAM_CHUNKS) {
+        this.streamPaused = true
+        this.node?.port.postMessage({ type: 'pause' })
+      }
+      this.streamChain = this.streamChain
+        .then(() => this.options.onChunk?.(samples))
+        .catch((error: unknown) => {
+          this.streamError = error instanceof Error ? error : new PcmRecorderError('The capture transport failed.')
+          this.node?.port.postMessage({ type: 'pause' })
+        })
+        .finally(() => {
+          this.streamInFlight--
+          if (this.streamPaused && !this.streamError && this.streamInFlight <= 2 && this.windowActive) {
+            this.streamPaused = false
+            this.node?.port.postMessage({ type: 'resume' })
+          }
+        })
       return
     }
     if (isStoppedMessage(data)) {
@@ -220,6 +293,7 @@ class PcmRecorderImpl implements PcmRecorder {
     if (this.trackEndedHandler) this.capture.track.removeEventListener('ended', this.trackEndedHandler)
     this.trackEndedHandler = null
     this.node?.port.postMessage({ type: 'pause' })
+    this.streamPaused = false
     this.source?.disconnect()
     this.node?.disconnect()
     this.silence?.disconnect()
@@ -254,11 +328,17 @@ class PcmRecorderImpl implements PcmRecorder {
     let sumSquares = 0
     let peak = 0
     let clippedSamples = 0
-    for (const sample of samples) {
-      const absolute = Math.abs(sample)
-      sumSquares += sample * sample
-      peak = Math.max(peak, absolute)
-      if (absolute >= 0.999) clippedSamples++
+    if (samples.length > 0) {
+      for (const sample of samples) {
+        const absolute = Math.abs(sample)
+        sumSquares += sample * sample
+        peak = Math.max(peak, absolute)
+        if (absolute >= 0.999) clippedSamples++
+      }
+    } else {
+      sumSquares = this.windowSumSquares
+      peak = this.windowPeak
+      clippedSamples = this.windowClippedSamples
     }
     return {
       sampleRate: this.context?.sampleRate ?? this.capture.settings.sampleRate ?? 0,
@@ -266,11 +346,11 @@ class PcmRecorderImpl implements PcmRecorder {
       echoCancellation: this.capture.settings.echoCancellation,
       noiseSuppression: this.capture.settings.noiseSuppression,
       autoGainControl: this.capture.settings.autoGainControl,
-      rms: samples.length > 0 ? Math.sqrt(sumSquares / samples.length) : 0,
+      rms: this.windowSampleCount > 0 ? Math.sqrt(sumSquares / this.windowSampleCount) : 0,
       peak,
       clipped: clippedSamples > 0,
       clippedSamples,
-      sampleCount: samples.length,
+      sampleCount: samples.length > 0 ? samples.length : this.windowSampleCount,
     }
   }
 }

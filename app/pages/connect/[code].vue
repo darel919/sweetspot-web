@@ -6,8 +6,12 @@
       <section v-if="codeError" class="block">
         <p class="error">INVALID PAIR CODE. Scan the QR code on your TV again.</p>
       </section>
+      <section v-else-if="pairingError" class="block">
+        <p class="error">Scan the QR code shown on the TV to authenticate this connection.</p>
+      </section>
+      <p v-if="connectionError" class="error transport-error" role="alert">{{ connectionError }}</p>
 
-      <template v-else>
+      <template v-if="!codeError && !pairingError">
         <ConnectDeviceSection
           :room="room"
           :device-online="deviceOnline"
@@ -94,7 +98,13 @@
           @request-state="getState"
         />
 
-        <ConnectDebugPanel v-if="debugLog.length" :entries="debugLog" />
+        <ConnectDebugPanel
+          v-if="debugLog.length"
+          :entries="debugLog"
+          :browser-diagnostics="diagnostics"
+          :tv-diagnostics="tvTransportDiagnostics"
+          @refresh-transport-diagnostics="refreshTransportDiagnostics"
+        />
         <ConnectFooter :version="snapshot?.device.appVersion ?? '—'" />
       </template>
     </div>
@@ -110,9 +120,11 @@ import type {
   PresetOption,
   ProbeDiagnostics,
   StateSnapshot,
+  TransportDiagnosticsPayload,
 } from '#shared/types/protocol'
+import type { PairingCredentials } from '#shared/transport/signaling'
 import { isStateSnapshot } from '#shared/types/protocol'
-import { shouldNotifyOffline } from '~/composables/connectionState'
+import { shouldNotifyOffline, transportErrorMessage } from '~/composables/connectionState'
 import { onMounted, onScopeDispose, ref, watch, computed, watchEffect } from 'vue'
 import '~/components/connect/connect.css'
 import ConnectCalibrationRemoteSection from '~/components/connect/ConnectCalibrationRemoteSection.vue'
@@ -140,10 +152,23 @@ const rawCode = computed(() => String(route.params.code ?? ''))
 const codeValid = computed(() => /^[A-Za-z0-9]{6,10}$/.test(rawCode.value.replace(/-/g, '')))
 const codeError = computed(() => !codeValid.value)
 const room = computed(() => rawCode.value.toUpperCase())
+const rendezvousId = computed(() => String(route.query.r ?? '').trim().toLowerCase())
+const pairSecret = computed(() => String(route.hash ?? '').replace(/^#/, '').trim())
+const pairingError = computed(() => codeValid.value
+  && (!/^[a-f0-9]{32}$/.test(rendezvousId.value) || pairSecret.value.length < 32))
+const pairing = computed<PairingCredentials | null>(() => {
+  if (!codeValid.value || pairingError.value) return null
+  return {
+    displayCode: room.value,
+    rendezvousId: rendezvousId.value,
+    pairSecret: pairSecret.value,
+  }
+})
 const debugCaptureExportEnabled = computed(() => route.query.debug === '1')
 
-const connection = useSweetSpotConnection('client', () => rawCode.value)
-const { status, deviceOnline, debugLog, connect, send, request, onMessage } = connection
+const connection = useSweetSpotConnection('client', () => pairing.value)
+const { status, deviceOnline, debugLog, diagnostics, connect, send, request, onMessage } = connection
+const connectionError = computed(() => transportErrorMessage(diagnostics.value?.lastError ?? null))
 const snapshot = ref<StateSnapshot | null>(null)
 const remoteCalibration = useCalibrationRemoteMic(connection)
 const {
@@ -209,6 +234,7 @@ const ROUTING_TEST_BANDS = [4, 20, 36, 52] as const
 
 const deviceInfo = ref<DeviceInfoPayload | null>(null)
 const devInfoPending = ref(false)
+const tvTransportDiagnostics = ref<TransportDiagnosticsPayload | null>(null)
 
 const profileName = ref('')
 
@@ -639,7 +665,13 @@ async function fetchDeviceInfo() {
   }
 }
 
+async function refreshTransportDiagnostics() {
+  if (!deviceOnline.value) return
+  const res = await withTimeout(request<TransportDiagnosticsPayload>('diagnostics.transport'), 10_000)
+  if (res) tvTransportDiagnostics.value = res.payload
+}
+
 watchEffect(() => {
-  if (codeValid.value && status.value === 'disconnected') connect()
+  if (pairing.value && status.value === 'disconnected') connect()
 })
 </script>

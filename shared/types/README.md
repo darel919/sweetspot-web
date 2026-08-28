@@ -1,121 +1,40 @@
 # SweetSpot wire protocol v1
 
-Transport-agnostic message contract between the browser dashboard (`client`)
-and the Android TV (`device`). Transport details live in
-[TRANSPORT.md](./TRANSPORT.md) (WebSocket mailbox on Cloudflare).
+This is the transport-agnostic message contract between the browser dashboard (`client`) and the Android TV (`device`). Runtime transport details are in [`TRANSPORT.md`](./TRANSPORT.md). The TypeScript definitions and validators in `protocol.ts` are paired with the Android protocol implementation and cross-language fixtures.
 
 ## Envelope
 
-```jsonc
+```json
 {
-  "v": 1,                      // protocol version, always 1 today
-  "id": "msg_01J...",          // unique sender-generated id
-  "type": "state.get",         // message type, see lists below
-  "ts": 1787520000000,         // sender wall clock, informational only
-  "payload": {},               // type-specific, may be empty
-  "replyTo": "msg_01J..."      // set on responses/acks referencing a request id
+  "v": 1,
+  "id": "msg_01J...",
+  "type": "state.get",
+  "ts": 1787520000000,
+  "payload": {},
+  "replyTo": "msg_01J...",
+  "expiresAt": 1787520030000,
+  "transportSessionId": "peer-generation"
 }
 ```
 
-Rules:
+`id` is unique for the sender. `replyTo` identifies a request. `ts` is informational. `expiresAt` bounds queued work during reconnect. `transportSessionId` fences envelopes to the authenticated direct peer generation and is not a calibration job ID.
 
-- Unknown optional fields must be ignored.
-- Unknown `type` values are rejected by the mailbox with `unknown_type`.
-- JSON payloads above `MAX_PAYLOAD_BYTES` (16 KiB) are rejected. Calibration
-  capture frames use the separate `MAX_CALIBRATION_CAPTURE_FRAME_BYTES` limit.
-- `ping`/`pong` carry no payload. Either side may ping; the receiver must pong.
-- The room transport has no `room.ping` control frame.
+Unknown optional fields are ignored. Unknown message types, malformed payloads, oversized payloads, stale session IDs, and invalid binary frames are rejected. JSON payloads remain bounded by `MAX_PAYLOAD_BYTES`.
 
-## Message types
+The protocol includes device-targeted commands for state, engine, profiles, calibration jobs, capture readiness, validation, import/export, cancellation, and diagnostics. Device-published messages include state snapshots and changes, calibration actions and results, capture status, job state, and diagnostic events. The complete type and payload list is in `protocol.ts`.
 
-Session-scoped types (`session.hello`, `session.welcome`, `session.peerJoined/Left`,
-`session.error`) are not routed. Room WebSocket presence uses `room.ready`,
-`room.presence`, and `room.clientPresence` control frames. Every `room.ready`
-frame includes the connected socket's `role`.
+The `diagnostics.transport` request returns a bounded TV peer snapshot. Session IDs are redacted before publication; it is intended for the dashboard's developer details, not normal user-facing error copy.
 
-Device-targeted (client -> device): `state.get`, `engine.enable`,
-`engine.bypass`, `engine.setBands`, `engine.applyPreset`, `profile.list`,
-`profile.save`, `profile.load`, `profile.delete`, `calibration.get`,
-`calibration.applyCandidate`, `calibration.acceptCandidate`,
-`calibration.rollbackCandidate`, `calibration.validation.result`,
-`calibration.reset`, `calibration.export`, `calibration.import`,
-`calibration.job.start`, `calibration.job.get`, `calibration.job.cancel`,
-`calibration.job.discard`, `calibration.job.finish`,
-`calibration.capture.ready`, `calibration.validation.capture.ready`.
+## Ownership
 
-Legacy diagnostic session commands (client -> device):
-`calibrationSession.begin`,
-`calibrationSession.end`, `calibrationSession.abort`,
-`calibrationSession.loudness.start`, `calibrationSession.loudness.stop`,
-`calibrationSession.progress`, `measurement.prepare`,
-`measurement.playSweep`, `measurement.abort`, `measurement.diagnostics`.
+The TV issues calibration jobs, actions, revisions, and timing. It validates capture metadata and integrity, performs acoustic analysis, accepts evidence, computes correction, stages and validates candidates, rolls back unsafe candidates, persists state, and recovers jobs.
 
-Device-published (device -> clients): `state.snapshot`, `state.changed`,
-`calibration.exported`, `calibration.capture.finished`,
-`calibration.capture.uploaded`, `calibration.job.state`.
+The browser requests a TV-issued capture, opens the microphone, selects and sends the complete versioned microphone profile, streams Float32 mono PCM, renders TV-owned state, and requests cancellation. Browser analysis is diagnostic/parity support only. A browser message cannot declare a measurement accepted.
 
-Legacy diagnostic session events:
-`calibrationSession.started`, `calibrationSession.ended`,
-`calibrationSession.loudness.started`, `calibrationSession.loudness.stopped`,
-`calibrationSession.position.continued`,
-`measurement.ready`, `measurement.started`, `measurement.finished`,
-`measurement.error`.
+## Capture stream
 
-`calibration.job.state` carries a compact `CalibrationJobView`. Its
-`nextAction` is a discriminated capture, validation, wait, or complete action.
-The browser renders that action and never computes the calibration plan.
+The capture channel uses the versioned `SSCS` stream format described in [`TRANSPORT.md`](./TRANSPORT.md). It has `capture.begin`, ordered `capture.chunk`, and `capture.end` frames. Metadata includes the job and capture IDs, physical position and channel, actual sample rate, sample count, settings, user agent, microphone profile identity and revision, timestamp, and SHA-256 content hash.
 
-`calibration.export` returns the active final EQ curve as a versioned
-`sweetspot.calibration` package. The package contains the TV frequency grid,
-the requested curve, optional effective DSP readback, and source-device
-metadata. It does not contain microphone PCM or room-measurement checkpoints.
+Float32 samples are little-endian and mono. Chunks are bounded to 16 KiB of PCM and complete frames to 32 KiB. The TV counts bytes and samples, hashes incrementally, rejects gaps or conflicts, verifies the final metadata and SHA-256, and atomically finalizes the temporary file before analysis. Raw PCM is temporary by default.
 
-`calibration.import` accepts an active package on the TV's frequency grid. The
-TV applies and verifies the curve, then stores it as a candidate with
-`validationStatus: "imported"`. The client must accept or roll back that
-candidate. Imported data is not presented as an acoustic validation result.
-
-The `calibrationSession.end` and `.ended` payloads carry an explicit final
-outcome. The ended payload also includes `completedSessionId`, which must match
-`sessionId` so the result remains tied to its originating session.
-
-Explicit diagnostics: `diagnostics.deviceInfo`, `diagnostics.probe`,
-`diagnostics.effects`, `probe.run`, `probe.status`,
-`probe.persistent.start`, `probe.persistent.release`, and
-`probe.curve.apply`. The persistent probe is a temporary 64-band overlay on
-the production session-0 DynamicsProcessing effect; it is not a second global
-effect and it is never persisted. `probe.curve.apply` accepts either a named
-diagnostic curve or `bandsDb` with optional paired `leftBandsDb` and
-`rightBandsDb` arrays. The browser's routing lab uses one microphone and
-repeated left/right physical positions; exported captures remain diagnostic
-evidence until the real-device transfer and routing gates are explicitly
-reviewed.
-
-`measurement.diagnostics` carries compact scalar diagnostics only. Candidate,
-pair, and early-impulse arrays remain in the browser-local diagnostic bundle.
-
-## Calibration capture frames
-
-The browser sends raw microphone PCM to the TV as one binary WebSocket frame.
-The frame starts with the ASCII magic `SSCP`, a big-endian uint32 version, and
-a big-endian uint32 metadata length. The metadata is UTF-8 JSON, followed by
-little-endian Float32 mono PCM bytes.
-
-The frame version is `1`. Metadata is limited to 64 KiB and the whole frame is
-limited to 8 MiB. The metadata includes the job and capture IDs, physical
-position, channel, actual sample rate, sample count, browser settings, the
-complete versioned microphone profile supplied by the phone, timestamp, and
-SHA-256 content hash. A profile is correction-eligible only when its capture
-path status is `validated`. The TV validates the frame before analysis. The
-relay forwards a valid frame without changing its bytes.
-
-## State snapshot
-
-Canonical shape in `protocol.ts` (`StateSnapshot`). The TV answers
-`state.get` with a `state.snapshot` carrying `replyTo`.
-
-When `calibration.transaction.state` is `candidate_pending`, `previousActive`
-describes whether calibration was active in the TV's live DSP state immediately
-before the candidate was staged. It is the rollback target summary. Browser
-measurement checkpoints and generated-but-uncommitted corrections are not
-calibration transactions and must never be used as rollback state.
+Read this document and [`TRANSPORT.md`](./TRANSPORT.md) before changing a wire shape. Update both repositories' fixtures, validators, tests, and documentation together.

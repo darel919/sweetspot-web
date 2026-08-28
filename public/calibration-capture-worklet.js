@@ -10,6 +10,7 @@ class SweetSpotPcmCaptureProcessor extends AudioWorkletProcessor {
       }
       if (event.data?.type === 'stop') this.stopRequested = true
       if (event.data?.type === 'pause') this.recording = false
+      if (event.data?.type === 'resume' && !this.stopRequested) this.recording = true
     }
   }
 

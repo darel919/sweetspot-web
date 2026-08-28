@@ -95,7 +95,7 @@ function fullDiagnostics(channel: 'left' | 'right', analysisStatus: MeasurementD
   }
 }
 
-describe('compact relay diagnostics', () => {
+describe('compact diagnostics', () => {
   test('removes candidate arrays while preserving direct-arrival evidence', () => {
     const compact = compactMeasurementDiagnostics({
       ...fullDiagnostics('left'),
@@ -137,7 +137,7 @@ describe('compact relay diagnostics', () => {
     expect(compact.directArrivalRejectionReason).toBe('peak_below_noise')
   })
 
-  test('represents an unmeasured sibling channel without a relay envelope error', () => {
+  test('represents an unmeasured sibling channel without an envelope error', () => {
     const compact = compactMeasurementDiagnostics({
       ...fullDiagnostics('right', 'ok'),
       analysisStatus: 'not_measured',

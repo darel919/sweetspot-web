@@ -585,7 +585,7 @@ export function useCalibrationSession(connection: Connection, options: Calibrati
       tvBuildId: options.getDeviceIdentity?.()?.buildId ?? null,
       webBuildSha: CALIBRATION_WEB_BUILD_SHA,
       protocolVersion: PROTOCOL_VERSION,
-      relayAuthVersion: 'pairing-v1',
+      pairingAuthVersion: 'pairing-v1',
       analysisRevision: CALIBRATION_ANALYSIS_REVISION,
       sweepRevision: CALIBRATION_SWEEP_REVISION,
       markerChannel: debugCaptures[0]!.sweep.markerChannel,

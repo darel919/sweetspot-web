@@ -35,7 +35,7 @@ export interface CalibrationDebugBundle {
   tvBuildId: string | null
   webBuildSha: string
   protocolVersion: typeof PROTOCOL_VERSION
-  relayAuthVersion: 'pairing-v1'
+  pairingAuthVersion: 'pairing-v1'
   analysisRevision: string
   sweepRevision: string
   markerChannel: MeasurementMarkerChannel
@@ -61,7 +61,7 @@ export function createCalibrationDebugBundle(
     tvBuildId: string | null
     webBuildSha: string
     protocolVersion: typeof PROTOCOL_VERSION
-    relayAuthVersion: 'pairing-v1'
+    pairingAuthVersion: 'pairing-v1'
     analysisRevision: string
     sweepRevision: string
     markerChannel: MeasurementMarkerChannel
