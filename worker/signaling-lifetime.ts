@@ -28,6 +28,15 @@ export function rendezvousNextAlarmAt(
   return expiresAt
 }
 
+export function rendezvousRecoveryAnchor(
+  active: boolean,
+  activeGeneration: string | undefined,
+  candidateGeneration: string,
+  now = Date.now(),
+): number | undefined {
+  return active && activeGeneration === candidateGeneration ? now : undefined
+}
+
 export function isActiveGenerationAllowed(activeGeneration: string | undefined, candidateGeneration: string): boolean {
   return typeof activeGeneration !== 'string' || activeGeneration === candidateGeneration
 }

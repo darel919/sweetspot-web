@@ -13,6 +13,7 @@ import {
   isRendezvousExpired,
   rendezvousCleanupAction,
   rendezvousNextAlarmAt,
+  rendezvousRecoveryAnchor,
   shouldForwardSignalingMessage,
 } from './signaling-lifetime'
 
@@ -268,6 +269,15 @@ export class SignalingDO extends DurableObject<unknown> {
         return
       }
       target.serializeAttachment({ ...targetAttachment, generation } satisfies SocketAttachment)
+      const recoveryAt = rendezvousRecoveryAnchor(
+        await this.state.storage.get<boolean>(ACTIVE_KEY) === true,
+        await this.state.storage.get<string>(ACTIVE_GENERATION_KEY),
+        generation,
+      )
+      if (recoveryAt !== undefined) {
+        await this.state.storage.put(COMPLETED_AT_KEY, recoveryAt)
+        await this.state.storage.setAlarm(recoveryAt + COMPLETED_RENDEZVOUS_RETENTION_MS)
+      }
     }
     this.send(target, value)
   }

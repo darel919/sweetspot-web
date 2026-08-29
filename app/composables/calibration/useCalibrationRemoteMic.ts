@@ -314,6 +314,13 @@ export function encodeCalibrationPcm(samples: Float32Array): ArrayBuffer {
   return result
 }
 
+function isRejectedCommandPayload(payload: unknown): boolean {
+  return typeof payload === 'object'
+    && payload !== null
+    && 'ok' in payload
+    && payload.ok === false
+}
+
 export function useCalibrationRemoteMic(
   connection: CalibrationRemoteMicConnection,
   options: CalibrationRemoteMicOptions = {},
@@ -330,6 +337,7 @@ export function useCalibrationRemoteMic(
   const profileResourceReady = ref(false)
   const captureResourceError = ref('')
   const jobStateKnown = ref(false)
+  const startPending = ref(false)
   const captureResourcesReady = computed(() => captureResourceReady.value && profileResourceReady.value)
   const screenWakeLock = useScreenWakeLock()
   const busy = computed(() => captureState.value === 'opening'
@@ -350,6 +358,7 @@ export function useCalibrationRemoteMic(
   let activeJobId: string | null = null
   let preparedActionKey: string | null = null
   let armed = false
+  let pendingStartRequestId: string | null = null
   let profileLoadPromise: Promise<MicCalibrationProfile[]> | null = null
   let activeStream: ActiveCaptureStream | null = null
   let retryCapture: {
@@ -379,6 +388,16 @@ export function useCalibrationRemoteMic(
     if (captureAckTimer === null) return
     clearTimeout(captureAckTimer)
     captureAckTimer = null
+  }
+
+  function clearStartPending(): void {
+    startPending.value = false
+    pendingStartRequestId = null
+  }
+
+  function abandonStart(): void {
+    clearStartPending()
+    armed = false
   }
 
   function waitForCaptureAcknowledgement(
@@ -499,6 +518,7 @@ export function useCalibrationRemoteMic(
   function handleTransportState(state: DirectConnectionState): void {
     if (state !== 'direct') {
       jobStateKnown.value = false
+      abandonStart()
     }
     if ((state !== 'reconnecting' && state !== 'failed') || !activeStream || !activeAction || completionInFlight) return
     retryCapture = {
@@ -805,14 +825,25 @@ export function useCalibrationRemoteMic(
   }
 
   function startNewJob(mode: CalibrationJobStartMode = 'auto'): void {
-    if (busy.value || disposed) return
+    if (busy.value || startPending.value || disposed) return
     armed = true
     jobStateKnown.value = false
+    startPending.value = true
     retryCapture = null
     clearCaptureAckTimer()
     captureMetadata.value = null
     captureError.value = ''
-    connection.send('calibration.job.start', { mode })
+    try {
+      pendingStartRequestId = connection.send('calibration.job.start', { mode })
+    } catch (error: unknown) {
+      abandonStart()
+      throw error
+    }
+  }
+
+  function cancelPendingStart(): void {
+    if (!startPending.value) return
+    abandonStart()
   }
 
   function resumeJob(): void {
@@ -833,6 +864,7 @@ export function useCalibrationRemoteMic(
   }
 
   async function cancelCapture(): Promise<void> {
+    abandonStart()
     const currentJob = job.value
     const currentAction = activeAction ?? retryCapture?.action
     const currentJobId = currentJob?.jobId ?? activeJobId ?? retryCapture?.jobId
@@ -854,6 +886,7 @@ export function useCalibrationRemoteMic(
   }
 
   async function cancelOptionalRefinement(): Promise<void> {
+    abandonStart()
     armed = false
     retryCapture = null
     clearCaptureAckTimer()
@@ -883,7 +916,8 @@ export function useCalibrationRemoteMic(
     connection.send('calibration.job.discard', { jobId: currentJob.jobId })
   }
 
-  function applyJobState(next: CalibrationJobView | null): void {
+  function applyJobState(next: CalibrationJobView | null, settleStartPending = true): void {
+    if (settleStartPending) clearStartPending()
     jobStateKnown.value = true
     if (!next) {
       if (job.value === null && activeStream === null && retryCapture === null) return
@@ -935,8 +969,15 @@ export function useCalibrationRemoteMic(
   }
 
   function onMessage(env: Envelope): void {
+    if (pendingStartRequestId !== null
+      && env.replyTo === pendingStartRequestId
+      && isRejectedCommandPayload(env.payload)) {
+      abandonStart()
+    }
     if (env.type === 'calibration.job.state') {
-      applyJobState(acceptCalibrationJobState(job.value, env.payload))
+      if (!isCalibrationJobView(env.payload)) return
+      const next = acceptCalibrationJobState(job.value, env.payload)
+      applyJobState(next, next !== job.value || env.replyTo === pendingStartRequestId)
       return
     }
     if (env.type === 'state.snapshot' || env.type === 'state.changed') {
@@ -947,7 +988,8 @@ export function useCalibrationRemoteMic(
       if (incoming === null) {
         applyJobState(null)
       } else if (isCalibrationJobView(incoming)) {
-        applyJobState(acceptCalibrationJobState(job.value, incoming))
+        const next = acceptCalibrationJobState(job.value, incoming)
+        applyJobState(next, next !== job.value || env.replyTo === pendingStartRequestId)
       }
       return
     }
@@ -1055,7 +1097,7 @@ export function useCalibrationRemoteMic(
   const unsubscribeTransportState = connection.onStateChange?.(handleTransportState) ?? (() => undefined)
   onScopeDispose(() => {
     disposed = true
-    armed = false
+    abandonStart()
     clearCaptureAckTimer()
     unsubscribe()
     unsubscribeTransportState()
@@ -1070,6 +1112,7 @@ export function useCalibrationRemoteMic(
     captureError: readonly(captureError),
     captureMetadata: readonly(captureMetadata),
     jobStateKnown: readonly(jobStateKnown),
+    startPending: readonly(startPending),
     profiles: readonly(profiles),
     selectedProfileId: readonly(selectedProfileId),
     profileError: readonly(profileError),
@@ -1080,6 +1123,7 @@ export function useCalibrationRemoteMic(
     preloadCaptureWorklet,
     selectProfile,
     startNewJob,
+    cancelPendingStart,
     resumeJob,
     refreshJob,
     cancelCapture,

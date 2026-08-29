@@ -196,11 +196,13 @@ const {
   startNewJob: startRemoteCalibration,
   resumeJob: resumeRemoteCalibration,
   cancelCapture: cancelRemoteCapture,
+  cancelPendingStart: cancelRemoteCalibrationStart,
   cancelOptionalRefinement: cancelRemoteRefinement,
   finishWithBest: finishRemoteCalibration,
   discardJob: discardRemoteCalibration,
   retryCurrentCapture: retryRemoteCapture,
   jobStateKnown: remoteCalibrationJobStateKnown,
+  startPending: remoteCalibrationStartPending,
   captureResourceReady: remoteCaptureResourceReady,
   captureResourceError: remoteCaptureResourceError,
   preloadCaptureWorklet: preloadRemoteCaptureWorklet,
@@ -259,12 +261,14 @@ const calibrationLocked = computed(() => !remoteCalibrationJobStateKnown.value
     remoteCalibrationJob.value?.phase,
     remoteCaptureState.value,
     measurementBusy.value,
+    remoteCalibrationStartPending.value,
   )
   || probeLabPending.value)
 const calibrationInteractionLocked = computed(() => shouldLockCalibrationInteraction(
   remoteCalibrationJob.value?.phase,
   remoteCaptureState.value,
   measurementBusy.value,
+  remoteCalibrationStartPending.value,
 ))
 
 let scrollLockApplied = false
@@ -287,6 +291,10 @@ function setCalibrationScrollLock(locked: boolean): void {
 }
 
 function cancelActiveCalibration(): void {
+  if (remoteCalibrationStartPending.value) {
+    cancelRemoteCalibrationStart()
+    return
+  }
   const currentJob = remoteCalibrationJob.value
   const action = currentJob?.nextAction
   if (remoteCaptureState.value === 'waiting' && action?.kind === 'capture' && action.optional) {

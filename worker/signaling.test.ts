@@ -6,6 +6,7 @@ import {
   isRendezvousExpired,
   rendezvousCleanupAction,
   rendezvousNextAlarmAt,
+  rendezvousRecoveryAnchor,
   shouldForwardSignalingMessage,
 } from './signaling-lifetime'
 
@@ -44,5 +45,16 @@ describe('signaling rendezvous lifetime', () => {
     expect(rendezvousCleanupAction(true, undefined, completedAt, completedAt + COMPLETED_RENDEZVOUS_RETENTION_MS - 1)).toBe('wait')
     expect(rendezvousCleanupAction(true, undefined, completedAt, completedAt + COMPLETED_RENDEZVOUS_RETENTION_MS)).toBe('cleanup')
     expect(rendezvousNextAlarmAt(true, undefined, completedAt)).toBe(completedAt + COMPLETED_RENDEZVOUS_RETENTION_MS)
+  })
+
+  test('refreshes bounded retention for a legitimate same-generation recovery', () => {
+    const completedAt = 10_000
+    const recoveryAt = completedAt + COMPLETED_RENDEZVOUS_RETENTION_MS
+    const refreshedAt = rendezvousRecoveryAnchor(true, 'generation-1', 'generation-1', recoveryAt)
+
+    expect(refreshedAt).toBe(recoveryAt)
+    expect(rendezvousCleanupAction(true, undefined, refreshedAt, recoveryAt)).toBe('wait')
+    expect(rendezvousNextAlarmAt(true, undefined, refreshedAt)).toBe(recoveryAt + COMPLETED_RENDEZVOUS_RETENTION_MS)
+    expect(rendezvousRecoveryAnchor(true, 'generation-1', 'generation-2', recoveryAt)).toBeUndefined()
   })
 })

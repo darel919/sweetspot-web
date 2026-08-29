@@ -7,7 +7,8 @@ export function shouldLockCalibrationInteraction(
   phase: CalibrationJobPhase | undefined,
   captureState: RemoteMicCaptureState,
   measurementBusy: boolean,
+  startPending: boolean,
 ): boolean {
   const remoteJobActive = phase !== undefined && !TERMINAL_PHASES.includes(phase)
-  return remoteJobActive || captureState !== 'idle' || measurementBusy
+  return startPending || remoteJobActive || captureState !== 'idle' || measurementBusy
 }
