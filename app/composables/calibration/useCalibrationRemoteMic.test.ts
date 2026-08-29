@@ -8,6 +8,7 @@ import type {
 import type { MicCalibrationProfile } from '../../lib/audio/mics/types'
 import type { MicrophoneCapture } from '../../lib/audio/capture/microphone'
 import type { PcmRecorder } from '../../lib/audio/capture/pcm-recorder'
+import type { DirectConnectionState } from '../../lib/transport/types'
 import { decodeCaptureStreamFrame } from '../../../shared/transport/captureStream'
 import { validatePayload } from '../../../shared/types/protocol'
 import {
@@ -192,6 +193,88 @@ describe('TV-owned calibration remote microphone', () => {
       captureId: 'validation-0',
       captureAttemptId: 'capture-attempt-2',
     })).toBeNull()
+  })
+
+  test('keeps a pending cancellation until the TV creates and discards the job', async () => {
+    const inbound = new Set<(message: Envelope) => void>()
+    const commands: Array<{ type: string; payload: unknown }> = []
+    let requestNumber = 0
+    let openedMicrophones = 0
+    let transportStateHandler: ((state: DirectConnectionState) => void) | null = null
+    const connection = {
+      send: (type: string, payload?: unknown) => {
+        commands.push({ type, payload })
+        requestNumber++
+        return `${type}-${requestNumber}`
+      },
+      sendCaptureFrame: async () => undefined,
+      onMessage: (handler: (message: Envelope) => void) => {
+        inbound.add(handler)
+        return () => inbound.delete(handler)
+      },
+      onStateChange: (handler: (state: DirectConnectionState) => void) => {
+        transportStateHandler = handler
+        return () => {
+          if (transportStateHandler === handler) transportStateHandler = null
+        }
+      },
+    }
+    const scope = effectScope()
+    const remote = scope.run(() => useCalibrationRemoteMic(connection, {
+      dependencies: {
+        openMicrophone: async () => {
+          openedMicrophones++
+          throw new Error('The microphone must not open during a cancelled start.')
+        },
+        closeMicrophone: () => undefined,
+        createPcmRecorder: () => {
+          throw new Error('The recorder must not be created during a cancelled start.')
+        },
+        preloadPcmCaptureWorklet: async () => undefined,
+        discoverMicCalibrationProfiles: async () => [microphoneProfile],
+        now: () => 1_757_000_000_000,
+      },
+    }))
+    if (!remote) throw new Error('The remote microphone composable did not initialize')
+
+    try {
+      remote.startNewJob()
+      expect(remote.startPending.value).toBe(true)
+
+      remote.cancelPendingStart()
+      expect(remote.startPending.value).toBe(true)
+      expect(remote.startCancellationPending.value).toBe(true)
+      expect(commands.map((command) => command.type)).toEqual(['calibration.job.start'])
+
+      inbound.forEach((handler) => handler({
+        ...envelope('calibration.job.state', job(1)),
+        replyTo: 'calibration.job.start-1',
+      }))
+      await waitFor(() => commands.some((command) => command.type === 'calibration.job.discard'))
+
+      expect(commands.find((command) => command.type === 'calibration.job.discard')?.payload)
+        .toEqual({ jobId: 'job-1' })
+      expect(openedMicrophones).toBe(0)
+      expect(remote.job.value?.jobId).toBe('job-1')
+
+      transportStateHandler?.('reconnecting')
+      transportStateHandler?.('direct')
+      inbound.forEach((handler) => handler(envelope('calibration.job.state', job(1))))
+      await waitFor(() => commands.filter((command) => command.type === 'calibration.job.discard').length === 2)
+      expect(openedMicrophones).toBe(0)
+
+      inbound.forEach((handler) => handler(envelope('calibration.job.state', {
+        ...job(2),
+        phase: 'cancelled',
+        nextAction: null,
+      })))
+      await waitFor(() => remote.job.value?.phase === 'cancelled')
+      expect(remote.startPending.value).toBe(false)
+      expect(remote.startCancellationPending.value).toBe(false)
+      expect(remote.captureState.value).toBe('idle')
+    } finally {
+      scope.stop()
+    }
   })
 
   test('streams a capture through the generic transport and waits for the TV acknowledgement', async () => {

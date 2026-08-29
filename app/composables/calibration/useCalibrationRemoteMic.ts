@@ -321,6 +321,10 @@ function isRejectedCommandPayload(payload: unknown): boolean {
     && payload.ok === false
 }
 
+function isTerminalCalibrationJob(job: CalibrationJobView): boolean {
+  return job.phase === 'complete' || job.phase === 'failed' || job.phase === 'cancelled'
+}
+
 export function useCalibrationRemoteMic(
   connection: CalibrationRemoteMicConnection,
   options: CalibrationRemoteMicOptions = {},
@@ -338,6 +342,7 @@ export function useCalibrationRemoteMic(
   const captureResourceError = ref('')
   const jobStateKnown = ref(false)
   const startPending = ref(false)
+  const startCancellationPending = ref(false)
   const captureResourcesReady = computed(() => captureResourceReady.value && profileResourceReady.value)
   const screenWakeLock = useScreenWakeLock()
   const busy = computed(() => captureState.value === 'opening'
@@ -359,6 +364,9 @@ export function useCalibrationRemoteMic(
   let preparedActionKey: string | null = null
   let armed = false
   let pendingStartRequestId: string | null = null
+  let pendingStartBaselineJobId: string | null = null
+  let pendingStartCancellationJobId: string | null = null
+  let pendingStartDiscardSent = false
   let profileLoadPromise: Promise<MicCalibrationProfile[]> | null = null
   let activeStream: ActiveCaptureStream | null = null
   let retryCapture: {
@@ -393,10 +401,18 @@ export function useCalibrationRemoteMic(
   function clearStartPending(): void {
     startPending.value = false
     pendingStartRequestId = null
+    pendingStartBaselineJobId = null
+  }
+
+  function clearPendingStartCancellation(): void {
+    startCancellationPending.value = false
+    pendingStartCancellationJobId = null
+    pendingStartDiscardSent = false
   }
 
   function abandonStart(): void {
     clearStartPending()
+    clearPendingStartCancellation()
     armed = false
   }
 
@@ -518,7 +534,13 @@ export function useCalibrationRemoteMic(
   function handleTransportState(state: DirectConnectionState): void {
     if (state !== 'direct') {
       jobStateKnown.value = false
-      abandonStart()
+      armed = false
+      if (startCancellationPending.value) {
+        pendingStartRequestId = null
+        pendingStartDiscardSent = false
+      } else {
+        abandonStart()
+      }
     }
     if ((state !== 'reconnecting' && state !== 'failed') || !activeStream || !activeAction || completionInFlight) return
     retryCapture = {
@@ -829,6 +851,10 @@ export function useCalibrationRemoteMic(
     armed = true
     jobStateKnown.value = false
     startPending.value = true
+    startCancellationPending.value = false
+    pendingStartBaselineJobId = job.value?.jobId ?? null
+    pendingStartCancellationJobId = null
+    pendingStartDiscardSent = false
     retryCapture = null
     clearCaptureAckTimer()
     captureMetadata.value = null
@@ -843,7 +869,8 @@ export function useCalibrationRemoteMic(
 
   function cancelPendingStart(): void {
     if (!startPending.value) return
-    abandonStart()
+    startCancellationPending.value = true
+    armed = false
   }
 
   function resumeJob(): void {
@@ -916,6 +943,25 @@ export function useCalibrationRemoteMic(
     connection.send('calibration.job.discard', { jobId: currentJob.jobId })
   }
 
+  function discardPendingStartJob(jobId: string): void {
+    if (job.value?.jobId !== jobId) return
+    pendingStartCancellationJobId = jobId
+    pendingStartDiscardSent = false
+    discardJob()
+    pendingStartDiscardSent = true
+  }
+
+  function shouldDiscardPendingStartJob(
+    next: CalibrationJobView,
+    isStartReply: boolean,
+    isStartReconciliation: boolean,
+  ): boolean {
+    if (!startCancellationPending.value || isTerminalCalibrationJob(next)) return false
+    if (pendingStartCancellationJobId === next.jobId) return !pendingStartDiscardSent && isStartReconciliation
+    return (isStartReply || isStartReconciliation)
+      && (isStartReply || next.jobId !== pendingStartBaselineJobId)
+  }
+
   function applyJobState(next: CalibrationJobView | null, settleStartPending = true): void {
     if (settleStartPending) clearStartPending()
     jobStateKnown.value = true
@@ -945,7 +991,7 @@ export function useCalibrationRemoteMic(
       retryCapture = null
       clearCaptureAckTimer()
       captureMetadata.value = null
-      if (next.phase === 'complete' || next.phase === 'failed' || next.phase === 'cancelled') armed = false
+      if (isTerminalCalibrationJob(next)) armed = false
       captureState.value = 'idle'
       const expectedJobId = next.jobId
       const expectedRevision = next.revision
@@ -957,7 +1003,7 @@ export function useCalibrationRemoteMic(
       })
     } else if (isCaptureAction(action)) {
       void prepareCapture(action)
-    } else if (next.phase === 'complete' || next.phase === 'failed' || next.phase === 'cancelled') {
+    } else if (isTerminalCalibrationJob(next)) {
       armed = false
       retryCapture = null
       clearCaptureAckTimer()
@@ -968,16 +1014,34 @@ export function useCalibrationRemoteMic(
     }
   }
 
+  function applyIncomingJobState(incoming: CalibrationJobView | null, isStartReply: boolean): void {
+    const isStartReconciliation = startCancellationPending.value && pendingStartRequestId === null
+    if (startPending.value && !isStartReply && !isStartReconciliation) return
+    const next = incoming === null ? null : acceptCalibrationJobState(job.value, incoming)
+    const baselineJobId = pendingStartBaselineJobId
+    const cancellationJobId = pendingStartCancellationJobId
+    const shouldDiscard = next !== null
+      && shouldDiscardPendingStartJob(next, isStartReply, isStartReconciliation)
+    const shouldClearCancellation = next === null
+      ? isStartReply || isStartReconciliation || cancellationJobId !== null
+      : isTerminalCalibrationJob(next)
+        && (isStartReply
+          || next.jobId === cancellationJobId
+          || isStartReconciliation && (baselineJobId === null || next.jobId === baselineJobId))
+    applyJobState(next, !startPending.value || isStartReply || isStartReconciliation)
+    if (shouldDiscard) discardPendingStartJob(next.jobId)
+    if (shouldClearCancellation) clearPendingStartCancellation()
+  }
+
   function onMessage(env: Envelope): void {
-    if (pendingStartRequestId !== null
-      && env.replyTo === pendingStartRequestId
-      && isRejectedCommandPayload(env.payload)) {
+    const isPendingStartReply = pendingStartRequestId !== null && env.replyTo === pendingStartRequestId
+    if (isPendingStartReply && isRejectedCommandPayload(env.payload)) {
       abandonStart()
+      jobStateKnown.value = true
     }
     if (env.type === 'calibration.job.state') {
       if (!isCalibrationJobView(env.payload)) return
-      const next = acceptCalibrationJobState(job.value, env.payload)
-      applyJobState(next, next !== job.value || env.replyTo === pendingStartRequestId)
+      applyIncomingJobState(env.payload, isPendingStartReply)
       return
     }
     if (env.type === 'state.snapshot' || env.type === 'state.changed') {
@@ -986,10 +1050,9 @@ export function useCalibrationRemoteMic(
         ? payload.calibrationJob
         : payload
       if (incoming === null) {
-        applyJobState(null)
+        applyIncomingJobState(null, isPendingStartReply)
       } else if (isCalibrationJobView(incoming)) {
-        const next = acceptCalibrationJobState(job.value, incoming)
-        applyJobState(next, next !== job.value || env.replyTo === pendingStartRequestId)
+        applyIncomingJobState(incoming, isPendingStartReply)
       }
       return
     }
@@ -1113,6 +1176,7 @@ export function useCalibrationRemoteMic(
     captureMetadata: readonly(captureMetadata),
     jobStateKnown: readonly(jobStateKnown),
     startPending: readonly(startPending),
+    startCancellationPending: readonly(startCancellationPending),
     profiles: readonly(profiles),
     selectedProfileId: readonly(selectedProfileId),
     profileError: readonly(profileError),

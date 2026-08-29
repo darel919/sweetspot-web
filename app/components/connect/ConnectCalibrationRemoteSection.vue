@@ -22,6 +22,8 @@ const props = defineProps<{
   selectedProfileId: string
   profileError: string
   jobStateKnown: boolean
+  startPending: boolean
+  startCancellationPending: boolean
   captureResourceReady: boolean
   captureResourceError: string
   locked: boolean
@@ -79,6 +81,8 @@ const canFinishCurrent = computed(() => active.value
   && props.job?.minimumViableCalibration
   && action.value?.kind === 'capture')
 const statusText = computed(() => {
+  if (props.startCancellationPending) return 'Cancelling calibration…'
+  if (props.startPending) return 'Starting calibration on the TV…'
   if (!props.jobStateKnown) return 'Checking the TV’s saved calibration state…'
   if (props.captureResourceError) return props.captureResourceError
   if (!props.captureResourceReady) return 'Preparing browser microphone capture…'

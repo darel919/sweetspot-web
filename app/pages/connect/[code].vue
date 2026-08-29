@@ -49,6 +49,8 @@
           :selected-profile-id="remoteSelectedProfileId"
           :profile-error="remoteProfileError"
           :job-state-known="remoteCalibrationJobStateKnown"
+          :start-pending="remoteCalibrationStartPending"
+          :start-cancellation-pending="remoteCalibrationStartCancellationPending"
           :capture-resource-ready="remoteCaptureResourceReady"
           :capture-resource-error="remoteCaptureResourceError"
           :locked="calibrationInteractionLocked"
@@ -203,6 +205,7 @@ const {
   retryCurrentCapture: retryRemoteCapture,
   jobStateKnown: remoteCalibrationJobStateKnown,
   startPending: remoteCalibrationStartPending,
+  startCancellationPending: remoteCalibrationStartCancellationPending,
   captureResourceReady: remoteCaptureResourceReady,
   captureResourceError: remoteCaptureResourceError,
   preloadCaptureWorklet: preloadRemoteCaptureWorklet,
