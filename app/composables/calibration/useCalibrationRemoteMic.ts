@@ -394,7 +394,7 @@ export function useCalibrationRemoteMic(
         || retryCapture.action.captureId !== action.captureId
         || retryCapture.captureAttemptId !== captureAttemptId) return
       captureState.value = 'error'
-      captureError.value = 'The TV did not confirm this recording. Reconnect, then retry this capture.'
+      captureError.value = 'The TV did not confirm this recording. Reconnect, then retry this measurement without moving the phone.'
     }, CAPTURE_ACK_TIMEOUT_MS)
   }
 
@@ -467,7 +467,7 @@ export function useCalibrationRemoteMic(
         timeout: setTimeout(() => {
           const index = stream.windowWaiters.indexOf(waiter)
           if (index >= 0) stream.windowWaiters.splice(index, 1)
-          reject(new Error('The TV stopped accepting capture data. Reconnect, then retry this capture.'))
+          reject(new Error('The TV stopped accepting capture data. Reconnect, then retry this measurement without moving the phone.'))
         }, CAPTURE_WINDOW_TIMEOUT_MS),
       }
       stream.windowWaiters.push(waiter)
@@ -507,7 +507,7 @@ export function useCalibrationRemoteMic(
       captureAttemptId: activeStream.captureAttemptId,
     }
     captureState.value = 'error'
-    captureError.value = 'Connection interrupted during this capture. Reconnect, then retry this capture without moving the phone.'
+    captureError.value = 'Connection interrupted during this measurement. Reconnect, then retry this measurement without moving the phone.'
     void disposeCapture()
   }
 
@@ -556,6 +556,30 @@ export function useCalibrationRemoteMic(
           captureError.value = 'The microphone ended during calibration.'
           void cancelCapture().then(() => {
             captureState.value = 'error'
+          })
+        },
+        onStreamError: (error) => {
+          if (!isCurrentOperation()) return
+          const stream = activeStream
+          const currentAction = activeAction
+          const jobId = activeJobId ?? job.value?.jobId ?? ''
+          if (stream && currentAction) {
+            retryCapture = {
+              jobId,
+              action: currentAction,
+              captureAttemptId: stream.captureAttemptId,
+            }
+            connection.send('calibration.job.cancel', {
+              jobId,
+              scope: 'capture',
+              captureId: currentAction.captureId,
+              captureAttemptId: stream.captureAttemptId,
+            })
+          }
+          captureError.value = error.message
+          captureState.value = 'uploading'
+          void disposeCapture().then(() => {
+            if (!disposed && captureState.value === 'uploading') captureState.value = 'error'
           })
         },
         retainSamples: false,
@@ -640,13 +664,13 @@ export function useCalibrationRemoteMic(
         await withTimeout(
           stream.startedPromise,
           CAPTURE_WINDOW_TIMEOUT_MS,
-          'The TV did not start this calibration capture. Reconnect, then retry this capture.',
+          'The TV did not start this calibration measurement. Reconnect, then retry this measurement without moving the phone.',
         )
         if (stream.cancelled) throw new Error('The capture upload was cancelled.')
         if (connection.state?.() !== undefined && connection.state() !== 'direct') {
           throw new Error('The direct connection closed before capture could start.')
         }
-        if (!stream.metadata) throw new Error('The microphone capture metadata is unavailable. Retry this capture.')
+        if (!stream.metadata) throw new Error('The microphone capture metadata is unavailable. Retry this measurement without moving the phone.')
         await connection.sendCaptureFrame(encodeCaptureBegin({
           sessionId: stream.sessionId,
           captureId: stream.captureId,
@@ -662,7 +686,7 @@ export function useCalibrationRemoteMic(
         captureState.value = 'error'
         captureError.value = error instanceof Error
           ? error.message
-          : 'The TV did not start this calibration capture. Reconnect, then retry this capture.'
+          : 'The TV did not start this calibration measurement. Reconnect, then retry this measurement without moving the phone.'
         retryCapture = { jobId: activeJobId ?? job.value?.jobId ?? '', action, captureAttemptId }
         void disposeCapture()
       })
@@ -710,7 +734,7 @@ export function useCalibrationRemoteMic(
         const sampleRate = Math.round(recording.diagnostics.sampleRate)
         const metadata = stream.metadata
         if (!metadata || sampleRate !== metadata.sampleRate) {
-          throw new Error('The microphone sample rate changed during capture. Retry this capture.')
+          throw new Error('The microphone sample rate changed during measurement. Retry this measurement without moving the phone.')
         }
         const profile = profileForId(profiles.value, selectedProfileId.value)
         if (!profile) throw new Error('The selected microphone profile is no longer available.')
@@ -755,7 +779,7 @@ export function useCalibrationRemoteMic(
         captureState.value = 'error'
         captureError.value = error instanceof Error
           ? error.message
-          : 'The calibration recording could not reach the TV. Retry this capture without moving the phone.'
+          : 'The calibration recording could not reach the TV. Retry this measurement without moving the phone.'
       } finally {
         await disposeCapture()
         completionInFlight = null
@@ -764,12 +788,12 @@ export function useCalibrationRemoteMic(
     await completionInFlight
   }
 
-  function retryUpload(): void {
+  function retryCurrentCapture(): void {
     const retry = retryCapture
     if (!retry || captureState.value === 'uploading' || disposed) return
     if (connection.state?.() !== undefined && connection.state() !== 'direct') {
       captureState.value = 'error'
-      captureError.value = 'Reconnect to the TV before retrying this capture.'
+      captureError.value = 'Reconnect to the TV before retrying this measurement without moving the phone.'
       return
     }
     clearCaptureAckTimer()
@@ -1062,6 +1086,6 @@ export function useCalibrationRemoteMic(
     cancelOptionalRefinement,
     finishWithBest,
     discardJob,
-    retryUpload,
+    retryCurrentCapture,
   }
 }

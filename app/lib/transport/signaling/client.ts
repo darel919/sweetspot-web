@@ -1,6 +1,7 @@
 import {
   decodeSignalingMessage,
   encodeSignalingMessage,
+  SIGNALING_SUBPROTOCOL,
   type PairingCredentials,
   type SignalingMessage,
 } from '#shared/transport/signaling'
@@ -22,7 +23,6 @@ function signalingSocketUrl(pairing: PairingCredentials, role: SignalingRole): s
   const url = new URL(`/api/signaling/${encodeURIComponent(pairing.rendezvousId)}/ws`, window.location.href)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   url.searchParams.set('role', role)
-  url.searchParams.set('secret', pairing.pairSecret)
   return url.toString()
 }
 
@@ -54,7 +54,7 @@ export function createSignalingClient(role: SignalingRole, handlers: SignalingCl
       }
       let next: WebSocket
       try {
-        next = new WebSocket(signalingSocketUrl(pairing, role))
+        next = new WebSocket(signalingSocketUrl(pairing, role), [SIGNALING_SUBPROTOCOL, pairing.pairSecret])
       } catch (error: unknown) {
         opening = null
         cancelOpening = null

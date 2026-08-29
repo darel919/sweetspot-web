@@ -22,7 +22,7 @@ The dashboard can start Auto Room Calibration or Advanced Room Calibration. Auto
 
 ## Pairing and recovery
 
-Scan the current QR code displayed by the TV. It contains a short display code, a random rendezvous ID, and a random pair secret. Pairing credentials expire if unused, but expiry does not terminate an authenticated direct peer. A second dashboard cannot silently replace an active peer. Browser reload restores the pairing link's tab generation and requests the current TV state.
+Scan the current QR code displayed by the TV. It contains a short display code, a random rendezvous ID, and a random pair secret. The secret is sent in the signaling WebSocket subprotocol, not its URL. Pairing credentials expire if unused, but expiry does not terminate an authenticated direct peer. The rendezvous is cleaned up after a short bounded retention window once direct setup completes. A second dashboard cannot silently replace an active peer. Browser reload restores the pairing link's tab generation and requests the current TV state.
 
 SweetSpot expects TV and phone to share a normal home network. ICE retries and restarts automatically when recovery is safe. Guest Wi-Fi, client isolation, VPNs, and other network policy can prevent a direct path; the dashboard reports an actionable error and does not silently route large calibration captures through a paid relay.
 

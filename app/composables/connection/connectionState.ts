@@ -47,9 +47,9 @@ export function transportErrorMessage(error: TransportError | null): string | nu
     case 'protocol':
       return 'This dashboard and TV need matching versions. Update both, then scan the current QR code.'
     case 'microphone':
-      return 'Microphone access is unavailable. Allow microphone access in Safari, then retry the capture.'
+      return 'Microphone access is unavailable. Allow microphone access in Safari, then retry this measurement without moving the phone.'
     case 'acoustic':
-      return 'The microphone recording was not usable. Follow the TV placement instruction and retry this capture.'
+      return 'The microphone recording was not usable. Follow the TV placement instruction and retry this measurement without moving the phone.'
     case 'tv_audio':
       return 'The TV could not complete the audio test safely. Retry the current calibration action.'
     case 'cancelled':

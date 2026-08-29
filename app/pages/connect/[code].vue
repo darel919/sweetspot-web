@@ -25,7 +25,7 @@
           :eq-draft="eqDraft"
           :eq-dirty="eqDirty"
           :profile-name="profileName"
-          :locked="calibrationLocked"
+          :locked="calibrationInteractionLocked"
           @band-input="onBandInput"
           @commit-bands="commitBands"
           @reset-bands="resetBands"
@@ -51,13 +51,16 @@
           :job-state-known="remoteCalibrationJobStateKnown"
           :capture-resource-ready="remoteCaptureResourceReady"
           :capture-resource-error="remoteCaptureResourceError"
+          :locked="calibrationInteractionLocked"
+          :lock-status="measurementBusy ? measurementMessage : ''"
           @start="startRemoteCalibration"
           @resume="resumeRemoteCalibration"
           @cancel-capture="cancelRemoteCapture"
           @cancel-refinement="cancelRemoteRefinement"
+          @cancel="cancelActiveCalibration"
           @finish="finishRemoteCalibration"
           @discard="discardRemoteCalibration"
-          @retry-upload="retryRemoteUpload"
+          @retry-capture="retryRemoteCapture"
           @retry-capture-resources="retryRemoteCaptureResources"
           @select-profile="selectRemoteProfile"
         />
@@ -149,6 +152,7 @@ import type { AggregateResponse } from '~/lib/audio/measurement/aggregation'
 import { allCaptureQualityPassed } from '~/lib/audio/measurement/aggregation'
 import { EqCommandRevisionGate } from '~/lib/transport/control/eq-command-revision'
 import { SweetSpotRequestError } from '~/lib/transport/errors'
+import { shouldLockCalibrationInteraction } from '~/components/connect/calibration-lock'
 import type {
   ProbeCaptureEvidence,
 } from '~/components/connect/types'
@@ -195,7 +199,7 @@ const {
   cancelOptionalRefinement: cancelRemoteRefinement,
   finishWithBest: finishRemoteCalibration,
   discardJob: discardRemoteCalibration,
-  retryUpload: retryRemoteUpload,
+  retryCurrentCapture: retryRemoteCapture,
   jobStateKnown: remoteCalibrationJobStateKnown,
   captureResourceReady: remoteCaptureResourceReady,
   captureResourceError: remoteCaptureResourceError,
@@ -207,6 +211,7 @@ const {
   aggregateBoth: measurementAggregateBoth,
   probeSummary: measurementProbeSummary,
   startProbe: startProbeSession,
+  cancel: cancelMeasurementSession,
 } = useCalibrationSession({
   send: connection.send,
   onMessage: connection.onMessage,
@@ -249,15 +254,62 @@ const tvTransportDiagnostics = ref<TransportDiagnosticsPayload | null>(null)
 
 const profileName = ref('')
 
-const calibrationLocked = computed(() => {
-  const phase = remoteCalibrationJob.value?.phase
-  const remoteJobActive = phase !== undefined && phase !== 'complete' && phase !== 'failed' && phase !== 'cancelled'
-  return !remoteCalibrationJobStateKnown.value
-    || remoteJobActive
-    || remoteCaptureState.value !== 'idle'
-    || measurementBusy.value
-    || probeLabPending.value
-})
+const calibrationLocked = computed(() => !remoteCalibrationJobStateKnown.value
+  || shouldLockCalibrationInteraction(
+    remoteCalibrationJob.value?.phase,
+    remoteCaptureState.value,
+    measurementBusy.value,
+  )
+  || probeLabPending.value)
+const calibrationInteractionLocked = computed(() => shouldLockCalibrationInteraction(
+  remoteCalibrationJob.value?.phase,
+  remoteCaptureState.value,
+  measurementBusy.value,
+))
+
+let scrollLockApplied = false
+let previousHtmlOverflow = ''
+let previousBodyOverflow = ''
+
+function setCalibrationScrollLock(locked: boolean): void {
+  if (typeof document === 'undefined') return
+  if (locked && !scrollLockApplied) {
+    previousHtmlOverflow = document.documentElement.style.overflow
+    previousBodyOverflow = document.body.style.overflow
+    document.documentElement.style.overflow = 'hidden'
+    document.body.style.overflow = 'hidden'
+    scrollLockApplied = true
+  } else if (!locked && scrollLockApplied) {
+    document.documentElement.style.overflow = previousHtmlOverflow
+    document.body.style.overflow = previousBodyOverflow
+    scrollLockApplied = false
+  }
+}
+
+function cancelActiveCalibration(): void {
+  const currentJob = remoteCalibrationJob.value
+  const action = currentJob?.nextAction
+  if (remoteCaptureState.value === 'waiting' && action?.kind === 'capture' && action.optional) {
+    void cancelRemoteRefinement()
+    return
+  }
+  if (remoteCaptureState.value !== 'idle') {
+    void cancelRemoteCapture()
+    return
+  }
+  if (measurementBusy.value) {
+    cancelMeasurementSession()
+    return
+  }
+  if (action?.kind === 'capture' && action.optional
+    || (currentJob?.phase === 'refining' && action?.kind === 'wait')) {
+    void cancelRemoteRefinement()
+    return
+  }
+  if (currentJob && !['complete', 'failed', 'cancelled'].includes(currentJob.phase)) {
+    discardRemoteCalibration()
+  }
+}
 
 function preventCalibrationNavigation(event: BeforeUnloadEvent): void {
   if (!calibrationLocked.value) return
@@ -269,8 +321,11 @@ onMounted(() => {
   void loadRemoteCalibrationProfiles().catch(() => undefined)
   void preloadRemoteCaptureWorklet().catch(() => undefined)
   resumeRemoteCalibration()
+  setCalibrationScrollLock(calibrationInteractionLocked.value)
   window.addEventListener('beforeunload', preventCalibrationNavigation)
 })
+
+watch(calibrationInteractionLocked, setCalibrationScrollLock)
 
 function retryRemoteCaptureResources(): void {
   void preloadRemoteCaptureWorklet().catch(() => undefined)
@@ -305,6 +360,7 @@ watch([status, deviceOnline], ([nextStatus, nextOnline], [previousStatus, previo
 })
 
 onScopeDispose(() => {
+  setCalibrationScrollLock(false)
   window.removeEventListener('beforeunload', preventCalibrationNavigation)
   if (toastTimer !== null) clearTimeout(toastTimer)
   if (eqRevisionTimer !== null) clearTimeout(eqRevisionTimer)

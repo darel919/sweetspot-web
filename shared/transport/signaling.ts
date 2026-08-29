@@ -1,4 +1,5 @@
 export const SIGNALING_VERSION = 1 as const
+export const SIGNALING_SUBPROTOCOL = 'sweetspot.v1'
 export const MAX_SIGNALING_MESSAGE_BYTES = 64 * 1024
 export const MAX_SIGNALING_TEXT_BYTES = 48 * 1024
 export const RENDEZVOUS_ID_PATTERN = /^[a-f0-9]{32}$/

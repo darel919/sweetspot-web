@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  COMPLETED_RENDEZVOUS_RETENTION_MS,
   isConflictingSignalingGeneration,
   isActiveGenerationAllowed,
   isRendezvousExpired,
+  rendezvousCleanupAction,
+  rendezvousNextAlarmAt,
   shouldForwardSignalingMessage,
 } from './signaling-lifetime'
 
@@ -34,5 +37,12 @@ describe('signaling rendezvous lifetime', () => {
     expect(isConflictingSignalingGeneration(undefined, 'generation-1')).toBe(false)
     expect(isConflictingSignalingGeneration('generation-1', 'generation-1')).toBe(false)
     expect(isConflictingSignalingGeneration('generation-1', 'generation-2')).toBe(true)
+  })
+
+  test('cleans completed rendezvous after bounded retention without ending the peer session', () => {
+    const completedAt = 10_000
+    expect(rendezvousCleanupAction(true, undefined, completedAt, completedAt + COMPLETED_RENDEZVOUS_RETENTION_MS - 1)).toBe('wait')
+    expect(rendezvousCleanupAction(true, undefined, completedAt, completedAt + COMPLETED_RENDEZVOUS_RETENTION_MS)).toBe('cleanup')
+    expect(rendezvousNextAlarmAt(true, undefined, completedAt)).toBe(completedAt + COMPLETED_RENDEZVOUS_RETENTION_MS)
   })
 })

@@ -1,30 +1,44 @@
 import { DurableObject } from 'cloudflare:workers'
 import {
+  MAX_SIGNALING_MESSAGE_BYTES,
+  SIGNALING_SUBPROTOCOL,
   isSignalingMessage,
   type SignalingMessage,
   type SignalingRole,
 } from '../shared/transport/signaling'
 import {
+  COMPLETED_RENDEZVOUS_RETENTION_MS,
   isConflictingSignalingGeneration,
   isActiveGenerationAllowed,
   isRendezvousExpired,
+  rendezvousCleanupAction,
+  rendezvousNextAlarmAt,
   shouldForwardSignalingMessage,
 } from './signaling-lifetime'
 
 const PAIRING_TTL_MS = 10 * 60 * 1_000
 const SECRET_MAX_BYTES = 256
 const SECRET_PATTERN = /^[A-Za-z0-9_-]{32,128}$/
+const MAX_SOCKET_COUNT = 4
+const MESSAGE_WINDOW_MS = 10_000
+const MAX_MESSAGES_PER_WINDOW = 128
+const MAX_ICE_CANDIDATES_PER_ATTEMPT = 64
 const SECRET_HASH_KEY = 'pair-secret-hash'
 const EXPIRY_KEY = 'pair-expiry'
 const ACTIVE_KEY = 'active-peer'
 const ACTIVE_GENERATION_KEY = 'active-peer-generation'
 const GENERATION_KEY = 'peer-generation'
+const COMPLETED_AT_KEY = 'completed-at'
 
 interface SocketAttachment {
   role: SignalingRole
   secretHash: string
   hello: boolean
   generation?: string
+  messageWindowStartedAt: number
+  messagesInWindow: number
+  iceAttemptId?: string
+  iceCandidateCount: number
 }
 
 export class SignalingDO extends DurableObject<unknown> {
@@ -41,7 +55,7 @@ export class SignalingDO extends DurableObject<unknown> {
     }
     const url = new URL(request.url)
     const role = url.searchParams.get('role')
-    const secret = url.searchParams.get('secret')
+    const secret = signalingSecretFromRequest(request)
     if ((role !== 'client' && role !== 'device') || !secret || !SECRET_PATTERN.test(secret)
       || new TextEncoder().encode(secret).byteLength > SECRET_MAX_BYTES) {
       return jsonError('invalid_pairing', 'This pairing link is invalid or incomplete.', 400)
@@ -60,6 +74,10 @@ export class SignalingDO extends DurableObject<unknown> {
     if (storedSecretHash && isRendezvousExpired(active, expiresAt)) {
       return jsonError('pairing_expired', 'This pairing link has expired. Scan the current QR code on the TV.', 410)
     }
+    this.closeRedundantPreHelloSockets(role)
+    if (this.openSocketCount() >= MAX_SOCKET_COUNT) {
+      return jsonError('signaling_busy', 'Too many signaling connections are open for this pairing.', 429)
+    }
     if (!storedSecretHash) {
       await this.state.storage.put(SECRET_HASH_KEY, secretHash)
       await this.state.storage.put(EXPIRY_KEY, Date.now() + PAIRING_TTL_MS)
@@ -69,7 +87,14 @@ export class SignalingDO extends DurableObject<unknown> {
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair)
     this.state.acceptWebSocket(server)
-    server.serializeAttachment({ role, secretHash, hello: false } satisfies SocketAttachment)
+    server.serializeAttachment({
+      role,
+      secretHash,
+      hello: false,
+      messageWindowStartedAt: Date.now(),
+      messagesInWindow: 0,
+      iceCandidateCount: 0,
+    } satisfies SocketAttachment)
     this.send(server, {
       v: 1,
       type: 'signal.ready',
@@ -77,16 +102,30 @@ export class SignalingDO extends DurableObject<unknown> {
       peerOnline: this.findSocket(oppositeRole(role)) !== null,
     })
     this.notifyPeer(role, true)
-    return new Response(null, { status: 101, webSocket: client })
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      headers: { 'Sec-WebSocket-Protocol': SIGNALING_SUBPROTOCOL },
+    })
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const attachment = this.attachment(ws)
+    let attachment = this.attachment(ws)
+    if (attachment) {
+      const budget = this.consumeMessageBudget(attachment)
+      if (!budget) {
+        this.sendError(ws, 'rate_limited', 'Too many signaling messages were sent.')
+        try { ws.close(1008, 'signaling rate limit') } catch {}
+        return
+      }
+      attachment = budget
+      ws.serializeAttachment(attachment satisfies SocketAttachment)
+    }
     if (!attachment || typeof message !== 'string') {
       this.sendError(ws, 'bad_message', 'Signaling accepts JSON messages only.')
       return
     }
-    if (new TextEncoder().encode(message).byteLength > 64 * 1024) {
+    if (new TextEncoder().encode(message).byteLength > MAX_SIGNALING_MESSAGE_BYTES) {
       this.sendError(ws, 'payload_too_large', 'The signaling message is too large.')
       return
     }
@@ -123,6 +162,8 @@ export class SignalingDO extends DurableObject<unknown> {
         ...attachment,
         hello: true,
         generation: attachment.role === 'client' ? value.generation : attachment.generation,
+        iceAttemptId: undefined,
+        iceCandidateCount: 0,
       } satisfies SocketAttachment)
       if (attachment.role === 'client' && knownGeneration !== value.generation) {
         await this.state.storage.put(GENERATION_KEY, value.generation)
@@ -166,6 +207,29 @@ export class SignalingDO extends DurableObject<unknown> {
       this.sendError(ws, 'bad_message', 'Only the TV may send an answer.')
       return
     }
+    if (value.type === 'signal.offer' || value.type === 'signal.answer') {
+      attachment = {
+        ...attachment,
+        iceAttemptId: value.attemptId,
+        iceCandidateCount: 0,
+      }
+      ws.serializeAttachment(attachment satisfies SocketAttachment)
+    } else if (value.type === 'signal.ice') {
+      const iceCandidateCount = attachment.iceAttemptId === value.attemptId
+        ? attachment.iceCandidateCount + 1
+        : 1
+      if (iceCandidateCount > MAX_ICE_CANDIDATES_PER_ATTEMPT) {
+        this.sendError(ws, 'too_many_ice_candidates', 'Too many ICE candidates were sent for this attempt.')
+        try { ws.close(1008, 'ICE candidate limit') } catch {}
+        return
+      }
+      attachment = {
+        ...attachment,
+        iceAttemptId: value.attemptId,
+        iceCandidateCount,
+      }
+      ws.serializeAttachment(attachment satisfies SocketAttachment)
+    }
     if (value.type === 'signal.complete') {
       if (attachment.role !== 'client') {
         this.sendError(ws, 'bad_message', 'Only the dashboard may complete signaling.')
@@ -173,6 +237,12 @@ export class SignalingDO extends DurableObject<unknown> {
       }
       await this.state.storage.put(ACTIVE_KEY, true)
       await this.state.storage.put(ACTIVE_GENERATION_KEY, generation)
+      const completedAt = await this.state.storage.get<number>(COMPLETED_AT_KEY)
+      if (typeof completedAt !== 'number') {
+        const now = Date.now()
+        await this.state.storage.put(COMPLETED_AT_KEY, now)
+        await this.state.storage.setAlarm(now + COMPLETED_RENDEZVOUS_RETENTION_MS)
+      }
       this.send(ws, {
         v: 1,
         type: 'signal.complete.ack',
@@ -215,7 +285,24 @@ export class SignalingDO extends DurableObject<unknown> {
   }
 
   async alarm(): Promise<void> {
-    if (await this.state.storage.get<boolean>(ACTIVE_KEY) === true) return
+    const now = Date.now()
+    const active = await this.state.storage.get<boolean>(ACTIVE_KEY) === true
+    let completedAt = await this.state.storage.get<number>(COMPLETED_AT_KEY)
+    if (active && typeof completedAt !== 'number') {
+      completedAt = now
+      await this.state.storage.put(COMPLETED_AT_KEY, completedAt)
+    }
+    if (rendezvousCleanupAction(active, await this.state.storage.get<number>(EXPIRY_KEY), completedAt, now) === 'wait') {
+      const nextAlarmAt = rendezvousNextAlarmAt(
+        active,
+        await this.state.storage.get<number>(EXPIRY_KEY),
+        completedAt,
+      )
+      if (nextAlarmAt !== undefined) {
+        await this.state.storage.setAlarm(Math.max(nextAlarmAt, now + 1))
+        return
+      }
+    }
     for (const ws of this.state.getWebSockets()) {
       try { ws.close(1008, 'pairing session expired') } catch {}
     }
@@ -232,6 +319,37 @@ export class SignalingDO extends DurableObject<unknown> {
       secretHash: candidate.secretHash,
       hello: candidate.hello === true,
       generation: typeof candidate.generation === 'string' ? candidate.generation : undefined,
+      messageWindowStartedAt: typeof candidate.messageWindowStartedAt === 'number'
+        ? candidate.messageWindowStartedAt
+        : Date.now(),
+      messagesInWindow: typeof candidate.messagesInWindow === 'number' ? candidate.messagesInWindow : 0,
+      iceAttemptId: typeof candidate.iceAttemptId === 'string' ? candidate.iceAttemptId : undefined,
+      iceCandidateCount: typeof candidate.iceCandidateCount === 'number' ? candidate.iceCandidateCount : 0,
+    }
+  }
+
+  private consumeMessageBudget(attachment: SocketAttachment): SocketAttachment | null {
+    const now = Date.now()
+    const inCurrentWindow = now - attachment.messageWindowStartedAt < MESSAGE_WINDOW_MS
+    const messagesInWindow = inCurrentWindow ? attachment.messagesInWindow + 1 : 1
+    if (messagesInWindow > MAX_MESSAGES_PER_WINDOW) return null
+    return {
+      ...attachment,
+      messageWindowStartedAt: inCurrentWindow ? attachment.messageWindowStartedAt : now,
+      messagesInWindow,
+    }
+  }
+
+  private openSocketCount(): number {
+    return this.state.getWebSockets().filter((ws) => ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING).length
+  }
+
+  private closeRedundantPreHelloSockets(role: SignalingRole): void {
+    for (const ws of this.state.getWebSockets()) {
+      const attachment = this.attachment(ws)
+      if (attachment?.role === role && !attachment.hello && ws.readyState !== WebSocket.CLOSED) {
+        try { ws.close(1008, 'redundant signaling connection') } catch {}
+      }
     }
   }
 
@@ -273,6 +391,14 @@ export class SignalingDO extends DurableObject<unknown> {
     const activeGeneration = await this.state.storage.get<string>(ACTIVE_GENERATION_KEY)
     return !isActiveGenerationAllowed(activeGeneration, generation)
   }
+}
+
+function signalingSecretFromRequest(request: Request): string | null {
+  const header = request.headers.get('Sec-WebSocket-Protocol')
+  if (!header) return null
+  const protocols = header.split(',').map((protocol) => protocol.trim()).filter(Boolean)
+  if (protocols.length !== 2 || !protocols.includes(SIGNALING_SUBPROTOCOL)) return null
+  return protocols.find((protocol) => protocol !== SIGNALING_SUBPROTOCOL) ?? null
 }
 
 function oppositeRole(role: SignalingRole): SignalingRole {

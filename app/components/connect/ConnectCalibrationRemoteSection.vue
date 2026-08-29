@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type {
   CalibrationCaptureMetadata,
   CalibrationJobStartMode,
@@ -24,6 +24,8 @@ const props = defineProps<{
   jobStateKnown: boolean
   captureResourceReady: boolean
   captureResourceError: string
+  locked: boolean
+  lockStatus: string
 }>()
 
 const emit = defineEmits<{
@@ -33,8 +35,9 @@ const emit = defineEmits<{
   (event: 'cancel-refinement'): void
   (event: 'finish'): void
   (event: 'discard'): void
-  (event: 'retry-upload'): void
+  (event: 'retry-capture'): void
   (event: 'retry-capture-resources'): void
+  (event: 'cancel'): void
   (event: 'select-profile', profileId: string): void
 }>()
 
@@ -104,6 +107,29 @@ const actionInstruction = computed(() => {
   return current.kind === 'wait' ? current.message : 'Calibration is complete.'
 })
 
+const cancelButton = ref<HTMLButtonElement | null>(null)
+const retryButton = ref<HTMLButtonElement | null>(null)
+
+function focusLockAction(): void {
+  (retryButton.value ?? cancelButton.value)?.focus()
+}
+
+function cycleLockFocus(event: KeyboardEvent): void {
+  const buttons = [retryButton.value, cancelButton.value].filter(
+    (button): button is HTMLButtonElement => button !== null,
+  )
+  if (buttons.length === 0) return
+  const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement)
+  const nextIndex = event.shiftKey
+    ? (currentIndex <= 0 ? buttons.length - 1 : currentIndex - 1)
+    : (currentIndex + 1) % buttons.length
+  buttons[nextIndex]?.focus()
+}
+
+watch(() => props.locked, (locked) => {
+  if (locked) void nextTick(focusLockAction)
+}, { immediate: true })
+
 const modeLabel = computed(() => {
   if (props.job?.mode === 'advanced') return 'Advanced room calibration'
   if (props.job?.mode === 'auto') return 'Auto room calibration'
@@ -161,7 +187,7 @@ function confidenceLabel(): string {
       <button :disabled="!canStart" @click="emit('start', 'auto')">Start Auto Room Calibration</button>
       <button :disabled="!canStart" @click="emit('start', 'advanced')">Start Advanced Room Calibration</button>
       <button v-if="canResume" @click="emit('resume')">Resume saved calibration</button>
-      <button v-if="canRetryCapture" @click="emit('retry-upload')">Retry capture</button>
+      <button v-if="canRetryCapture" @click="emit('retry-capture')">Retry this measurement</button>
       <button v-if="canCancelCapture && !(captureState === 'waiting' && optionalRefinementCapture)" @click="emit('cancel-capture')">Cancel capture</button>
       <button v-if="canFinishCurrent" :disabled="captureState === 'opening' || captureState === 'recording' || captureState === 'uploading'" @click="emit('finish')">Finish with current solution</button>
       <button v-if="optionalRefinementCapture && job?.minimumViableCalibration" :disabled="captureState !== 'idle' && captureState !== 'waiting'" @click="emit('cancel-refinement')">Stop optional refinement</button>
@@ -202,6 +228,26 @@ function confidenceLabel(): string {
     <p v-else-if="job?.phase === 'failed'" class="calibration-result calibration-result-failed">
       NO USABLE CALIBRATION · {{ job.lastError?.message ?? 'The TV did not find enough trustworthy evidence.' }}
     </p>
+
+    <div
+      v-if="locked"
+      class="calibration-lock-layer"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Calibration in progress"
+      @wheel.prevent
+      @touchmove.prevent
+      @keydown.tab.prevent="cycleLockFocus"
+      @keydown.esc.prevent="emit('cancel')"
+    >
+      <div class="calibration-lock-card">
+        <p class="calibration-lock-title">Calibration in progress</p>
+        <p class="calibration-lock-status" aria-live="polite">{{ lockStatus || statusText }}</p>
+        <p v-if="actionInstruction" class="calibration-take" aria-live="polite">{{ actionInstruction }}</p>
+        <button v-if="canRetryCapture" ref="retryButton" @click="emit('retry-capture')">Retry this measurement</button>
+        <button ref="cancelButton" @click="emit('cancel')">Cancel calibration</button>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -223,5 +269,41 @@ function confidenceLabel(): string {
 .calibration-take {
   margin: 0.75rem 0;
   color: #f2d28c;
+}
+
+.calibration-lock-layer {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: rgb(10 10 11 / 92%);
+  overscroll-behavior: contain;
+  touch-action: none;
+}
+
+.calibration-lock-card {
+  width: min(100%, 32rem);
+  box-sizing: border-box;
+  padding: 1.5rem;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  box-shadow: 0 1rem 3rem rgb(0 0 0 / 45%);
+  pointer-events: auto;
+}
+
+.calibration-lock-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.calibration-lock-status {
+  margin: 0.75rem 0;
+  color: var(--ink);
 }
 </style>

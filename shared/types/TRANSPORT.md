@@ -10,16 +10,17 @@ The TV displays a QR URL containing:
 - a cryptographically random rendezvous ID;
 - a cryptographically random pair secret in the URL fragment.
 
-The browser sends the secret only when opening the signaling WebSocket. The Worker hashes it before storing it, binds both roles to the same rendezvous, permits one client and one device, validates the browser origin, and forwards only versioned SDP and ICE messages.
+The browser sends the secret only in the WebSocket subprotocol during the signaling handshake. The Worker hashes it before storing it, binds both roles to the same rendezvous, permits one client and one device, validates the browser origin, and forwards only versioned SDP and ICE messages. The secret is not included in the WebSocket URL.
 
 The signaling endpoint is:
 
 ```text
-GET /api/signaling/{rendezvousId}/ws?role=client&secret={pairSecret}
-GET /api/signaling/{rendezvousId}/ws?role=device&secret={pairSecret}
+GET /api/signaling/{rendezvousId}/ws?role=client
+GET /api/signaling/{rendezvousId}/ws?role=device
+Sec-WebSocket-Protocol: sweetspot.v1, {pairSecret}
 ```
 
-Signaling credentials expire if they are unused for the pairing window. After the peers authenticate and complete DataChannel setup, expiry or signaling disconnection does not end the direct session. Signaling may be reacquired only when an ICE restart needs it. The browser keeps its tab generation stable across a reload of the same pairing link, while a full re-pair creates a new generation. The active peer is fenced by that unique generation/session ID, so a second client cannot silently replace it.
+Signaling credentials expire if they are unused for the pairing window. After the peers authenticate and complete DataChannel setup, the rendezvous retains only minimal state for a bounded cleanup window; expiry or signaling disconnection does not end the direct session. Signaling may be reacquired only when an ICE restart needs it. The browser keeps its tab generation stable across a reload of the same pairing link, while a full re-pair creates a new generation. The active peer is fenced by that unique generation/session ID, so a second client cannot silently replace it.
 
 The Worker forwards these message kinds only:
 
@@ -51,7 +52,7 @@ remote client cannot send TV-owned candidate or validation decisions.
 
 ### `capture`
 
-Binary frames carry only the capture stream. The browser honors `bufferedAmount` and `bufferedamountlow` with a bounded queue. The initial limits are 16 KiB PCM chunks and 32 KiB complete frames. A slow receiver rejects or pauses bounded work rather than accumulating a whole recording in memory.
+Binary frames carry only the capture stream. The browser honors `bufferedAmount` and `bufferedamountlow` with a bounded queue. The initial limits are 16 KiB PCM chunks and 32 KiB complete frames. A slow receiver rejects the current capture when bounded work fills; microphone acquisition is never paused and resumed inside one sweep, and a whole recording is never accumulated in memory.
 
 The TV publishes `calibration.capture.started` only after it accepts the
 TV-issued capture action. The browser sends `capture.begin` only after that

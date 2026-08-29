@@ -1,3 +1,4 @@
+import { MAX_CAPTURE_CHUNK_BYTES } from '../../../../shared/transport/capabilities'
 import type { MicrophoneCapture } from './microphone'
 
 let workletSourcePromise: Promise<string> | null = null
@@ -70,8 +71,10 @@ function isStoppedMessage(value: unknown): value is StoppedMessage {
 export interface PcmRecorderOptions {
   onTrackEnded?: () => void
   onChunk?: (samples: Float32Array) => Promise<void> | void
+  onStreamError?: (error: Error) => void
   shouldStreamChunk?: () => boolean
   retainSamples?: boolean
+  maxCaptureChunkBytes?: number
 }
 
 /**
@@ -113,13 +116,22 @@ class PcmRecorderImpl implements PcmRecorder {
   private streamError: Error | null = null
   private streamChain: Promise<void> = Promise.resolve()
   private streamInFlight = 0
-  private streamPaused = false
+  private streamGeneration = 0
+  private readonly maxCaptureChunkBytes: number
 
   private static readonly MAX_PENDING_STREAM_CHUNKS = 8
 
   constructor(capture: MicrophoneCapture, options: PcmRecorderOptions) {
     this.capture = capture
     this.options = options
+    const maxCaptureChunkBytes = options.maxCaptureChunkBytes ?? MAX_CAPTURE_CHUNK_BYTES
+    if (!Number.isInteger(maxCaptureChunkBytes)
+      || maxCaptureChunkBytes <= 0
+      || maxCaptureChunkBytes > MAX_CAPTURE_CHUNK_BYTES
+      || maxCaptureChunkBytes % Float32Array.BYTES_PER_ELEMENT !== 0) {
+      throw new RangeError('Capture chunk byte limit is invalid.')
+    }
+    this.maxCaptureChunkBytes = maxCaptureChunkBytes
   }
 
   async start(): Promise<void> {
@@ -175,9 +187,9 @@ class PcmRecorderImpl implements PcmRecorder {
     this.streamError = null
     this.streamChain = Promise.resolve()
     this.streamInFlight = 0
-    this.streamPaused = false
+    this.streamGeneration++
     this.windowActive = true
-    this.node?.port.postMessage({ type: 'start' })
+    this.node?.port.postMessage({ type: 'start', maxCaptureChunkBytes: this.maxCaptureChunkBytes })
   }
 
   async stop(): Promise<PcmRecording> {
@@ -198,6 +210,7 @@ class PcmRecorderImpl implements PcmRecorder {
       this.stopResolve?.(true)
       await pendingStop
     }
+    this.streamGeneration++
     this.windowActive = false
     this.chunks.length = 0
     this.stopResolve = null
@@ -215,7 +228,6 @@ class PcmRecorderImpl implements PcmRecorder {
     this.streamError = null
     this.streamChain = Promise.resolve()
     this.streamInFlight = 0
-    this.streamPaused = false
   }
 
   sampleRate(): number | null {
@@ -256,6 +268,10 @@ class PcmRecorderImpl implements PcmRecorder {
 
   private onMessage(data: unknown): void {
     if (isPcmMessage(data)) {
+      if (data.buffer.byteLength > this.maxCaptureChunkBytes) {
+        this.failStream(new PcmRecorderError('The capture chunk exceeds the configured limit.'))
+        return
+      }
       const samples = new Float32Array(data.buffer)
       const startSample = this.streamSampleCount
       this.streamSampleCount += samples.length
@@ -270,28 +286,23 @@ class PcmRecorderImpl implements PcmRecorder {
       if (this.options.retainSamples !== false) this.chunks.push({ startSample, samples })
       if (!this.options.onChunk || this.streamError || this.options.shouldStreamChunk?.() === false) return
       if (this.streamInFlight >= PcmRecorderImpl.MAX_PENDING_STREAM_CHUNKS) {
-        this.streamPaused = true
-        this.node?.port.postMessage({ type: 'pause' })
-        this.streamError = new PcmRecorderError('The capture transport could not keep up. Retry this capture.')
+        this.failStream(new PcmRecorderError('The capture transport could not keep up. Retry this measurement without moving the phone.'))
         return
       }
       this.streamInFlight++
-      if (this.streamInFlight >= PcmRecorderImpl.MAX_PENDING_STREAM_CHUNKS) {
-        this.streamPaused = true
-        this.node?.port.postMessage({ type: 'pause' })
-      }
+      const generation = this.streamGeneration
       this.streamChain = this.streamChain
-        .then(() => this.options.onChunk?.(samples))
+        .then(() => {
+          if (generation !== this.streamGeneration || this.streamError) return
+          return this.options.onChunk?.(samples)
+        })
         .catch((error: unknown) => {
-          this.streamError = error instanceof Error ? error : new PcmRecorderError('The capture transport failed.')
-          this.node?.port.postMessage({ type: 'pause' })
+          if (generation === this.streamGeneration) {
+            this.failStream(error instanceof Error ? error : new PcmRecorderError('The capture transport failed.'))
+          }
         })
         .finally(() => {
-          this.streamInFlight--
-          if (this.streamPaused && !this.streamError && this.streamInFlight <= 2 && this.windowActive) {
-            this.streamPaused = false
-            this.node?.port.postMessage({ type: 'resume' })
-          }
+          if (generation === this.streamGeneration) this.streamInFlight--
         })
       return
     }
@@ -300,6 +311,13 @@ class PcmRecorderImpl implements PcmRecorder {
       this.stopResolve = null
       resolve?.(true)
     }
+  }
+
+  private failStream(error: Error): void {
+    if (this.streamError) return
+    this.streamError = error
+    if (this.windowActive) this.node?.port.postMessage({ type: 'stop' })
+    this.options.onStreamError?.(error)
   }
 
   private requestStop(): Promise<boolean> {
@@ -319,8 +337,6 @@ class PcmRecorderImpl implements PcmRecorder {
   private disconnectGraph(): void {
     if (this.trackEndedHandler) this.capture.track.removeEventListener('ended', this.trackEndedHandler)
     this.trackEndedHandler = null
-    this.node?.port.postMessage({ type: 'pause' })
-    this.streamPaused = false
     this.source?.disconnect()
     this.node?.disconnect()
     this.silence?.disconnect()
