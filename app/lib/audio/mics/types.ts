@@ -3,7 +3,7 @@ export interface MicCalibrationPoint {
   readonly responseDb: number
 }
 
-export interface MicCalibrationTrust {
+interface MicCalibrationTrust {
   readonly minHz: number
   readonly fullTrustMaxHz: number
   readonly taperToHz: number

@@ -3,14 +3,13 @@ import {
   CALIBRATION_SWEEP_REVISION as PROTOCOL_CALIBRATION_SWEEP_REVISION,
   isMeasurementContext,
   type MeasurementCaptureMetadata,
-  type MeasurementContext,
 } from '../../../../shared/types/protocol'
 import type { PositionLedger } from './position-ledger'
 import type { ResponsePoint } from './response'
 
-export const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 3 as const
+const CALIBRATION_CHECKPOINT_SCHEMA_VERSION = 3 as const
 export const CALIBRATION_CHECKPOINT_ORIENTATION = 'iphone-upright-bottom-edge-to-tv' as const
-export const CALIBRATION_CHECKPOINT_STORE = 'sweetspot-calibration-checkpoints'
+const CALIBRATION_CHECKPOINT_STORE = 'sweetspot-calibration-checkpoints'
 const configuredBuildSha = import.meta.env.NUXT_PUBLIC_BUILD_SHA
 
 export const CALIBRATION_ANALYSIS_REVISION = PROTOCOL_CALIBRATION_ANALYSIS_REVISION
@@ -170,7 +169,7 @@ function isCheckpointLedger(value: unknown): value is PositionLedger {
 }
 
 /** Parse at the persistence boundary; raw microphone PCM is never part of this schema. */
-export function parseCalibrationCheckpoint(value: unknown): CalibrationCheckpoint | null {
+function parseCalibrationCheckpoint(value: unknown): CalibrationCheckpoint | null {
   if (!isRecord(value)
     || value.schemaVersion !== CALIBRATION_CHECKPOINT_SCHEMA_VERSION
     || typeof value.sessionId !== 'string'
@@ -221,7 +220,7 @@ export function parseSerializedCalibrationCheckpoint(value: string): Calibration
   }
 }
 
-export function checkpointStoreKey(deviceId: string): string {
+function checkpointStoreKey(deviceId: string): string {
   return `device:${deviceId}`
 }
 
@@ -286,6 +285,8 @@ export function checkCalibrationCheckpointCompatibility(
     } else if (Math.abs(checkpoint.microphone.sampleRate - expected.sampleRate) > 1) {
       return { compatible: false, reason: 'sample-rate' }
     }
+  } else if (options.requireSampleRate && expected.sampleRate !== null) {
+    return { compatible: false, reason: 'sample-rate' }
   }
   return { compatible: true }
 }

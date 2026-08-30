@@ -1,0 +1,410 @@
+import { describe, expect, test } from 'bun:test'
+import { effectScope } from 'vue'
+import type {
+  CalibrationJobView,
+  CalibrationNextAction,
+  Envelope,
+} from '../../../shared/types/protocol'
+import type { MicCalibrationProfile } from '../../lib/audio/mics/types'
+import type { MicrophoneCapture } from '../../lib/audio/capture/microphone'
+import type { PcmRecorder } from '../../lib/audio/capture/pcm-recorder'
+import type { DirectConnectionState } from '../../lib/transport/types'
+import { decodeCaptureStreamFrame } from '../../../shared/transport/captureStream'
+import { validatePayload } from '../../../shared/types/protocol'
+import {
+  acceptCalibrationJobState,
+  buildCalibrationCapture,
+  encodeCalibrationPcm,
+  useCalibrationRemoteMic,
+} from './useCalibrationRemoteMic'
+
+const captureSettings = {
+  sampleRate: 48_000,
+  channelCount: 1,
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+}
+
+const microphoneProfile: MicCalibrationProfile = {
+  id: 'apple_iphone17pro_2025',
+  name: 'test microphone',
+  author: 'test',
+  manufacturer: 'test',
+  model: 'test',
+  sourceUrl: 'https://example.test',
+  sourceDate: '2025-09-25',
+  referenceType: 'free-field',
+  sourceSmoothing: 'none',
+  capturePath: 'test',
+  capturePathStatus: 'validated',
+  dataMethod: 'published-data',
+  normalizeAtHz: 1_000,
+  referenceMicrophone: 'test',
+  referenceMicSpacingMm: 1,
+  referenceMicSpacingApproximate: false,
+  measurementEnvironment: 'test',
+  excitation: 'test',
+  orientationsAveraged: 1,
+  referenceCalibration: 'test',
+  publishedTraces: [],
+  directivityMeasuredSeparately: false,
+  points: [
+    { frequencyHz: 20, responseDb: 0 },
+    { frequencyHz: 20_000, responseDb: 0 },
+  ],
+  trust: { minHz: 30, fullTrustMaxHz: 8_000, taperToHz: 12_000 },
+}
+
+function job(revision: number, jobId = 'job-1'): CalibrationJobView {
+  return {
+    jobId,
+    createdAtMs: 1_757_000_000_000,
+    revision,
+    analyzerRevision: 'android-response-v1',
+    sweepRevision: 'android-sweep-v3',
+    mode: 'auto',
+    phase: 'measuring_required',
+    acceptedPositions: [],
+    excludedPositions: [],
+    historicalAttemptCount: 0,
+    optionalFailureCount: 0,
+    minimumViableCalibration: false,
+    bestSolution: null,
+    confidence: null,
+    nextAction: {
+      kind: 'capture',
+      captureId: 'center-left-0',
+      positionId: 'center',
+      channel: 'left',
+      attemptIndex: 0,
+      optional: false,
+      instruction: 'Keep the phone still at center.',
+    },
+    activeCandidateId: null,
+    validationState: 'none',
+    lastError: null,
+  }
+}
+
+function envelope(type: string, payload: unknown): Envelope {
+  return { v: 1, id: `${type}-1`, type, ts: Date.now(), payload, transportSessionId: 'session-1' }
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (condition()) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error('Timed out waiting for the remote microphone')
+}
+
+describe('TV-owned calibration remote microphone', () => {
+  test('ignores stale job states while accepting a newer revision', () => {
+    const current = job(4)
+    expect(acceptCalibrationJobState(current, job(3))).toBe(current)
+    const next = job(5)
+    expect(acceptCalibrationJobState(current, next)).toBe(next)
+  })
+
+  test('does not let an old job replace an active job after reconnect', () => {
+    const current = job(4, 'job-current')
+    expect(acceptCalibrationJobState(current, { ...job(99, 'job-old'), createdAtMs: current.createdAtMs - 1 })).toBe(current)
+    const terminal = { ...current, phase: 'complete' as const }
+    expect(acceptCalibrationJobState(terminal, job(1, 'job-new'))?.jobId).toBe('job-new')
+  })
+
+  test('encodes microphone PCM as little-endian Float32', () => {
+    expect(Array.from(new Uint8Array(encodeCalibrationPcm(new Float32Array([1, -2, 0.25]))))).toEqual([
+      0x00, 0x00, 0x80, 0x3f,
+      0x00, 0x00, 0x00, 0xc0,
+      0x00, 0x00, 0x80, 0x3e,
+    ])
+  })
+
+  test('builds required-position metadata without doing analysis in the browser', () => {
+    const action = {
+      kind: 'capture',
+      captureId: 'center-left-0',
+      positionId: 'center',
+      channel: 'left',
+      attemptIndex: 0,
+      optional: false,
+      instruction: 'Keep the phone still at center.',
+    } satisfies Extract<CalibrationNextAction, { kind: 'capture' }>
+    const built = buildCalibrationCapture({
+      jobId: 'job-1',
+      action,
+      captureAttemptId: 'capture-attempt-1',
+      captureSettings,
+      sampleRate: 48_000,
+      sampleCount: 12,
+      contentSha256: 'a'.repeat(64),
+      microphoneProfile,
+      capturedAtMs: 1_757_000_000_000,
+    })
+    expect(built.readyType).toBe('calibration.capture.ready')
+    expect(built.readyPayload).toEqual({
+      jobId: 'job-1',
+      captureId: 'center-left-0',
+      captureAttemptId: 'capture-attempt-1',
+    })
+    expect(built.metadata).toMatchObject({
+      jobId: 'job-1',
+      captureId: 'center-left-0',
+      positionId: 'center',
+      channel: 'left',
+      sampleRate: 48_000,
+      sampleCount: 12,
+      byteCount: 48,
+    })
+  })
+
+  test('uses one both-channel validation capture and keeps its candidate identity', () => {
+    const action = {
+      kind: 'validate',
+      captureId: 'validation-0',
+      positionId: 'center',
+      candidateId: 'candidate-4',
+      attemptIndex: 0,
+      instruction: 'Return the phone to center.',
+    } satisfies Extract<CalibrationNextAction, { kind: 'validate' }>
+    const built = buildCalibrationCapture({
+      jobId: 'job-1',
+      action,
+      captureAttemptId: 'capture-attempt-2',
+      captureSettings,
+      sampleRate: 48_000,
+      sampleCount: 12,
+      contentSha256: 'b'.repeat(64),
+      microphoneProfile,
+      capturedAtMs: 1_757_000_000_000,
+    })
+    expect(built.readyType).toBe('calibration.validation.capture.ready')
+    expect(built.readyPayload).toEqual({
+      jobId: 'job-1',
+      captureId: 'validation-0',
+      candidateId: 'candidate-4',
+      captureAttemptId: 'capture-attempt-2',
+    })
+    expect(built.metadata.channel).toBe('both')
+    expect(validatePayload('calibration.capture.finished', {
+      jobId: 'job-1',
+      captureId: 'validation-0',
+      captureAttemptId: 'capture-attempt-2',
+    })).toBeNull()
+  })
+
+  test('keeps a pending cancellation until the TV creates and discards the job', async () => {
+    const inbound = new Set<(message: Envelope) => void>()
+    const commands: Array<{ type: string; payload: unknown }> = []
+    let requestNumber = 0
+    let openedMicrophones = 0
+    let transportStateHandler: ((state: DirectConnectionState) => void) | null = null
+    const connection = {
+      send: (type: string, payload?: unknown) => {
+        commands.push({ type, payload })
+        requestNumber++
+        return `${type}-${requestNumber}`
+      },
+      sendCaptureFrame: async () => undefined,
+      onMessage: (handler: (message: Envelope) => void) => {
+        inbound.add(handler)
+        return () => inbound.delete(handler)
+      },
+      onStateChange: (handler: (state: DirectConnectionState) => void) => {
+        transportStateHandler = handler
+        return () => {
+          if (transportStateHandler === handler) transportStateHandler = null
+        }
+      },
+    }
+    const scope = effectScope()
+    const remote = scope.run(() => useCalibrationRemoteMic(connection, {
+      dependencies: {
+        openMicrophone: async () => {
+          openedMicrophones++
+          throw new Error('The microphone must not open during a cancelled start.')
+        },
+        closeMicrophone: () => undefined,
+        createPcmRecorder: () => {
+          throw new Error('The recorder must not be created during a cancelled start.')
+        },
+        preloadPcmCaptureWorklet: async () => undefined,
+        discoverMicCalibrationProfiles: async () => [microphoneProfile],
+        now: () => 1_757_000_000_000,
+      },
+    }))
+    if (!remote) throw new Error('The remote microphone composable did not initialize')
+
+    try {
+      remote.startNewJob()
+      expect(remote.startPending.value).toBe(true)
+
+      remote.cancelPendingStart()
+      expect(remote.startPending.value).toBe(true)
+      expect(remote.startCancellationPending.value).toBe(true)
+      expect(commands.map((command) => command.type)).toEqual(['calibration.job.start'])
+
+      inbound.forEach((handler) => handler({
+        ...envelope('calibration.job.state', job(1)),
+        replyTo: 'calibration.job.start-1',
+      }))
+      await waitFor(() => commands.some((command) => command.type === 'calibration.job.discard'))
+
+      expect(commands.find((command) => command.type === 'calibration.job.discard')?.payload)
+        .toEqual({ jobId: 'job-1' })
+      expect(openedMicrophones).toBe(0)
+      expect(remote.job.value?.jobId).toBe('job-1')
+
+      transportStateHandler?.('reconnecting')
+      transportStateHandler?.('direct')
+      inbound.forEach((handler) => handler(envelope('calibration.job.state', job(1))))
+      await waitFor(() => commands.filter((command) => command.type === 'calibration.job.discard').length === 2)
+      expect(openedMicrophones).toBe(0)
+
+      inbound.forEach((handler) => handler(envelope('calibration.job.state', {
+        ...job(2),
+        phase: 'cancelled',
+        nextAction: null,
+      })))
+      await waitFor(() => remote.job.value?.phase === 'cancelled')
+      expect(remote.startPending.value).toBe(false)
+      expect(remote.startCancellationPending.value).toBe(false)
+      expect(remote.captureState.value).toBe('idle')
+    } finally {
+      scope.stop()
+    }
+  })
+
+  test('streams a capture through the generic transport and waits for the TV acknowledgement', async () => {
+    const inbound = new Set<(message: Envelope) => void>()
+    const commands: string[] = []
+    const frames: ArrayBuffer[] = []
+    let readyAttemptId = ''
+    let onChunk: ((samples: Float32Array) => Promise<void> | void) | undefined
+    const track = {
+      readyState: 'live',
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    } as unknown as MediaStreamTrack
+    const opened = {
+      stream: { getTracks: () => [track] },
+      track,
+      settings: captureSettings,
+      capabilities: {
+        sampleRate: null,
+        channelCount: null,
+        echoCancellation: [],
+        noiseSuppression: [],
+        autoGainControl: [],
+      },
+    } as unknown as MicrophoneCapture
+    let recorderStarted = false
+    const recorder: PcmRecorder = {
+      start: async () => {
+        recorderStarted = true
+      },
+      stop: async () => ({
+        samples: new Float32Array(0),
+        diagnostics: {
+          sampleRate: 48_000,
+          channelCount: 1,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          rms: 0.25,
+          peak: 0.5,
+          clipped: false,
+          clippedSamples: 0,
+          sampleCount: 4,
+        },
+        startSample: 0,
+        endSample: 4,
+      }),
+      dispose: async () => undefined,
+      sampleRate: () => recorderStarted ? 48_000 : null,
+    }
+    const connection = {
+      send: (type: string, payload?: unknown) => {
+        commands.push(type)
+        if (type === 'calibration.capture.ready' && typeof payload === 'object' && payload !== null
+          && 'captureAttemptId' in payload && typeof payload.captureAttemptId === 'string') {
+          readyAttemptId = payload.captureAttemptId
+        }
+        return `${type}-1`
+      },
+      sendCaptureFrame: async (frame: ArrayBuffer) => {
+        frames.push(frame.slice(0))
+      },
+      sessionId: () => 'session-1',
+      onMessage: (handler: (message: Envelope) => void) => {
+        inbound.add(handler)
+        return () => inbound.delete(handler)
+      },
+      onStateChange: () => () => undefined,
+    }
+    const scope = effectScope()
+    const remote = scope.run(() => useCalibrationRemoteMic(connection, {
+      dependencies: {
+        openMicrophone: async () => opened,
+        closeMicrophone: () => undefined,
+        createPcmRecorder: (_capture, options) => {
+          onChunk = options.onChunk
+          return recorder
+        },
+        preloadPcmCaptureWorklet: async () => undefined,
+        discoverMicCalibrationProfiles: async () => [microphoneProfile],
+        now: () => 1_757_000_000_000,
+      },
+    }))
+    if (!remote) throw new Error('The remote microphone composable did not initialize')
+
+    remote.resumeJob()
+    inbound.forEach((handler) => handler(envelope('calibration.job.state', job(1))))
+    await waitFor(() => commands.includes('calibration.capture.ready'))
+    const preStartChunk = onChunk?.(new Float32Array([0.1, -0.2]))
+    expect(frames).toHaveLength(0)
+    inbound.forEach((handler) => handler(envelope('calibration.capture.started', {
+      jobId: 'job-1',
+      captureId: 'center-left-0',
+      captureAttemptId: readyAttemptId,
+    })))
+    inbound.forEach((handler) => handler(envelope('calibration.capture.window', {
+      captureId: 'center-left-0',
+      captureAttemptId: readyAttemptId,
+      nextSequence: 0,
+      windowSize: 8,
+    })))
+    await waitFor(() => frames.length >= 1)
+    await preStartChunk
+    await onChunk?.(new Float32Array([0.25, -0.5]))
+    inbound.forEach((handler) => handler(envelope('calibration.capture.finished', {
+      jobId: 'job-1',
+      captureId: 'center-left-0',
+      captureAttemptId: readyAttemptId,
+    })))
+    await waitFor(() => remote.captureState.value === 'waiting')
+
+    const decodedKinds = frames.map((frame) => {
+      const decoded = decodeCaptureStreamFrame(frame)
+      return decoded.ok ? decoded.frame.kind : 'invalid'
+    })
+    expect(decodedKinds).toEqual(['begin', 'chunk', 'chunk', 'end'])
+    expect(commands).toContain('calibration.capture.ready')
+    const metadata = remote.captureMetadata.value
+    if (!metadata) throw new Error('The capture metadata was not published')
+    inbound.forEach((handler) => handler(envelope('calibration.capture.uploaded', {
+      jobId: metadata.jobId,
+      captureId: metadata.captureId,
+      captureAttemptId: readyAttemptId,
+      contentSha256: metadata.contentSha256,
+      sampleCount: metadata.sampleCount,
+      byteCount: metadata.byteCount,
+      status: 'accepted',
+    })))
+    await waitFor(() => commands.filter((type) => type === 'calibration.job.get').length >= 2)
+    expect(remote.jobStateKnown.value).toBe(false)
+    scope.stop()
+  })
+})

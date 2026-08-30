@@ -1,4 +1,25 @@
+import { MAX_CAPTURE_CHUNK_BYTES } from '../../../../shared/transport/capabilities'
 import type { MicrophoneCapture } from './microphone'
+
+let workletSourcePromise: Promise<string> | null = null
+
+function loadCaptureWorkletSource(): Promise<string> {
+  if (workletSourcePromise) return workletSourcePromise
+  workletSourcePromise = fetch('/calibration-capture-worklet.js', { cache: 'force-cache' })
+    .then((response) => {
+      if (!response.ok) throw new Error('The capture worklet could not be loaded.')
+      return response.text()
+    })
+    .catch((error: unknown) => {
+      workletSourcePromise = null
+      throw error
+    })
+  return workletSourcePromise
+}
+
+export async function preloadPcmCaptureWorklet(): Promise<void> {
+  await loadCaptureWorkletSource()
+}
 
 export interface CaptureSignalDiagnostics {
   sampleRate: number
@@ -20,7 +41,7 @@ export interface PcmRecording {
   endSample: number
 }
 
-export class PcmRecorderError extends Error {
+class PcmRecorderError extends Error {
   readonly code = 'capture_unavailable' as const
 
   constructor(message: string) {
@@ -49,6 +70,11 @@ function isStoppedMessage(value: unknown): value is StoppedMessage {
 
 export interface PcmRecorderOptions {
   onTrackEnded?: () => void
+  onChunk?: (samples: Float32Array) => Promise<void> | void
+  onStreamError?: (error: Error) => void
+  shouldStreamChunk?: () => boolean
+  retainSamples?: boolean
+  maxCaptureChunkBytes?: number
 }
 
 /**
@@ -83,10 +109,29 @@ class PcmRecorderImpl implements PcmRecorder {
   private stopPromise: Promise<PcmRecording> | null = null
   private streamSampleCount = 0
   private windowStartSample = 0
+  private windowSampleCount = 0
+  private windowSumSquares = 0
+  private windowPeak = 0
+  private windowClippedSamples = 0
+  private streamError: Error | null = null
+  private streamChain: Promise<void> = Promise.resolve()
+  private streamInFlight = 0
+  private streamGeneration = 0
+  private readonly maxCaptureChunkBytes: number
+
+  private static readonly MAX_PENDING_STREAM_CHUNKS = 8
 
   constructor(capture: MicrophoneCapture, options: PcmRecorderOptions) {
     this.capture = capture
     this.options = options
+    const maxCaptureChunkBytes = options.maxCaptureChunkBytes ?? MAX_CAPTURE_CHUNK_BYTES
+    if (!Number.isInteger(maxCaptureChunkBytes)
+      || maxCaptureChunkBytes <= 0
+      || maxCaptureChunkBytes > MAX_CAPTURE_CHUNK_BYTES
+      || maxCaptureChunkBytes % Float32Array.BYTES_PER_ELEMENT !== 0) {
+      throw new RangeError('Capture chunk byte limit is invalid.')
+    }
+    this.maxCaptureChunkBytes = maxCaptureChunkBytes
   }
 
   async start(): Promise<void> {
@@ -99,7 +144,13 @@ class PcmRecorderImpl implements PcmRecorder {
     if (!this.context) {
       this.context = new AudioContext({ latencyHint: 'interactive' })
       try {
-        await this.context.audioWorklet.addModule('/calibration-capture-worklet.js')
+        const source = await loadCaptureWorkletSource()
+        const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }))
+        try {
+          await this.context.audioWorklet.addModule(moduleUrl)
+        } finally {
+          URL.revokeObjectURL(moduleUrl)
+        }
       } catch (error: unknown) {
         await this.context.close()
         this.context = null
@@ -129,8 +180,16 @@ class PcmRecorderImpl implements PcmRecorder {
 
     this.chunks.length = 0
     this.windowStartSample = this.streamSampleCount
+    this.windowSampleCount = 0
+    this.windowSumSquares = 0
+    this.windowPeak = 0
+    this.windowClippedSamples = 0
+    this.streamError = null
+    this.streamChain = Promise.resolve()
+    this.streamInFlight = 0
+    this.streamGeneration++
     this.windowActive = true
-    this.node?.port.postMessage({ type: 'start' })
+    this.node?.port.postMessage({ type: 'start', maxCaptureChunkBytes: this.maxCaptureChunkBytes })
   }
 
   async stop(): Promise<PcmRecording> {
@@ -151,6 +210,7 @@ class PcmRecorderImpl implements PcmRecorder {
       this.stopResolve?.(true)
       await pendingStop
     }
+    this.streamGeneration++
     this.windowActive = false
     this.chunks.length = 0
     this.stopResolve = null
@@ -161,6 +221,13 @@ class PcmRecorderImpl implements PcmRecorder {
     }
     this.streamSampleCount = 0
     this.windowStartSample = 0
+    this.windowSampleCount = 0
+    this.windowSumSquares = 0
+    this.windowPeak = 0
+    this.windowClippedSamples = 0
+    this.streamError = null
+    this.streamChain = Promise.resolve()
+    this.streamInFlight = 0
   }
 
   sampleRate(): number | null {
@@ -175,24 +242,68 @@ class PcmRecorderImpl implements PcmRecorder {
       this.chunks.length = 0
       throw new PcmRecorderError('The capture worklet did not finish draining the recording.')
     }
+    await this.streamChain
+    if (this.streamError) {
+      this.windowActive = false
+      this.chunks.length = 0
+      throw this.streamError
+    }
     this.windowActive = false
     const samples = this.combineChunks()
     const startSample = this.windowStartSample
     this.chunks.length = 0
+    const diagnostics = this.diagnostics(samples)
+    const endSample = startSample + this.windowSampleCount
+    this.windowSampleCount = 0
+    this.windowSumSquares = 0
+    this.windowPeak = 0
+    this.windowClippedSamples = 0
     return {
       samples,
       startSample,
-      endSample: startSample + samples.length,
-      diagnostics: this.diagnostics(samples),
+      endSample,
+      diagnostics,
     }
   }
 
   private onMessage(data: unknown): void {
     if (isPcmMessage(data)) {
+      if (data.buffer.byteLength > this.maxCaptureChunkBytes) {
+        this.failStream(new PcmRecorderError('The capture chunk exceeds the configured limit.'))
+        return
+      }
       const samples = new Float32Array(data.buffer)
       const startSample = this.streamSampleCount
       this.streamSampleCount += samples.length
-      if (this.windowActive) this.chunks.push({ startSample, samples })
+      if (!this.windowActive) return
+      this.windowSampleCount += samples.length
+      for (const sample of samples) {
+        const absolute = Math.abs(sample)
+        this.windowSumSquares += sample * sample
+        this.windowPeak = Math.max(this.windowPeak, absolute)
+        if (absolute >= 0.999) this.windowClippedSamples++
+      }
+      if (this.options.retainSamples !== false) this.chunks.push({ startSample, samples })
+      if (!this.options.onChunk || this.streamError || this.options.shouldStreamChunk?.() === false) return
+      if (this.streamInFlight >= PcmRecorderImpl.MAX_PENDING_STREAM_CHUNKS) {
+        this.failStream(new PcmRecorderError('The capture transport could not keep up. Retry this measurement without moving the phone.'))
+        return
+      }
+      this.streamInFlight++
+      const generation = this.streamGeneration
+      this.streamChain = this.streamChain
+        .then(() => {
+          if (generation !== this.streamGeneration || this.streamError) return
+          return this.options.onChunk?.(samples)
+        })
+        .catch((error: unknown) => {
+          if (generation === this.streamGeneration) {
+            this.failStream(error instanceof Error ? error : new PcmRecorderError('The capture transport failed.'))
+          }
+        })
+        .finally(() => {
+          if (generation === this.streamGeneration) this.streamInFlight--
+        })
       return
     }
     if (isStoppedMessage(data)) {
@@ -200,6 +311,13 @@ class PcmRecorderImpl implements PcmRecorder {
       this.stopResolve = null
       resolve?.(true)
     }
+  }
+
+  private failStream(error: Error): void {
+    if (this.streamError) return
+    this.streamError = error
+    if (this.windowActive) this.node?.port.postMessage({ type: 'stop' })
+    this.options.onStreamError?.(error)
   }
 
   private requestStop(): Promise<boolean> {
@@ -219,7 +337,6 @@ class PcmRecorderImpl implements PcmRecorder {
   private disconnectGraph(): void {
     if (this.trackEndedHandler) this.capture.track.removeEventListener('ended', this.trackEndedHandler)
     this.trackEndedHandler = null
-    this.node?.port.postMessage({ type: 'pause' })
     this.source?.disconnect()
     this.node?.disconnect()
     this.silence?.disconnect()
@@ -254,11 +371,17 @@ class PcmRecorderImpl implements PcmRecorder {
     let sumSquares = 0
     let peak = 0
     let clippedSamples = 0
-    for (const sample of samples) {
-      const absolute = Math.abs(sample)
-      sumSquares += sample * sample
-      peak = Math.max(peak, absolute)
-      if (absolute >= 0.999) clippedSamples++
+    if (samples.length > 0) {
+      for (const sample of samples) {
+        const absolute = Math.abs(sample)
+        sumSquares += sample * sample
+        peak = Math.max(peak, absolute)
+        if (absolute >= 0.999) clippedSamples++
+      }
+    } else {
+      sumSquares = this.windowSumSquares
+      peak = this.windowPeak
+      clippedSamples = this.windowClippedSamples
     }
     return {
       sampleRate: this.context?.sampleRate ?? this.capture.settings.sampleRate ?? 0,
@@ -266,11 +389,11 @@ class PcmRecorderImpl implements PcmRecorder {
       echoCancellation: this.capture.settings.echoCancellation,
       noiseSuppression: this.capture.settings.noiseSuppression,
       autoGainControl: this.capture.settings.autoGainControl,
-      rms: samples.length > 0 ? Math.sqrt(sumSquares / samples.length) : 0,
+      rms: this.windowSampleCount > 0 ? Math.sqrt(sumSquares / this.windowSampleCount) : 0,
       peak,
       clipped: clippedSamples > 0,
       clippedSamples,
-      sampleCount: samples.length,
+      sampleCount: samples.length > 0 ? samples.length : this.windowSampleCount,
     }
   }
 }

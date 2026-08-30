@@ -1,10 +1,21 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { ConnectionState } from '~/composables/connectionState'
 
-defineProps<{
+const props = defineProps<{
   status: ConnectionState
   toastMessage: string
 }>()
+
+const statusLabel = computed(() => {
+  switch (props.status) {
+    case 'connected': return 'Connected directly'
+    case 'connecting': return 'Connecting to TV…'
+    case 'reconnecting': return 'Connection interrupted. Reconnecting…'
+    case 'offline': return 'TV offline'
+    default: return 'Disconnected'
+  }
+})
 </script>
 
 <template>
@@ -15,7 +26,7 @@ defineProps<{
     </div>
     <div class="conn" :data-state="status">
       <span class="conn-dot"></span>
-      <span class="conn-label">{{ status }}</span>
+      <span class="conn-label">{{ statusLabel }}</span>
     </div>
   </header>
 

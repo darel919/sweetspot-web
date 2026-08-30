@@ -4,7 +4,7 @@ function isMarkerDiagnosticCaptureKind(value: MeasurementSweep['captureKind']): 
   return value === 'marker-only' || value === 'marker-production-spacing'
 }
 
-export function sampleCountForMilliseconds(milliseconds: number, sampleRate: number): number {
+function sampleCountForMilliseconds(milliseconds: number, sampleRate: number): number {
   return Math.max(0, Math.round(milliseconds * sampleRate / 1000))
 }
 

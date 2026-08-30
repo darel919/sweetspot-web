@@ -1,11 +1,11 @@
 import type { ResponsePoint } from '../measurement/response'
 
-export interface TargetAnchor {
+interface TargetAnchor {
   frequencyHz: number
   targetDb: number
 }
 
-export interface LfCapabilityEstimate {
+interface LfCapabilityEstimate {
   frequencyHz: number
   confidence: number
 }
@@ -15,7 +15,7 @@ export interface LfCapability {
   minus6Db: LfCapabilityEstimate
 }
 
-export const SWEETSPOT_TARGET_ANCHORS: readonly TargetAnchor[] = [
+const SWEETSPOT_TARGET_ANCHORS: readonly TargetAnchor[] = [
   { frequencyHz: 20, targetDb: 4 },
   { frequencyHz: 30, targetDb: 4 },
   { frequencyHz: 60, targetDb: 3.5 },
@@ -29,7 +29,7 @@ export const SWEETSPOT_TARGET_ANCHORS: readonly TargetAnchor[] = [
   { frequencyHz: 20_000, targetDb: -3 },
 ]
 
-export function sweetSpotTargetDbAtHz(frequencyHz: number): number {
+function sweetSpotTargetDbAtHz(frequencyHz: number): number {
   const anchors = SWEETSPOT_TARGET_ANCHORS
   if (frequencyHz <= anchors[0].frequencyHz) return anchors[0].targetDb
   if (frequencyHz >= anchors[anchors.length - 1].frequencyHz) return anchors[anchors.length - 1].targetDb

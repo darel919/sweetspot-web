@@ -19,6 +19,7 @@ defineProps<{
   virtualizerOn: boolean
   deviceInfo: DeviceInfoPayload | null
   devInfoPending: boolean
+  locked: boolean
 }>()
 
 const emit = defineEmits<{
@@ -67,10 +68,10 @@ function fmtBytes(bytes: number): string {
     <p class="note">Effect-chain inventory, DynamicsProcessing capacity, and a temporary diagnostic overlay on the production session-0 effect.</p>
 
     <div class="actions">
-      <button :disabled="diagPending" @click="emit('run-effects-diagnostics')">
+      <button :disabled="locked || diagPending" @click="emit('run-effects-diagnostics')">
         {{ diagPending ? 'Working…' : 'Effect chain' }}
       </button>
-      <button :disabled="probePending" @click="emit('run-capacity-probe')">
+      <button :disabled="locked || probePending" @click="emit('run-capacity-probe')">
         {{ probePending ? 'Probing…' : 'Capacity probe' }}
       </button>
     </div>
@@ -99,8 +100,8 @@ function fmtBytes(bytes: number): string {
     <h3 class="sub-label">64-band diagnostic overlay</h3>
     <form class="inline-form" @submit.prevent="emit('create-persistent')">
       <input :value="64" type="number" min="64" max="64" disabled />
-      <button type="submit">Create 64-band diagnostic</button>
-      <button type="button" @click="emit('release-persistent')">Release</button>
+      <button type="submit" :disabled="locked">Create 64-band diagnostic</button>
+      <button type="button" :disabled="locked" @click="emit('release-persistent')">Release</button>
     </form>
     <p v-if="persistentState" class="note">
       {{ persistentState.active ? 'ACTIVE at ' + persistentState.bands + ' bands' : 'none' }}
@@ -113,8 +114,8 @@ function fmtBytes(bytes: number): string {
     <h3 class="sub-label">Audible test curves</h3>
     <p class="note">Dramatic temporary EQ through the same live production effect. Release it after the experiment.</p>
     <div class="actions">
-      <button @click="emit('apply-test-curve', 'hollow')">Hollow mids</button>
-      <button @click="emit('apply-test-curve', 'flat')">Flat</button>
+      <button :disabled="locked" @click="emit('apply-test-curve', 'hollow')">Hollow mids</button>
+      <button :disabled="locked" @click="emit('apply-test-curve', 'flat')">Flat</button>
     </div>
 
     <h3 class="sub-label">Acoustic transfer / routing probe</h3>
@@ -123,17 +124,17 @@ function fmtBytes(bytes: number): string {
       Routing uses one microphone: it captures a flat baseline, then left-only and right-only cuts at four LF/mid/HF bands while you move the same mic between fixed left/right positions.
     </p>
     <form class="inline-form" @submit.prevent="emit('capture-transfer-probe')">
-      <label>band <input :value="probeBand" type="number" min="1" max="64" @input="readNumber($event, 'set-probe-band')" /></label>
-      <label>gain dB <input :value="probeGainDb" type="number" min="-6" max="6" step="0.5" @input="readNumber($event, 'set-probe-gain-db')" /></label>
-      <button type="submit" :disabled="probeLabPending">Capture transfer</button>
-      <button type="button" :disabled="probeLabPending" @click="emit('run-routing-probe')">Run L/R routing set</button>
-      <button type="button" :disabled="probeLabPending" @click="emit('run-marker-probe')">Run marker-only set</button>
-      <button type="button" :disabled="probeLabPending" @click="emit('run-production-spacing-marker-probe')">Run production-spacing marker set</button>
+      <label>band <input :value="probeBand" :disabled="locked" type="number" min="1" max="64" @input="readNumber($event, 'set-probe-band')" /></label>
+      <label>gain dB <input :value="probeGainDb" :disabled="locked" type="number" min="-6" max="6" step="0.5" @input="readNumber($event, 'set-probe-gain-db')" /></label>
+      <button type="submit" :disabled="locked || probeLabPending">Capture transfer</button>
+      <button type="button" :disabled="locked || probeLabPending" @click="emit('run-routing-probe')">Run L/R routing set</button>
+      <button type="button" :disabled="locked || probeLabPending" @click="emit('run-marker-probe')">Run marker-only set</button>
+      <button type="button" :disabled="locked || probeLabPending" @click="emit('run-production-spacing-marker-probe')">Run production-spacing marker set</button>
     </form>
     <p v-if="probeLabMessage" class="note">{{ probeLabMessage }}</p>
     <div v-if="probeEvidence.length" class="actions">
-      <button type="button" @click="emit('export-probe-evidence')">Export {{ probeEvidence.length }} captures</button>
-      <button type="button" :disabled="probeLabPending" @click="emit('clear-probe-evidence')">Clear evidence</button>
+      <button type="button" :disabled="locked" @click="emit('export-probe-evidence')">Export {{ probeEvidence.length }} captures</button>
+      <button type="button" :disabled="locked || probeLabPending" @click="emit('clear-probe-evidence')">Clear evidence</button>
     </div>
     <ul v-if="probeEvidence.length" class="probe-evidence">
       <li v-for="capture in probeEvidence" :key="capture.id">
@@ -146,14 +147,14 @@ function fmtBytes(bytes: number): string {
     <h3 class="sub-label">Virtualizer A/B</h3>
     <p class="note">Persistent session-0 Virtualizer at max strength. Toggle while playing stereo through AUX.</p>
     <div class="actions">
-      <button :class="{ active: virtualizerOn }" @click="emit('set-virtualizer', true)">Virtualizer ON</button>
-      <button :class="{ active: !virtualizerOn }" @click="emit('set-virtualizer', false)">Virtualizer OFF</button>
+      <button :disabled="locked" :class="{ active: virtualizerOn }" @click="emit('set-virtualizer', true)">Virtualizer ON</button>
+      <button :disabled="locked" :class="{ active: !virtualizerOn }" @click="emit('set-virtualizer', false)">Virtualizer OFF</button>
     </div>
     <p class="note">{{ virtualizerOn ? 'Widening active' : 'Bypassed' }}</p>
 
     <h3 class="sub-label">Device info</h3>
     <div class="actions">
-      <button :disabled="devInfoPending" @click="emit('fetch-device-info')">
+      <button :disabled="locked || devInfoPending" @click="emit('fetch-device-info')">
         {{ devInfoPending ? 'Sampling…' : 'Sample CPU / memory' }}
       </button>
     </div>

@@ -2,7 +2,7 @@ import type { MeasurementSweep } from '#shared/types/protocol'
 import { generateSweepSignal, sweepSampleParts } from '../sweep-reference'
 import { fftInPlace, nextPowerOfTwo } from './fft'
 
-export interface EarlyReflection {
+interface EarlyReflection {
   delayMs: number
   levelDbRelativeToDirect: number
 }
@@ -29,12 +29,12 @@ export interface ImpulseSummary {
   directArrival: DirectArrivalDiagnostics
 }
 
-export type DirectArrivalRejectionReason =
+type DirectArrivalRejectionReason =
   | 'no_candidate'
   | 'peak_below_noise'
   | 'candidate_not_sustained'
 
-export interface DirectArrivalDiagnostics {
+interface DirectArrivalDiagnostics {
   directPeak: number
   noiseFloorRms: number
   peakToNoiseDb: number | null
@@ -69,13 +69,13 @@ export interface ResponseWindowOptions {
   taperMs?: number
 }
 
-export interface ImpulseResult {
+interface ImpulseResult {
   kind: 'ok'
   samples: Float32Array
   summary: ImpulseSummary
 }
 
-export interface CaptureTooShortResult {
+interface CaptureTooShortResult {
   kind: 'capture_too_short'
   availableSamples: number
   requiredSamples: number
@@ -492,12 +492,10 @@ export function findDirectArrival(samples: Float32Array, sampleRate: number, ext
     ? Math.max(0, externalNoiseRms)
     : tailNoiseRms
   let peak = 0
-  let peakIndex = -1
   for (let index = 0; index < samples.length; index++) {
     const value = Math.abs(samples[index])
     if (value > peak) {
       peak = value
-      peakIndex = index
     }
   }
   const searchEnd = Math.min(samples.length, Math.max(1, Math.round(sampleRate * DIRECT_SEARCH_WINDOW_MS / 1000)))
@@ -816,10 +814,7 @@ export function summarizeImpulse(samples: Float32Array, sampleRate: number, exte
   }
 }
 
-/**
- * Regularized transfer deconvolution. The returned impulse is intentionally
- * kept browser-local; callers should retain only the compact summary.
- */
+/** Diagnostic-path deconvolution; production captures are analyzed on the TV. */
 export function deconvolveSweep(
   samples: Float32Array,
   sampleRate: number,

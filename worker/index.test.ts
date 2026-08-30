@@ -17,6 +17,6 @@ describe('worker readiness boundary', () => {
     const response = healthResponse()
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ ok: true, websocketOnly: true })
+    expect(await response.json()).toEqual({ ok: true, signalingOnly: true })
   })
 })

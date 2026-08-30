@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url'
 const root = dirname(fileURLToPath(import.meta.url))
 const androidRoot = resolve(process.env.SWEETSPOT_ANDROID_ROOT ?? resolve(root, '../../sweetspot'))
 const webProtocol = await readFile(resolve(root, '../shared/types/protocol.ts'), 'utf8')
-const androidProtocol = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/CalibrationProtocol.kt'), 'utf8')
-const androidContext = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/MeasurementContext.kt'), 'utf8')
+const androidProtocol = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/calibration/model/CalibrationProtocol.kt'), 'utf8')
+const androidContext = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/calibration/model/MeasurementContext.kt'), 'utf8')
 
 function literals(source, pattern, label) {
   const match = source.match(pattern)
@@ -39,7 +39,7 @@ const checks = [
     literals(androidContext, /CAPTURE_KINDS = setOf\(([\s\S]*?)\)/, 'Android capture kinds')],
   ['measurement marker channels',
     literals(webProtocol, /export type MeasurementMarkerChannel = ([\s\S]*?)\n\n/, 'web marker channels'),
-    literals(await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/MeasurementSweep.kt'), 'utf8'), /MARKER_CHANNELS = setOf\(([\s\S]*?)\)/, 'Android marker channels')],
+    literals(await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/calibration/playback/MeasurementSweep.kt'), 'utf8'), /MARKER_CHANNELS = setOf\(([\s\S]*?)\)/, 'Android marker channels')],
 ]
 
 for (const [label, webValues, androidValues] of checks) {
@@ -57,7 +57,7 @@ if (JSON.stringify(webGeometry.sort()) !== JSON.stringify(actualGeometry.sort())
   throw new Error(`position geometry differs. web=${JSON.stringify(webGeometry)} android=${JSON.stringify(actualGeometry)}`)
 }
 
-const androidSweep = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/MeasurementSweep.kt'), 'utf8')
+const androidSweep = await readFile(resolve(androidRoot, 'app/src/main/java/com/darelisme/sweetspot/calibration/playback/MeasurementSweep.kt'), 'utf8')
 const webSweepRevision = webProtocol.match(/CALIBRATION_SWEEP_REVISION = '([^']+)'/)?.[1]
 const androidSweepRevision = androidSweep.match(/sweepRevision: String = "([^"]+)"/)?.[1]
 if (!webSweepRevision || webSweepRevision !== androidSweepRevision) {

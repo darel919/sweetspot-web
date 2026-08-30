@@ -23,14 +23,14 @@ export interface AdaptivePlannerPolicy {
   positions: readonly [PositionSpec, ...PositionSpec[]]
 }
 
-export const DEFAULT_ADAPTIVE_POLICY: AdaptivePlannerPolicy = {
+const DEFAULT_ADAPTIVE_POLICY: AdaptivePlannerPolicy = {
   minimumPositions: 3,
   maximumPositions: 5,
   maxPositionAttempts: 2,
   positions: DEFAULT_POSITION_SPECS,
 }
 
-export type CaptureReason =
+type CaptureReason =
   | 'center-required'
   | 'initial-position'
   | 'repair-channel'
@@ -249,8 +249,4 @@ export function decideNextCapture(
     outcome: acceptedPositions >= policy.minimumPositions ? 'bounded' : 'insufficient',
     reason: acceptedPositions >= policy.minimumPositions ? 'maximum-position-cap' : 'minimum-position-count-not-met',
   }
-}
-
-export function requestedPositionCount(decision: AdaptivePlanDecision): number {
-  return decision.kind === 'capture' ? decision.requestedPositionCount : 0
 }

@@ -1,127 +1,95 @@
 # SweetSpot Web
 
-SweetSpot Web is the browser dashboard for SweetSpot, an Android TV audio-calibration app. Open it on a phone or laptop to pair with a TV, control its equalizer, manage profiles, run room calibration, and inspect diagnostics.
+SweetSpot Web is the HTTPS Nuxt dashboard for SweetSpot, the Android TV audio-tuning app. It runs on a phone or laptop and provides EQ controls, profiles, diagnostics, and the remote microphone surface for TV-owned calibration.
 
-The Android TV app lives in the separate `sweetspot` repository. The two repositories use the same v1 protocol and are released together.
+## Runtime architecture
 
-## How the dashboard works
+```text
+phone Safari  -- direct WebRTC DataChannels when possible --  Android TV
+      \                                                     /
+       \-- HTTPS Worker: static dashboard + short SDP/ICE signaling
+```
 
-Nuxt generates a static Vue dashboard. The Cloudflare Worker serves the generated files and routes room connections to a Durable Object.
+The dashboard is a secure browser application. Cloudflare hosts the static site and provides short-lived signaling rendezvous. Once the ordered, reliable `control` and `capture` DataChannels open, commands, state, EQ changes, cancellation, and PCM stay on the direct peer path. Cloudflare does not relay production calibration or control traffic.
 
-- The TV connects as the `device` role.
-- The browser connects as the `client` role.
-- `RoomDO` owns room membership and forwards protocol envelopes over WebSockets.
-- The TV owns safety-critical calibration state, candidate acceptance, and rollback.
-- The browser keeps microphone capture and audio analysis local. It sends compact calibration results and control messages, not raw microphone samples.
+The `control` channel carries envelopes, replies, TV-owned job state, diagnostics, capability negotiation, and cancellation. The `capture` channel carries bounded binary Float32 mono PCM frames. The capture producer honors `bufferedAmount` and a bounded queue so a recording cannot block control traffic or consume unbounded browser memory.
 
-The dashboard uses the current WebSocket transport only. It has no HTTP mailbox fallback, WebRTC path, or legacy heartbeat protocol.
+The collapsed developer details show browser transport diagnostics and can request the corresponding redacted TV peer snapshot when a direct session is available.
 
-During automatic calibration, the TV gives the instructions. After you start calibration, the dashboard locks normal controls while it shows progress and keeps cancellation available.
+The TV owns job IDs, capture timing, integrity validation, acoustic analysis, accepted evidence, correction, validation, rollback, persistence, and recovery. The browser owns microphone permission, capture settings and profile metadata, PCM streaming, rendering, and cancellation requests. Browser analysis helpers are for diagnostics and parity fixtures only.
 
-## Requirements
+The dashboard can start Auto Room Calibration or Advanced Room Calibration. Auto may stop when the mandatory center, left, and right solution is sufficient. Advanced continues optional forward and backward positions before the TV stages the best verified solution. The browser never changes correction during a deterministic sweep or declares an acoustic result accepted.
+
+## Pairing and recovery
+
+Scan the current QR code displayed by the TV. It contains a short display code, a random rendezvous ID, and a random pair secret. The secret is sent in the signaling WebSocket subprotocol, not its URL. Pairing credentials expire if unused, but expiry does not terminate an authenticated direct peer. The rendezvous is cleaned up after a short bounded retention window once direct setup completes. A second dashboard cannot silently replace an active peer. Browser reload restores the pairing link's tab generation and requests the current TV state.
+
+SweetSpot expects TV and phone to share a normal home network. ICE retries and restarts automatically when recovery is safe. Guest Wi-Fi, client isolation, VPNs, and other network policy can prevent a direct path; the dashboard reports an actionable error and does not silently route large calibration captures through a paid relay.
+
+During active calibration, unrelated navigation stays locked and cancellation remains available. The phone stops its microphone when the TV acknowledges cancellation or when a safe local abort is required. The TV remains authoritative.
+
+## Requirements and development
 
 - [Bun](https://bun.sh/)
-- A running SweetSpot Android TV app for a connected session
-- Cloudflare Wrangler authentication for deployment
-
-Use Python and Pillow only if you need the optional frequency-response digitizer in `scripts/digitize-frequency-response.py`.
-
-## Start the dashboard
-
-Install dependencies and start the Nuxt development server:
+- A running SweetSpot Android TV service for an end-to-end session
+- Wrangler authentication for deployment
 
 ```bash
 bun install
 bun run dev
 ```
 
-Open `http://localhost:3000`. Enter the pair code shown on the TV, or scan the QR code shown by the TV.
-
-`bun run dev` starts Nuxt only. It does not start the Cloudflare Worker or `RoomDO`, so a live TV session needs the deployed Worker or a separately running local Worker.
-
-To serve the generated dashboard and Worker locally:
+`bun run dev` starts Nuxt. A live phone-to-TV session also needs the signaling Worker, either deployed or run locally:
 
 ```bash
 bun run generate
 bunx wrangler dev
 ```
 
-Wrangler prints the local URL. A TV on another device needs a URL that it can reach.
+The Worker serves the generated `dist/` site and the `/api/signaling/{rendezvousId}/ws` signaling endpoint. It does not carry application envelopes or PCM.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `bun install` | Install dependencies from `bun.lock`. |
 | `bun run dev` | Start the Nuxt development server. |
-| `bun run test` | Run the Bun test suite. |
-| `bun run generate` | Generate the static site in `dist/`. |
-| `bun run verify:transport` | Check the web and Android sources for the WebSocket-only contract. |
-| `bun run deploy` | Generate the site and deploy the Worker with Wrangler. |
+| `bun run test` | Run the Bun unit and contract tests. |
+| `bun run typecheck` | Run strict Vue and TypeScript checks. |
+| `bun run lint` | Run Oxlint with the repository rules. |
+| `bun run verify:protocol` | Check shared protocol parity. |
+| `bun run verify:transport` | Check that production source uses direct transport and signaling-only Worker behavior. |
+| `bun run verify:source-layout` | Check that source files remain under their owning domains. |
+| `bun run generate` | Generate the static dashboard. |
+| `bun run deploy` | Generate and deploy the dashboard Worker. |
 
-The project has no separate `build` or `preview` script. Use `bun run generate` for the production artifact and `bunx wrangler dev` to preview the Worker locally.
-
-`bun run verify:transport` expects the Android checkout at `../sweetspot`.
-
-## Validate a deployed room
-
-The mailbox presence check opens a device socket and a client socket, then verifies the TV-first `room.ready` state:
-
-```bash
-bun scripts/mailbox-presence-check.mjs
-```
-
-Set `SWEETSPOT_MAILBOX_URL` to check another Worker deployment:
-
-```bash
-SWEETSPOT_MAILBOX_URL=https://example.workers.dev bun scripts/mailbox-presence-check.mjs
-```
-
-The presence check does not replace a real pair-code session. For connected-session acceptance, exercise the WebSocket connection, device commands, state snapshots, calibration progress, cancellation, validation, and rollback with a running TV.
-
-## Deploy
-
-The Worker configuration is in [`wrangler.jsonc`](./wrangler.jsonc). It declares the static asset directory, the `RoomDO` Durable Object, and the `sweetspot.darelisme.my.id` custom domain.
-
-After authenticating Wrangler, deploy with:
-
-```bash
-bun run deploy
-```
-
-This command runs `bun run generate` before `bunx wrangler deploy`.
+Use `bun run test`, `bun run typecheck`, `bun run lint`, `bun run verify:protocol`, `bun run verify:transport`, and `bun run generate` after transport or protocol changes. Real Safari microphone behavior, direct connectivity, Android audio behavior, and cloud-independence need device acceptance testing.
 
 ## Repository layout
 
-| Path | Responsibility |
-| --- | --- |
-| `app/` | Dashboard pages, Vue components, connection state, microphone capture, measurement analysis, and correction logic. |
-| `worker/index.ts` | Serves `dist/` and routes `/api/room/{code}/ws` requests to `RoomDO`. |
-| `worker/room.ts` | Cloudflare Durable Object that validates envelopes, tracks open sockets, queues bounded messages, and broadcasts device messages. |
-| `shared/types/protocol.ts` | Canonical v1 message types, payload validation, and state shapes shared with Android. |
-| `shared/types/README.md` | Message envelope and message-type reference. |
-| `shared/types/TRANSPORT.md` | Room WebSocket lifecycle, presence, queue, and delivery rules. |
-| `server/api/calibration/profiles.get.ts` | Static microphone-profile catalog endpoint. |
-| `public/` | Static assets, the capture worklet, and microphone calibration profiles. |
-| `scripts/` | Transport checks, room presence checks, and measurement utilities. |
-
-## Room WebSocket contract
-
-The Worker accepts these room socket paths:
-
 ```text
-GET /api/room/{code}/ws?role=device
-GET /api/room/{code}/ws?role=client
+app/
+├── components/             dashboard UI by domain
+├── composables/             calibration, connection, and UI orchestration
+│   ├── calibration/        remote microphone session ownership
+│   ├── connection/         peer connection ownership
+│   └── ui/                  browser lifecycle helpers
+└── lib/
+    ├── audio/              microphone capture and diagnostic analysis
+    │   └── measurement/    marker detection, response analysis, and session policy
+    ├── pairing/            browser pairing helpers
+    └── transport/          control, signaling, WebRTC, and backpressure
+shared/
+├── types/                  envelope and payload contract
+└── transport/              signaling, capabilities, and capture-stream wire format
+worker/
+├── index.ts                static assets and signaling route
+└── signaling.ts            short-lived SDP/ICE rendezvous Durable Object
+public/                     microphone worklet and profiles
+scripts/                    generation and verification tools
 ```
 
-The room validates every v1 envelope, rejects unknown or oversized payloads, and treats only open WebSockets as live membership. Messages are delivered at most once. The browser requests a fresh state snapshot after reconnect instead of relying on replayed snapshots.
+Keep generic transport independent from calibration audio and UI. Keep the shared wire format transport-agnostic. Read [`shared/types/README.md`](shared/types/README.md) and [`shared/types/TRANSPORT.md`](shared/types/TRANSPORT.md) before changing the contract, then update the Android consumer and cross-language fixtures in the paired repository.
 
-Read [`shared/types/README.md`](./shared/types/README.md) before changing a message type. Read [`shared/types/TRANSPORT.md`](./shared/types/TRANSPORT.md) before changing room behavior. Update the Android consumer and its tests when the wire contract changes.
+## Validation boundaries
 
-## Calibration boundaries
-
-Calibration runs in the browser and uses the TV for playback and user instructions. The browser keeps captured PCM and FFT or impulse-response work local. It sends compact response curves and calibration commands through the room WebSocket.
-
-The calibration flow preserves session IDs, repeatability checks, progress, cancellation, automatic candidate validation, and TV-owned rollback. A successful local test or static generation run does not prove microphone behavior on iPhone Safari, audio routing on a real TV, hosted Worker behavior, or an end-to-end connected session.
-
-Keep those checks separate when reporting validation results.
+Unit tests and static generation do not prove iPhone Safari capture, Android TV DSP, Wi-Fi behavior, peer recovery, a 30-minute connection, or the Cloudflare-blocked-after-connect test. Record those as separate evidence. The required acceptance test blocks Cloudflare after DataChannels open, then completes calibration, EQ changes, state fetch, cancellation or restart, and finalization over the direct peer.

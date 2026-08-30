@@ -1,4 +1,4 @@
-export type SweetSpotRequestErrorKind = 'timeout' | 'aborted' | 'connection' | 'disposed'
+export type SweetSpotRequestErrorKind = 'timeout' | 'aborted' | 'connection' | 'disposed' | 'protocol'
 
 export class SweetSpotRequestError extends Error {
   readonly kind: SweetSpotRequestErrorKind

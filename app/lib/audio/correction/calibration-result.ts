@@ -1,5 +1,10 @@
-import type { CalibrationValidationOutcome } from './calibration-validation'
 import type { CalibrationValidationStatus } from '#shared/types/protocol'
+
+type CalibrationValidationOutcome =
+  | { status: 'improved'; beforeDb: number; afterDb: number }
+  | { status: 'worse'; beforeDb: number; afterDb: number }
+  | { status: 'inconclusive'; reason: string; beforeDb?: number; afterDb?: number }
+  | { status: 'failed'; reason: string; beforeDb?: number; afterDb?: number }
 
 export type CalibrationFinalizationDecision = CalibrationValidationOutcome | { status: 'error'; reason: string }
 type CalibrationFinalResult = 'improved' | 'inconclusive' | 'worse' | 'cancelled' | 'error'

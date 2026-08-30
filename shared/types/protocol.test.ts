@@ -7,12 +7,14 @@ import {
   KNOWN_TYPES,
   isMeasurementContext,
   isMeasurementSweep,
-  isRoomSocketServerMessage,
   isStateSnapshot,
   CALIBRATION_POSITION_TARGETS,
   CALIBRATION_ANALYSIS_REVISION,
+  MAX_PAYLOAD_BYTES,
+  serializedUtf8ByteLength,
   validatePayload,
 } from './protocol'
+import transportControlFixtures from '../../test-vectors/transport-control-events.json'
 
 const sweep = {
   sweepRevision: 'android-sweep-v3',
@@ -53,17 +55,87 @@ const context = {
 } as const
 
 describe('measurement protocol boundary', () => {
-  test('enforces explicit relay direction sets and payload validators', () => {
+  test('enforces explicit direction sets and payload validators', () => {
     expect(isClientToDevice('engine.enable')).toBe(true)
     expect(isClientToDevice('state.snapshot')).toBe(false)
     expect(isDeviceToClient('state.snapshot')).toBe(true)
     expect(isDeviceToClient('engine.enable')).toBe(false)
+    expect(isClientToDevice('calibration.applyCandidate')).toBe(false)
+    expect(isClientToDevice('calibration.acceptCandidate')).toBe(false)
+    expect(isClientToDevice('calibration.rollbackCandidate')).toBe(false)
+    expect(isClientToDevice('calibration.validation.result')).toBe(false)
     expect(validatePayload('engine.enable', {})).toBeNull()
     expect(validatePayload('engine.enable', { enabled: true })).not.toBeNull()
     expect(validatePayload('profile.save', { name: 'Living Room' })).toBeNull()
     expect(validatePayload('profile.save', { name: '' })).not.toBeNull()
     expect(validatePayload('state.get', {})).toBeNull()
+    expect(isClientToDevice('diagnostics.transport')).toBe(true)
+    expect(isDeviceToClient('diagnostics.transport')).toBe(true)
+    expect(validatePayload('diagnostics.transport', {})).toBeNull()
+    expect(validatePayload('diagnostics.transport', {
+      state: 'direct',
+      sessionId: '…12345678',
+      iceConnectionState: 'connected',
+      iceGatheringState: 'complete',
+      peerConnectionState: 'connected',
+      selectedCandidateType: null,
+      selectedCandidateProtocol: null,
+      rttMs: null,
+      bytesSent: 10,
+      bytesReceived: 20,
+      captureBufferedBytes: 0,
+      reconnectCount: 0,
+      signalingRoundTripMs: null,
+      lastControlMessageAt: null,
+      lastPeerTrafficAt: null,
+      lastError: null,
+    })).toBeNull()
+    expect(validatePayload('diagnostics.transport', { state: 'invalid' })).not.toBeNull()
     expect(validatePayload('unhandled.type', {})).not.toBeNull()
+  })
+
+  test('accepts capture start and bounded receive window payloads', () => {
+    expect(isDeviceToClient('calibration.capture.started')).toBe(true)
+    expect(isDeviceToClient('calibration.capture.window')).toBe(true)
+    expect(validatePayload('calibration.capture.started', {
+      jobId: 'job-1',
+      captureId: 'capture-1',
+      captureAttemptId: 'capture-attempt-1',
+    })).toBeNull()
+    expect(validatePayload('calibration.capture.window', {
+      captureId: 'capture-1',
+      captureAttemptId: 'capture-attempt-1',
+      nextSequence: 8,
+      windowSize: 8,
+    })).toBeNull()
+    expect(validatePayload('calibration.capture.window', {
+      captureId: 'capture-1',
+      captureAttemptId: 'capture-attempt-1',
+      nextSequence: 8,
+      windowSize: 0,
+    })).not.toBeNull()
+  })
+
+  test('keeps the browser contract aligned with the shared transport fixtures', () => {
+    expect(isEnvelope(transportControlFixtures.validStarted)).toBe(true)
+    expect(validatePayload(
+      transportControlFixtures.validStarted.type,
+      transportControlFixtures.validStarted.payload,
+    )).toBeNull()
+    expect(isEnvelope(transportControlFixtures.validWindow)).toBe(true)
+    expect(validatePayload(
+      transportControlFixtures.validWindow.type,
+      transportControlFixtures.validWindow.payload,
+    )).toBeNull()
+    expect(validatePayload(
+      transportControlFixtures.invalidWindow.type,
+      transportControlFixtures.invalidWindow.payload,
+    )).not.toBeNull()
+    const oversized = {
+      ...transportControlFixtures.oversizedEnvelope,
+      payload: { padding: 'x'.repeat(transportControlFixtures.oversizedEnvelope.payload.paddingBytes) },
+    }
+    expect(isEnvelope(oversized)).toBe(false)
   })
 
   test('validates measurement.prepare context instead of accepting arbitrary data', () => {
@@ -249,6 +321,22 @@ describe('measurement protocol boundary', () => {
         },
       },
     })).toBe(true)
+    expect(isStateSnapshot({
+      ...snapshot,
+      calibration: {
+        ...snapshot.calibration,
+        active: true,
+        transaction: {
+          state: 'candidate_pending',
+          candidateId: 'candidate-neutral',
+          validationStatus: 'neutral',
+          previousActive: false,
+          beforeDb: 1,
+          afterDb: 1.1,
+          reason: 'within tolerance',
+        },
+      },
+    })).toBe(true)
     const pendingWithoutRollbackTarget = {
       state: 'candidate_pending' as const,
       candidateId: 'candidate-missing-target',
@@ -387,7 +475,7 @@ describe('measurement protocol boundary', () => {
     })).toBe(true)
   })
 
-  test('rejects full candidate diagnostics at the relay boundary', () => {
+  test('rejects full candidate diagnostics at the transport boundary', () => {
     expect(validatePayload('measurement.diagnostics', {
       sessionId: 'cal_test',
       context,
@@ -530,13 +618,36 @@ describe('measurement protocol boundary', () => {
     })).not.toBeNull()
   })
 
-  test('recognizes room socket control messages separately from envelopes', () => {
-    expect(isRoomSocketServerMessage({ kind: 'room.presence', deviceOnline: false })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', role: 'client', deviceOnline: true, messages: [] })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', role: 'device', deviceOnline: true, messages: [] })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.clientPresence', clientOnline: true })).toBe(true)
-    expect(isRoomSocketServerMessage({ kind: 'room.ping' })).toBe(false)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', deviceOnline: true, messages: [] })).toBe(false)
-    expect(isRoomSocketServerMessage({ kind: 'room.ready', deviceOnline: true, messages: [{ type: 'bad' }] })).toBe(false)
+})
+
+describe('envelope size boundary', () => {
+  function envelopeWithPadding(padding: string) {
+    return {
+      v: 1 as const,
+      id: 'size-test',
+      type: 'pong',
+      ts: 1,
+      payload: { padding },
+    }
+  }
+
+  function paddingForByteLength(target: number): string {
+    let low = 0
+    let high = target
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2)
+      if (serializedUtf8ByteLength(envelopeWithPadding('x'.repeat(middle))) <= target) low = middle
+      else high = middle - 1
+    }
+    return 'x'.repeat(low)
+  }
+
+  test('accepts the exact UTF-8 limit and rejects one byte over', () => {
+    const exact = envelopeWithPadding(paddingForByteLength(MAX_PAYLOAD_BYTES))
+    expect(serializedUtf8ByteLength(exact)).toBe(MAX_PAYLOAD_BYTES)
+    expect(isEnvelope(exact)).toBe(true)
+    const oversized = envelopeWithPadding(`${exact.payload.padding}x`)
+    expect(serializedUtf8ByteLength(oversized)).toBeGreaterThan(MAX_PAYLOAD_BYTES)
+    expect(isEnvelope(oversized)).toBe(false)
   })
 })

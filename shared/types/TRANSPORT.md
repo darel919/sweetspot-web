@@ -1,87 +1,122 @@
-# SweetSpot room transport
+# SweetSpot direct transport
 
-The static dashboard and room API run on one Cloudflare Worker. Room state is
-owned by a Durable Object and is delivered through WebSockets.
+Production runtime communication is direct WebRTC DataChannel traffic between the Android TV and the phone or laptop dashboard. Cloudflare hosts the HTTPS dashboard and provides short-lived signaling rendezvous. It is not an application mailbox and does not carry active EQ, state, command, calibration, or PCM traffic.
 
-## Roles
+## Pairing and signaling
 
-- `device` is the Android TV. It keeps one room WebSocket open.
-- `client` is the phone or laptop dashboard. It sends commands and receives
-  device messages.
+The TV displays a QR URL containing:
 
-## Room connection
+- a short display code for human context;
+- a cryptographically random rendezvous ID;
+- a cryptographically random pair secret in the URL fragment.
+
+The browser sends the secret only in the WebSocket subprotocol during the signaling handshake. The Worker hashes it before storing it, binds both roles to the same rendezvous, permits one client and one device, validates the browser origin, and forwards only versioned SDP and ICE messages. The secret is not included in the WebSocket URL.
+
+The signaling endpoint is:
 
 ```text
-GET /api/room/{code}/ws?role=device  WebSocket
-GET /api/room/{code}/ws?role=client   WebSocket
+GET /api/signaling/{rendezvousId}/ws?role=client
+GET /api/signaling/{rendezvousId}/ws?role=device
+Sec-WebSocket-Protocol: sweetspot.v1, {pairSecret}
 ```
 
-The pairing code is the short-lived room credential. The Worker validates its
-format and routes both roles to the matching room Durable Object. Client
-sockets also require an allowed browser `Origin`. The room starts a ten-minute
-session on its first connection and closes all sockets when that session
-expires. Every connection receives a `room.ready` frame with its `role` and
-current `deviceOnline` state.
+Signaling credentials expire if they are unused for the pairing window. After the peers authenticate and complete DataChannel setup, the rendezvous retains only minimal state for a bounded cleanup window; expiry or signaling disconnection does not end the direct session. Signaling may be reacquired only when an ICE restart needs it. The browser keeps its tab generation stable across a reload of the same pairing link, while a full re-pair creates a new generation. The active peer is fenced by that unique generation/session ID, so a second client cannot silently replace it.
 
-The device receives commands on its socket and sends replies on the same
-socket. The dashboard sends commands on its socket and receives device
-messages on that socket. OkHttp protocol pings keep the device connection
-healthy. The dashboard uses the socket's open state as its connection state.
+The Worker forwards these message kinds only:
 
-## Presence
-
-The Durable Object derives presence from attached sockets whose
-`readyState === WebSocket.OPEN`. A device connection broadcasts
-`room.presence` to clients. A client connection broadcasts
-`room.clientPresence` to the device.
-
-The Durable Object does not persist presence timestamps or schedule presence
-alarms. Closing the last socket for a role immediately broadcasts that role's
-offline state.
-
-## Envelope delivery
-
-Room messages use the v1 envelope from `protocol.ts`.
-
-```json
-{ "v": 1, "id": "msg_01J...", "type": "state.get", "ts": 1787520000000, "payload": {}, "replyTo": "msg_01J..." }
+```text
+signal.hello
+signal.ready
+signal.peer
+signal.offer
+signal.answer
+signal.ice
+signal.complete
+signal.error
 ```
 
-The room validates known types, rejects session-only types, enforces the
-payload limit, and rate-limits each socket. Commands go directly to an open
-device socket. If the device is offline, the client receives an error instead
-of creating an unbounded mailbox. Device messages are broadcast only to open
-client sockets. Nothing is replayed after reconnect.
+It rejects application envelopes and binary data. Its Durable Object is a disposable rendezvous coordinator, not calibration state or a runtime relay.
 
-Delivery is at-most-once. The dashboard requests a fresh state snapshot after
-it connects or the device becomes available. Calibration flows remain
-user-driven and handle missing replies with their existing timeouts.
+## DataChannels
 
-## Command replies
+The browser creates two ordered, reliable channels. The TV accepts only the same labels and closes unknown channels.
 
-Unless a command starts a calibration session, the TV replies with
-`state.snapshot` and sets `replyTo` to the command id. The explicit exceptions
-are:
+### `control`
 
-| Command family | Reply or event |
-| --- | --- |
-| `calibration.export` | `calibration.exported` |
-| `diagnostics.effects` | `diagnostics.effects` |
-| `diagnostics.deviceInfo` | `diagnostics.deviceInfo` |
-| `probe.status` | `probe.status` |
-| `calibrationSession.*` and `measurement.*` | session lifecycle/events |
+Text JSON carries the v1 application envelope and the `sweetspot.transport` capability handshake. It carries commands, request/reply messages, TV state, calibration job state and actions, diagnostics, cancellation, and application ping/RTT probes. Control has its own event path and is never queued behind PCM.
 
-Every command and event still uses the shared payload validator. A message
-without a validator is rejected at the room boundary.
+Every UTF-8 control message, including its envelope and payload, is limited to
+16 KiB. Both endpoints validate the byte length before parsing or queueing it.
+The browser also validates outbound message direction and payload shape, so a
+remote client cannot send TV-owned candidate or validation decisions.
 
-## Lifecycle
+### `capture`
 
-Cloudflare may hibernate or restart the Durable Object while sockets remain
-attached. Socket attachments restore the role and rate-limit identity when the
-object resumes; no command or replay queue is persisted.
-The browser must request a fresh state snapshot after reconnect. Safety-critical
-calibration candidate and rollback state is persisted by the TV, not by this relay.
+Binary frames carry only the capture stream. The browser honors `bufferedAmount` and `bufferedamountlow` with a bounded queue. The initial limits are 16 KiB PCM chunks and 32 KiB complete frames. A slow receiver rejects the current capture when bounded work fills; microphone acquisition is never paused and resumed inside one sweep, and a whole recording is never accumulated in memory.
 
-During rollback the TV publishes the candidate with `validationStatus:
-"rolling_back"`. Clients must treat that state as pending recovery, disable
-validation and acceptance, and continue to rely on the next TV snapshot.
+The TV publishes `calibration.capture.started` only after it accepts the
+TV-issued capture action. The browser sends `capture.begin` only after that
+barrier, then waits for a cumulative eight-chunk receive window. The TV
+publishes the next window after each eight accepted chunks. This application
+window complements SCTP `bufferedAmount` backpressure and keeps the TV's
+partial-file writer from being overrun.
+
+The job start payload may select `auto` or `advanced`. Auto can stop optional
+refinement once the mandatory solution is sufficient. Advanced continues the
+optional forward and backward positions before staging. The mode is persisted
+in the TV job view and is never inferred or decided by the browser.
+
+## Capability handshake
+
+After `control` opens, both peers exchange a `sweetspot.transport` message containing:
+
+```text
+protocolVersion
+transportVersion
+captureStreamVersion
+buildId
+channels: ["control", "capture"]
+maxCaptureChunkBytes
+sessionId
+```
+
+The peers enter `direct` only after both channels are open and the versions and channel contract match. Incompatible versions produce a clear protocol error. Optional capabilities may be added only with an explicit compatibility rule.
+
+## Capture stream format
+
+Every frame starts with a 16-byte big-endian header:
+
+```text
+bytes 0..3   ASCII SSCS
+bytes 4..5   uint16 stream version, currently 1
+byte 6       kind: 1 begin, 2 chunk, 3 end
+byte 7       reserved, must be zero
+bytes 8..11  uint32 JSON header length
+bytes 12..15 uint32 PCM payload length
+```
+
+The JSON header is UTF-8. Begin and end frames have no payload. Chunk payloads are little-endian Float32 mono PCM and must be non-empty, Float32 aligned, and no larger than 16 KiB. Complete frames must be no larger than 32 KiB.
+
+Begin headers identify `sessionId`, `captureId`, metadata, and optional expected sample and byte counts. End headers identify the same capture and contain chunk count, final sample count, final byte count, final SHA-256, and complete capture metadata. The metadata capture ID, counts, and content hash must agree with the frame header and end values.
+
+The Android receiver writes chunks to a bounded `.partial` file, requires contiguous sequence numbers, accepts an exact duplicate idempotently, rejects conflicting duplicates and gaps, updates SHA-256/sample/byte counts incrementally, and atomically renames the file only after all checks pass. Orphan partial and ready files are removed on recovery. A finalized file is passed to the TV calibration engine and deleted after the engine has persisted or rejected the capture.
+
+## Reconnect and fencing
+
+Application state is owned by the TV, not by browser presence. The direct transport exposes `idle`, `pairing`, `signaling`, `connecting`, `direct`, `reconnecting`, `failed`, and `closed` states.
+
+- A transient peer disconnect enters a grace period and does not cancel a TV-owned job.
+- A failed peer may perform an ICE restart through fresh signaling.
+- A browser reload restores the pairing link's tab generation, reconnects, and requests current TV state and job state.
+- A service restart restores persisted TV state and creates a fresh pairing session.
+- A broken capture stream is rejected and may retry the same TV-issued action; prior accepted evidence remains.
+- Old callbacks, envelopes, candidates, and capture frames cannot mutate a newer session.
+- Pair-code rotation never kills an already authenticated direct session.
+
+Normal UI reduces diagnostics to `Connected directly`, `Reconnecting…`, `TV offline`, or an actionable direct-path error. Developer diagnostics may include ICE state, candidate classification, RTT, bytes, buffered capture bytes, reconnect count, signaling round trip, and capture progress. Never log pair secrets or other authentication material.
+
+The `diagnostics.transport` control request exposes the TV's bounded peer snapshot to the dashboard's developer details. The TV redacts the session generation to its final eight characters and includes the selected candidate type, protocol, and RTT when the native WebRTC stats report them; unavailable values remain `null`.
+
+## Cloud-independence invariant
+
+After both DataChannels open, block the Worker and the public Internet while preserving local Wi-Fi. Commands, state, EQ changes, cancellation, PCM transfer, analysis, and calibration completion must continue over the direct peer. If that test fails, the implementation still has an unintended runtime cloud dependency.

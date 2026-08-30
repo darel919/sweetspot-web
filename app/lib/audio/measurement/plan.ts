@@ -8,11 +8,11 @@ import { DEFAULT_POSITION_SPECS, type PositionSpec } from './physical-position'
 
 export interface CalibrationPosition extends PositionSpec {}
 
-export const CALIBRATION_POSITIONS: readonly [CalibrationPosition, ...CalibrationPosition[]] = DEFAULT_POSITION_SPECS
+const CALIBRATION_POSITIONS: readonly [CalibrationPosition, ...CalibrationPosition[]] = DEFAULT_POSITION_SPECS
 
-export const MAX_ATTEMPT_COUNT = 2
-export const MIN_POSITION_COUNT = 3
-export const MAX_POSITION_COUNT = 5
+const MAX_ATTEMPT_COUNT = 2
+const MIN_POSITION_COUNT = 3
+const MAX_POSITION_COUNT = 5
 
 export function requiresRemoteContinue(context: Pick<MeasurementContext, 'positionIndex' | 'repairChannel' | 'attemptIndex'>): boolean {
   return context.positionIndex > 0 && context.attemptIndex === 0 && context.repairChannel === 'both'
@@ -23,22 +23,6 @@ export interface MeasurementGroup {
   positionIndex: number
   positionCount: number
   channel: CalibrationChannel
-}
-
-export function measurementGroupForContext(context: MeasurementContext): MeasurementGroup {
-  return {
-    positionId: context.positionId,
-    positionIndex: context.positionIndex,
-    positionCount: context.positionCount,
-    channel: context.channel,
-  }
-}
-
-export function measurementGroupKey(group: {
-  positionId: CalibrationPositionId
-  channel?: CalibrationChannel
-}): string {
-  return group.positionId
 }
 
 export function measurementContextForPosition(

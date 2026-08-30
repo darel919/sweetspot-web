@@ -9,7 +9,7 @@ import type { MeasurementAnalysis, ResponsePoint } from './response'
 export type CaptureFailureClass = 'systemic' | 'local' | 'spatial'
 export type CaptureChannel = 'left' | 'right'
 
-export type SpatialOffsetCm = Omit<CalibrationPositionTarget, 'reference'>
+type SpatialOffsetCm = Omit<CalibrationPositionTarget, 'reference'>
 
 export interface PositionSpec {
   id: CalibrationPositionId
@@ -178,7 +178,7 @@ export function channelMeasurement(
   return position[channel]
 }
 
-export function acceptedChannelCount(position: PositionMeasurement): number {
+function acceptedChannelCount(position: PositionMeasurement): number {
   return Number(position.left.kind === 'accepted') + Number(position.right.kind === 'accepted')
 }
 
@@ -215,21 +215,4 @@ export function withChannelMeasurement(
 
 export function acceptedPositionCount(positions: readonly PositionMeasurement[]): number {
   return positions.filter(isPositionAccepted).length
-}
-
-export function acceptedResponse(
-  position: PositionMeasurement,
-  channel: CaptureChannel,
-): ResponsePoint[] | null {
-  const measurement = channelMeasurement(position, channel)
-  return measurement.kind === 'accepted' ? measurement.response : null
-}
-
-export function toChannelRecord(
-  position: PositionMeasurement,
-  channel: CaptureChannel,
-): { position: PositionMeasurement; channel: CaptureChannel; analysis: MeasurementAnalysis } | null {
-  const measurement = channelMeasurement(position, channel)
-  if (measurement.kind !== 'accepted') return null
-  return { position, channel, analysis: measurement.analysis }
 }

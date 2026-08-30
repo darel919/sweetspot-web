@@ -16,7 +16,7 @@ import {
 } from './physical-position'
 import type { MeasurementRecord } from './aggregation'
 
-export type LedgerSubmeasurement =
+type LedgerSubmeasurement =
   | {
       kind: 'accepted'
       captureKey: string
@@ -39,7 +39,7 @@ export type LedgerSubmeasurement =
       quality: CaptureQuality
     }
 
-export interface LedgerCapture {
+interface LedgerCapture {
   captureKey: string
   context: MeasurementContext
   left: LedgerSubmeasurement
@@ -66,7 +66,7 @@ export function createPositionLedger(sessionId: string): PositionLedger {
   return { schemaVersion: 2, sessionId, captures: [], systemicCenterFailures: 0 }
 }
 
-export function captureKey(context: MeasurementContext): string {
+function captureKey(context: MeasurementContext): string {
   return [
     context.phase,
     context.positionId,
@@ -159,7 +159,7 @@ export function appendCompositeCapture(
   }
 }
 
-export function acceptedChannel(
+function acceptedChannel(
   ledger: PositionLedger,
   positionId: MeasurementContext['positionId'],
   channel: CaptureChannel,
@@ -274,5 +274,3 @@ export function completeAcceptedPositionCount(ledger: PositionLedger): number {
     && channelMeasurement(position, 'right').kind === 'accepted',
   ).length
 }
-
-export const acceptedPositionCount = completeAcceptedPositionCount

@@ -5,7 +5,7 @@ import type { ResponsePoint } from '../measurement/response'
 import { smoothResponsePoints } from '../measurement/response'
 import { detectLfCapability, targetPointsFor, type LfCapability } from './target'
 
-export type CorrectionStrength = 'off' | 'gentle' | 'normal' | 'strong'
+type CorrectionStrength = 'off' | 'gentle' | 'normal' | 'strong'
 
 export interface CorrectionOptions {
   strength?: CorrectionStrength

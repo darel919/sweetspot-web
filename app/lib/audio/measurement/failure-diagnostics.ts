@@ -52,15 +52,6 @@ export function countFailedPhysicalTakes(takes: readonly PhysicalTakeDiagnostics
   }, 0)
 }
 
-export function failedPhysicalTakePositions(takes: readonly PhysicalTakeDiagnostics[]): CalibrationPositionId[] {
-  const positions = new Set<CalibrationPositionId>()
-  for (const take of takes) {
-    const failed = requiredChannels(take.context).some((channel) => isFailedStatus(take[channel].analysisStatus))
-    if (failed) positions.add(take.context.positionId)
-  }
-  return [...positions]
-}
-
 export function summarizeMarkerProbe(
   takes: readonly PhysicalTakeDiagnostics[],
   unresolved: readonly FailedTakeDiagnostic[],
